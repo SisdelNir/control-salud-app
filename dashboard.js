@@ -113,7 +113,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const patients = JSON.parse(localStorage.getItem('doctor_patients_list') || '[]');
 
         contentArea.innerHTML = `
-            <div class="widget-card animate-in" style="max-width: 950px; margin: 0 auto; padding: 50px 40px;">
+            <div class="widget-card animate-in" style="max-width: 950px; margin: 0 auto; padding: 50px 40px; border: 3px solid rgba(34, 211, 238, 0.45); box-shadow: 0 0 20px rgba(34, 211, 238, 0.15), inset 0 0 10px rgba(34, 211, 238, 0.05); border-radius: 24px;">
                 <h3 class="widget-title" style="color: var(--accent); border-bottom: 2px solid rgba(255,255,255,0.05); padding-bottom: 25px; font-size: 32px; display: flex; align-items: center;">
                     <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-right: 15px; filter: drop-shadow(0 0 5px rgba(34, 211, 238, 0.5));">
                         <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/>
@@ -227,7 +227,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const patientName = localStorage.getItem(`patient_name_${selectedPatientQSL}`) || 'Paciente';
         contentArea.innerHTML = `
             <div class="dashboard-grid">
-                <div class="widget-card animate-in" style="padding: 40px; margin-bottom: 30px;">
+                <div class="widget-card animate-in" style="padding: 40px; margin-bottom: 30px; border: 3px solid rgba(34, 211, 238, 0.45); box-shadow: 0 0 20px rgba(34, 211, 238, 0.15), inset 0 0 10px rgba(34, 211, 238, 0.05); border-radius: 24px;">
                     <h3 class="widget-title" style="font-size: 28px; color: var(--accent); border-bottom: 2px solid rgba(255,255,255,0.05); padding-bottom: 20px;">Expediente Clínico</h3>
                     <div style="margin: 25px 0;">
                         <p style="font-size: 22px; color: var(--text-main); font-weight: 600;">${patientName} <span style="color: var(--accent); font-weight: normal; font-size: 20px;">(${selectedPatientQSL})</span></p>
@@ -337,7 +337,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
                 </div>
 
-                <div class="widget-card animate-in" style="animation-delay: 0.1s">
+                <div class="widget-card animate-in" style="animation-delay: 0.1s; border: 3px solid rgba(34, 211, 238, 0.45); box-shadow: 0 0 20px rgba(34, 211, 238, 0.15), inset 0 0 10px rgba(34, 211, 238, 0.05); border-radius: 24px;">
                     <h3 class="widget-title">Control de Conexión</h3>
                     <p style="font-size: 16px; color: var(--text-muted); margin-bottom: 20px;">
                         Active este código para que el paciente reciba las alertas en su dispositivo móvil.
@@ -877,7 +877,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderSettings() {
         const isDoc = userRole === 'medico';
         contentArea.innerHTML = `
-            <div class="widget-card animate-in" style="max-width: 500px; margin: 0 auto;">
+            <div class="widget-card animate-in" style="max-width: 500px; margin: 0 auto; border: 3px solid rgba(34, 211, 238, 0.45); box-shadow: 0 0 20px rgba(34, 211, 238, 0.15), inset 0 0 10px rgba(34, 211, 238, 0.05); border-radius: 24px; padding: 40px;">
                 <h3 class="widget-title">Datos del Médico</h3>
                 <div class="input-group" style="margin-bottom: 20px;">
                     <label>Nombre Maestro (Médico)</label>
