@@ -366,6 +366,22 @@ document.addEventListener('DOMContentLoaded', () => {
         `;
 
         if (userRole === 'medico') {
+            const inputsToAutoSave = Array.from(contentArea.querySelectorAll('input:not([type="checkbox"]):not([type="button"]):not([type="time"]), textarea'));
+            inputsToAutoSave.forEach((input, index) => {
+                input.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === 'Tab') {
+                        window.savePatientDataBtn(true);
+
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            if (index + 1 < inputsToAutoSave.length) {
+                                inputsToAutoSave[index + 1].focus();
+                            }
+                        }
+                    }
+                });
+            });
+
             const addBtn = document.getElementById('add-btn');
             if (addBtn) {
                 addBtn.onclick = () => {
@@ -469,7 +485,7 @@ document.addEventListener('DOMContentLoaded', () => {
         loadSection('reminders'); // Recarga en la misma página del paciente
     };
 
-    window.savePatientDataBtn = () => {
+    window.savePatientDataBtn = (silent = false) => {
         const data = getPatientData(selectedPatientQSL);
         data.illness = document.getElementById('patient-illness').value.trim();
         data.allergies = document.getElementById('patient-allergies').value.trim();
@@ -483,20 +499,25 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // Si hay algo escrito en glucosa sin guardar, guardarlo también
-        const glucoseInput = document.getElementById('patient-glucose').value.trim();
+        const glucoseInput = document.getElementById('patient-glucose');
         if (glucoseInput) {
-            if (!data.glucoseHistory) data.glucoseHistory = [];
-            const now = new Date();
-            const dateStr = now.toLocaleDateString('es-ES') + ' a las ' + now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
-            data.glucoseHistory.unshift({ value: glucoseInput, date: dateStr });
-            if (data.glucoseHistory.length > 2) data.glucoseHistory = data.glucoseHistory.slice(0, 2);
+            const glucoseVal = glucoseInput.value.trim();
+            if (glucoseVal && !silent) {
+                if (!data.glucoseHistory) data.glucoseHistory = [];
+                const now = new Date();
+                const dateStr = now.toLocaleDateString('es-ES') + ' a las ' + now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+                data.glucoseHistory.unshift({ value: glucoseVal, date: dateStr });
+                if (data.glucoseHistory.length > 2) data.glucoseHistory = data.glucoseHistory.slice(0, 2);
+            }
         }
 
         data.notes = document.getElementById('patient-notes').value.trim();
         savePatientData(selectedPatientQSL, data);
 
-        window.showElegantAlert('¡Guardado Exitoso!', 'Datos del paciente actualizados correctamente en el sistema.');
-        loadSection('overview'); // Refresca para mostrar la glucosa si se auto-agregó
+        if (!silent) {
+            window.showElegantAlert('¡Guardado Exitoso!', 'Datos del paciente actualizados correctamente en el sistema.');
+            loadSection('overview'); // Refresca para mostrar la glucosa si se auto-agregó
+        }
     };
 
     window.activateCode = (qsl) => {
