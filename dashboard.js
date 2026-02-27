@@ -559,8 +559,10 @@ document.addEventListener('DOMContentLoaded', () => {
                                 <input type="number" id="patient-glucose-quick" placeholder="Ej: 98" style="flex: 1; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 10px 15px; color: white; font-size: 16px;">
                                 <button class="btn-primary" style="padding: 0 20px; border-radius: 12px; font-size: 14px; background: rgba(34, 211, 238, 0.15); color: var(--accent); border: 1px solid rgba(34, 211, 238, 0.3);" onclick="window.addQuickGlucose()">Registrar</button>
                             </div>
-                            <div style="font-size: 12px; color: rgba(255,255,255,0.5); text-align: left; max-height: 40px; overflow-y: auto;">
-                                ${(data.glucoseHistory && data.glucoseHistory.length > 0) ? `Último: <strong style="color:var(--accent);">${data.glucoseHistory[0].value}</strong> <span style="font-size:10px;">(${data.glucoseHistory[0].date})</span>` : 'Sin registros de glucosa'}
+                            <div style="font-size: 12px; color: rgba(255,255,255,0.5); text-align: left; max-height: 80px; overflow-y: auto;">
+                                ${(data.glucoseHistory && data.glucoseHistory.length > 0) ?
+                        data.glucoseHistory.map((hist, i) => `<div style="padding-bottom: 4px; ${i === 0 ? 'border-bottom: 1px dotted rgba(255,255,255,0.1); margin-bottom: 4px;' : ''}">${i === 0 ? 'Último' : 'Anterior'}: <strong style="color:var(--accent); font-size: 13px;">${hist.value}</strong> <span style="font-size:10px; opacity:0.8;">(${hist.date})</span></div>`).join('')
+                        : 'Sin registros de glucosa'}
                             </div>
                         </div>
                     ` : ''}
