@@ -42,31 +42,61 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     function handleDoctorLogin() {
-        const name = docNameInput.value.trim();
+        const user = docNameInput.value.trim();
         const pass = docPassInput.value.trim();
 
-        if (!name || !pass) {
-            showToast('Complete nombre y clave', 'error');
+        if (!user || !pass) {
+            showToast('Complete usuario y clave', 'error');
             return;
         }
 
-        const storedName = localStorage.getItem('doctor_master_name') || 'Médico';
-        let storedPass = 'S2026GUATE';
-        try {
-            if (localStorage.getItem('doctor_master_pass')) {
-                storedPass = atob(localStorage.getItem('doctor_master_pass'));
+        // 1. Inicializar tabla Medicos si no existe (Migración)
+        let medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+        if (medicos.length === 0) {
+            const legacyName = localStorage.getItem('doctor_master_name') || 'Médico Maestro';
+            const legacyPass = localStorage.getItem('doctor_master_pass') || btoa('S2026GUATE'); // defaults
+            const newDocId = 'MED-' + Date.now();
+
+            // Migrar lista de pacientes
+            const oldList = localStorage.getItem('doctor_patients_list');
+            if (oldList) {
+                localStorage.setItem(`doctor_patients_list_${newDocId}`, oldList);
+                // No lo borramos de momento por seguridad, pero ya está copiado.
             }
-        } catch (e) {
-            // Ignorar error de descifrado y usar default
+
+            medicos.push({
+                id_medico: newDocId,
+                nombre_completo: legacyName,
+                especialidad: 'Medicina General',
+                cedula_profesional: '000000',
+                usuario: legacyName,    // en modo antiguo el usuario era el nombre
+                password_hash: legacyPass
+            });
+            // También agregar el usuario fallback
+            medicos.push({
+                id_medico: 'MED-MASTER',
+                nombre_completo: 'Administrador Principal',
+                especialidad: 'Admin',
+                cedula_profesional: '000000',
+                usuario: 'MEDICO',
+                password_hash: btoa('S2026GUATE')
+            });
+            localStorage.setItem('tabla_medicos', JSON.stringify(medicos));
         }
 
-        if (
-            (name.toUpperCase() === storedName.toUpperCase() && pass === storedPass) ||
-            (name.toUpperCase() === 'MEDICO' && pass === 'S2026GUATE') // Fallback maestro
-        ) {
-            loginSuccess(storedName, 'medico', 'MASTER');
+        // 2. Buscar en tabla Medicos
+        const passHash = btoa(pass); // Encriptación básica simulada
+        const medicoEncontrado = medicos.find(m =>
+            m.usuario.toUpperCase() === user.toUpperCase() &&
+            m.password_hash === passHash
+        );
+
+        if (medicoEncontrado) {
+            // Guardamos todo en sesión
+            localStorage.setItem('current_doctor_id', medicoEncontrado.id_medico);
+            loginSuccess(medicoEncontrado.nombre_completo, 'medico', medicoEncontrado.id_medico);
         } else {
-            showToast('Nombre o clave incorrectos', 'error');
+            showToast('Usuario o clave incorrectos', 'error');
         }
     }
 

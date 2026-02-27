@@ -70,6 +70,12 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // 2. Gestión de Datos Médico
+    function getDocPatientsKey() {
+        const id = localStorage.getItem('current_doctor_id');
+        // Si entra como MASTER (fallback/admin genérico sin pacientes propios), usa global, sino su propio namespace
+        return id === 'MED-MASTER' ? 'doctor_patients_list' : (id ? `doctor_patients_list_${id}` : 'doctor_patients_list');
+    }
+
     function getPatientData(qsl) {
         const data = localStorage.getItem(`patient_data_${qsl}`);
         return data ? JSON.parse(data) : { illness: '', meds: [] };
@@ -77,11 +83,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function savePatientData(qsl, data) {
         localStorage.setItem(`patient_data_${qsl}`, JSON.stringify(data));
-        // Registrar QSL en la lista global de pacientes del médico si no existe
-        let list = JSON.parse(localStorage.getItem('doctor_patients_list') || '[]');
+        // Registrar QSL en la lista de pacientes del médico
+        const key = getDocPatientsKey();
+        let list = JSON.parse(localStorage.getItem(key) || '[]');
         if (!list.includes(qsl)) {
             list.push(qsl);
-            localStorage.setItem('doctor_patients_list', JSON.stringify(list));
+            localStorage.setItem(key, JSON.stringify(list));
         }
     }
 
@@ -110,7 +117,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- VISTAS DEL MÉDICO ---
 
     function renderDoctorHome() {
-        const patients = JSON.parse(localStorage.getItem('doctor_patients_list') || '[]');
+        const key = getDocPatientsKey();
+        const patients = JSON.parse(localStorage.getItem(key) || '[]');
 
         contentArea.innerHTML = `
             <div class="widget-card animate-in" style="max-width: 950px; margin: 0 auto; padding: 50px 40px; border: 3px solid rgba(34, 211, 238, 0.45); box-shadow: 0 0 20px rgba(34, 211, 238, 0.15), inset 0 0 10px rgba(34, 211, 238, 0.05); border-radius: 24px;">
@@ -191,7 +199,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 let baseQsl = `${firstLetter}${secondLetter}${last4Phone}`;
                 let qsl = baseQsl;
 
-                const existingPatients = JSON.parse(localStorage.getItem('doctor_patients_list') || '[]');
+                const key = getDocPatientsKey();
+                const existingPatients = JSON.parse(localStorage.getItem(key) || '[]');
                 let counter = 1;
                 while (existingPatients.includes(qsl)) {
                     qsl = `${baseQsl}-${counter}`;
@@ -243,9 +252,10 @@ document.addEventListener('DOMContentLoaded', () => {
             localStorage.removeItem(`patient_name_${qsl}`);
             localStorage.removeItem(`patient_data_${qsl}`);
             localStorage.removeItem(`active_qsl_${qsl}`);
-            let list = JSON.parse(localStorage.getItem('doctor_patients_list') || '[]');
+            const key = getDocPatientsKey();
+            let list = JSON.parse(localStorage.getItem(key) || '[]');
             list = list.filter(id => id !== qsl);
-            localStorage.setItem('doctor_patients_list', JSON.stringify(list));
+            localStorage.setItem(key, JSON.stringify(list));
             loadSection('overview');
         }
     };
