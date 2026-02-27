@@ -357,7 +357,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
                     ${userRole === 'medico' ? `
                         <div style="display: flex; flex-direction: column; gap: 15px; margin-top: 25px;">
-                            <button id="btn-new-patient" class="btn-primary" style="width: 100%; background: var(--primary); padding: 20px; font-size: 16px;">+ Registrar Nuevo Paciente</button>
+                            <button id="btn-new-patient" class="btn-primary" style="width: 100%; background: var(--primary); padding: 20px; font-size: 16px;">+ Registro de Pacientes</button>
                             <button id="btn-list-patients" class="btn-primary" style="width: 100%; background: rgba(255,255,255,0.05); padding: 20px; font-size: 16px;">Volver a Lista de Pacientes</button>
                         </div>
                     ` : ''}
