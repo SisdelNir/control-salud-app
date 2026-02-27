@@ -173,9 +173,14 @@ document.addEventListener('DOMContentLoaded', () => {
             const phone = document.getElementById('new-patient-phone').value.trim();
             const illness = document.getElementById('new-patient-illness').value.trim();
 
+            const nameParts = name.trim().split(/\s+/);
+            if (nameParts.length < 2) {
+                window.showElegantAlert('Atención', 'Por favor, ingrese al menos un nombre y un apellido.', true);
+                return;
+            }
+
             if (name && phone.length >= 4) {
                 // Generar QSL Automático (1ra letra nombre + 1ra letra primer apellido + últimos 4 dígitos del teléfono)
-                const nameParts = name.trim().split(/\s+/);
                 const firstLetter = nameParts[0] ? nameParts[0].charAt(0).toUpperCase() : 'A';
                 const secondLetter = nameParts.length > 1 ? nameParts[1].charAt(0).toUpperCase() : 'X';
 
