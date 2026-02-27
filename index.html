@@ -59,6 +59,12 @@
                             autocomplete="off">
                         <div class="input-focus-line"></div>
                     </div>
+                    <div style="text-align: right; margin-bottom: 20px; font-size: 13px;">
+                        <a href="#" id="open-register-modal"
+                            style="color: var(--accent); text-decoration: none; transition: 0.3s; padding: 4px; display: inline-block;">
+                            ¿Aún no tienes acceso? <strong>Solicitar a SISDEL</strong>
+                        </a>
+                    </div>
                 </div>
 
                 <div id="patient-fields">
@@ -88,6 +94,47 @@
             <footer>
                 <p>&copy; 2026 Control de Salud. Todos los derechos reservados.</p>
             </footer>
+        </div>
+
+        <!-- Registro Médico Modal -->
+        <div id="register-modal"
+            style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 1000; justify-content: center; align-items: center; padding: 20px;">
+            <div class="glass-card animate-in"
+                style="width: 100%; max-width: 450px; padding: 30px; box-shadow: 0 0 30px rgba(34, 211, 238, 0.2); border: 2px solid rgba(34, 211, 238, 0.45);">
+                <div
+                    style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 15px;">
+                    <h3 style="margin: 0; color: #fff; font-size: 20px;">Solicitud de Acceso a SISDEL</h3>
+                    <button id="close-register-modal"
+                        style="background: none; border: none; color: white; font-size: 24px; cursor: pointer;">&times;</button>
+                </div>
+                <p style="font-size: 14px; color: rgba(255,255,255,0.7); margin-bottom: 25px;">Por favor, complete estos
+                    datos para validar su credencial médica y habilitar su portal.</p>
+                <form id="register-form">
+                    <div class="input-group" style="margin-bottom: 15px;">
+                        <label for="reg-name">NOMBRE COMPLETO DEL MÉDICO</label>
+                        <input type="text" id="reg-name" required placeholder="Ej. Dr. Juan Pérez" autocomplete="off">
+                    </div>
+                    <div class="input-group" style="margin-bottom: 15px;">
+                        <label for="reg-license">NÚMERO DE LICENCIA / COLEGIADO *</label>
+                        <input type="text" id="reg-license" required placeholder="Ej. 12345" autocomplete="off"
+                            style="border-bottom: 1px solid var(--accent);">
+                    </div>
+                    <div class="input-group" style="margin-bottom: 15px;">
+                        <label for="reg-specialty">ESPECIALIDAD</label>
+                        <input type="text" id="reg-specialty" required placeholder="Ej. Medicina General"
+                            autocomplete="off">
+                    </div>
+                    <div class="input-group" style="margin-bottom: 25px;">
+                        <label for="reg-contact">CORREO O TELÉFONO DE CONTACTO</label>
+                        <input type="text" id="reg-contact" required placeholder="Poder notificarle sus claves..."
+                            autocomplete="off">
+                    </div>
+                    <button type="submit" class="btn-primary"
+                        style="width: 100%; background: linear-gradient(135deg, var(--accent) 0%, #0d9488 100%);">
+                        Enviar Solicitud
+                    </button>
+                </form>
+            </div>
         </div>
     </main>
 

@@ -155,4 +155,52 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 3000);
 
     }
+
+    // Modal de Registro Médico SISDEL
+    const openRegBtn = document.getElementById('open-register-modal');
+    const closeRegBtn = document.getElementById('close-register-modal');
+    const regModal = document.getElementById('register-modal');
+    const regForm = document.getElementById('register-form');
+
+    if (openRegBtn && regModal) {
+        openRegBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            regModal.style.display = 'flex';
+        });
+
+        closeRegBtn.addEventListener('click', () => {
+            regModal.style.display = 'none';
+        });
+
+        regForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+
+            const name = document.getElementById('reg-name').value.trim();
+            const license = document.getElementById('reg-license').value.trim();
+            const spec = document.getElementById('reg-specialty').value.trim();
+            const contact = document.getElementById('reg-contact').value.trim();
+
+            if (!name || !license) {
+                showToast('Revisa los campos requeridos', 'error');
+                return;
+            }
+
+            let requests = JSON.parse(localStorage.getItem('sisdel_requests') || '[]');
+            requests.push({
+                id: 'REQ-' + Date.now(),
+                name,
+                license,
+                spec,
+                contact,
+                date: new Date().toLocaleDateString('es-ES')
+            });
+            localStorage.setItem('sisdel_requests', JSON.stringify(requests));
+
+            regForm.reset();
+            regModal.style.display = 'none';
+
+            // Mostrar mensaje de éxito nativo para mejor visibilidad
+            alert('Su solicitud ha sido enviada exitosamente a SISDEL. Su número de licencia está bajo revisión. Nos comunicaremos con usted al ' + contact + ' para entregarle su Usuario y Clave de Acceso temporal.');
+        });
+    }
 });
