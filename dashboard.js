@@ -255,7 +255,14 @@ document.addEventListener('DOMContentLoaded', () => {
                             <input type="text" id="patient-phone" value="${data.phone || ''}" placeholder="Ej: +502 1234 5678" ${userRole === 'paciente' ? 'disabled' : ''}>
                         </div>
                         <div class="input-group">
-                            <label>Nivel de Glucosa actual (Ayunas/Pos)</label>
+                            <label style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                                <span>Nivel de Glucosa actual (Ayunas/Pos)</span>
+                                ${userRole === 'medico' ? `
+                                <span style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer; color:var(--accent); text-transform:none; font-weight:normal;">
+                                    Activar para Paciente
+                                    <input type="checkbox" id="patient-glucose-enabled" onchange="window.toggleGlucoseFeature(this.checked)" ${data.glucoseEnabled ? 'checked' : ''} style="width: 16px; height: 16px; margin: 0; accent-color: var(--accent);">
+                                </span>` : ''}
+                            </label>
                             <div style="display: flex; gap: 10px; align-items: flex-start;">
                                 <input type="text" id="patient-glucose" placeholder="Nuevo nivel (Ej: 98 mg/dL)" style="flex:1;" ${userRole === 'paciente' ? 'disabled' : ''}>
                                 ${userRole === 'medico' ? `<button class="btn-primary" style="padding: 0 15px; height: 50px; font-size: 14px; margin-bottom: 12px; border-radius: 8px;" onclick="window.addGlucose()">Añadir</button>` : ''}
@@ -421,6 +428,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     }
 
+    window.toggleGlucoseFeature = (enabled) => {
+        const data = getPatientData(selectedPatientQSL);
+        data.glucoseEnabled = enabled;
+        savePatientData(selectedPatientQSL, data);
+    };
+
     window.addGlucose = () => {
         const input = document.getElementById('patient-glucose');
         const val = input.value.trim();
@@ -463,6 +476,11 @@ document.addEventListener('DOMContentLoaded', () => {
         data.blood = document.getElementById('patient-blood').value.trim();
         data.weight = document.getElementById('patient-weight').value.trim();
         data.phone = document.getElementById('patient-phone').value.trim();
+
+        const enabledCheckbox = document.getElementById('patient-glucose-enabled');
+        if (enabledCheckbox) {
+            data.glucoseEnabled = enabledCheckbox.checked;
+        }
 
         // Si hay algo escrito en glucosa sin guardar, guardarlo también
         const glucoseInput = document.getElementById('patient-glucose').value.trim();
@@ -547,7 +565,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         `}
                     </div>
                     
-                    ${isPaciente ? `
+                    ${isPaciente && data.glucoseEnabled ? `
                         <div style="background: rgba(0, 0, 0, 0.2); border: 1px dashed rgba(255, 255, 255, 0.1); border-radius: 20px; padding: 15px; margin-bottom: 25px; display: flex; flex-direction: column; gap: 10px;">
                             <div style="display: flex; justify-content: space-between; align-items: center;">
                                 <label style="font-size: 13px; color: rgba(255,255,255,0.7); text-transform: uppercase; font-weight: 600; letter-spacing: 1px; display: flex; align-items: center; gap: 6px;">
