@@ -135,11 +135,11 @@ document.addEventListener('DOMContentLoaded', () => {
                         <input type="text" id="new-patient-name" placeholder="Ingrese nombre y apellido...">
                     </div>
                     <div class="input-group">
-                        <label>Teléfono (Usado para crear QSL)</label>
+                        <label>Teléfono</label>
                         <input type="text" id="new-patient-phone" placeholder="Ingrese su teléfono...">
                     </div>
                     <div class="input-group">
-                        <label>Código de Acceso QSL</label>
+                        <label>Código de Acceso</label>
                         <input type="text" id="new-patient-qsl" placeholder="Generado automáticamente al crear" disabled style="opacity: 0.5;">
                     </div>
                     <div class="input-group">
@@ -163,7 +163,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             <div class="med-item patient-row" data-search="${name.toLowerCase()} ${qsl.toLowerCase()} ${(data.phone || '').toLowerCase()}" style="cursor: pointer; transition: 0.3s; padding: 20px; background: rgba(255,255,255,0.03); border-radius: 16px;" onclick="window.selectPatient('${qsl}')">
                                 <div class="med-info">
                                     <h4 style="color: white; font-size: 24px; margin-bottom: 10px;">${name}</h4>
-                                    <p style="color: var(--text-muted); font-size: 18px;">QSL: <b style="color:var(--accent); font-size: 20px;">${qsl}</b> | ${data.illness || 'Sin diagnóstico'}</p>
+                                    <p style="color: var(--text-muted); font-size: 18px;">Código: <b style="color:var(--accent); font-size: 20px;">${qsl}</b> | ${data.illness || 'Sin diagnóstico'}</p>
                                 </div>
                                 <div style="text-align: right; display: flex; flex-direction: column; gap: 12px;">
                                     <span class="status-badge" style="background: rgba(34, 211, 238, 0.1); padding: 12px 20px; font-size: 16px; font-weight: 700; display: inline-block; text-align: center;">Ver Detalle</span>
@@ -945,20 +945,32 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function renderSettings() {
         const isDoc = userRole === 'medico';
+        const docId = localStorage.getItem('current_doctor_id');
+        let docName = '';
+        if (isDoc) {
+            const medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            const doc = medicos.find(m => m.id_medico === docId);
+            docName = doc ? doc.usuario : (localStorage.getItem('doctor_master_name') || 'Médico');
+        }
+
         contentArea.innerHTML = `
             <div class="widget-card animate-in" style="max-width: 500px; margin: 0 auto; border: 3px solid rgba(34, 211, 238, 0.45); box-shadow: 0 0 20px rgba(34, 211, 238, 0.15), inset 0 0 10px rgba(34, 211, 238, 0.05); border-radius: 24px; padding: 40px;">
                 <h3 class="widget-title">Datos del Médico</h3>
                 <div class="input-group" style="margin-bottom: 20px;">
                     <label>Nombre Maestro (Médico)</label>
-                    <input type="text" id="new-doc-name" value="${isDoc ? (localStorage.getItem('doctor_master_name') || 'Médico') : ''}" ${!isDoc ? 'disabled' : ''}>
+                    <input type="text" id="new-doc-name" value="${docName}" disabled style="opacity: 0.7; cursor: not-allowed;">
+                </div>
+                <div class="input-group" style="margin-bottom: 20px;">
+                    <label>Clave de Acceso Actual *</label>
+                    <input type="password" id="current-doc-pass" placeholder="Ingresar clave actual para autorizar..." ${!isDoc ? 'disabled' : ''}>
                 </div>
                 <div class="input-group" style="margin-bottom: 20px;">
                     <label>Nueva Clave de Acceso</label>
                     <input type="password" id="new-doc-pass" placeholder="Ingresar nueva clave..." ${!isDoc ? 'disabled' : ''}>
                 </div>
                 ${isDoc ? `
-                    <button class="btn-primary" style="width: 100%; margin-bottom: 20px;" onclick="window.updateDocProfile()">GUARDAR CAMBIOS DE ACCESO</button>
-                ` : '<p style="font-size: 16px; color: var(--text-muted); opacity: 0.7;">Los pacientes gestionan su perfil mediante su código QSL único.</p>'}
+                    <button class="btn-primary" style="width: 100%; margin-bottom: 20px;" onclick="window.updateDocProfile()">GUARDAR CAMBIO DE CLAVE</button>
+                ` : '<p style="font-size: 16px; color: var(--text-muted); opacity: 0.7;">Los pacientes gestionan su perfil mediante su código único.</p>'}
                 <hr style="border:0; border-top: 1px solid var(--card-border); margin: 20px 0;">
                 <button class="btn-primary" style="width: 100%; background: var(--error);" onclick="localStorage.removeItem('user_qsl_code'); window.location.href='index.html';">CERRAR SESIÓN</button>
             </div>
@@ -967,17 +979,50 @@ document.addEventListener('DOMContentLoaded', () => {
 
     window.updateDocProfile = () => {
         const name = document.getElementById('new-doc-name').value.trim();
-        const pass = document.getElementById('new-doc-pass').value.trim();
+        const currentPass = document.getElementById('current-doc-pass').value.trim();
+        const newPass = document.getElementById('new-doc-pass').value.trim();
+
+        const docId = localStorage.getItem('current_doctor_id');
+        let medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+        const docIndex = medicos.findIndex(m => m.id_medico === docId);
+
+        if (docIndex === -1) return;
+
+        // Validar clave actual
+        if (!currentPass || btoa(currentPass) !== medicos[docIndex].password_hash) {
+            window.showElegantAlert('Error de Autorización', 'La clave actual ingresada es incorrecta. No se pueden guardar cambios.', true);
+            return;
+        }
+
         if (name) {
-            localStorage.setItem('doctor_master_name', name);
-            localStorage.setItem('user_real_name', name);
-            if (pass) {
-                localStorage.setItem('doctor_master_pass', btoa(pass));
-                window.showElegantAlert('Clave Actualizada', 'Nombre y Clave actualizados. Se aplicarán la próxima vez que ingrese.');
+            medicos[docIndex].usuario = name;
+            medicos[docIndex].nombre_completo = name;
+            localStorage.setItem('user_real_name', name); // Actualizar interfaz activa
+
+            // Si el master antiguo está activo
+            if (docId === 'MED-MASTER') {
+                localStorage.setItem('doctor_master_name', name);
+            }
+
+            if (newPass) {
+                const passHash = btoa(newPass);
+                medicos[docIndex].password_hash = passHash;
+
+                if (docId === 'MED-MASTER') {
+                    localStorage.setItem('doctor_master_pass', passHash);
+                }
+
+                window.showElegantAlert('Clave Actualizada', 'Nombre y Clave actualizados con éxito. Recuerde la nueva clave.');
             } else {
                 window.showElegantAlert('Perfil Actualizado', 'Nombre actualizado correctamente.');
             }
+
+            localStorage.setItem('tabla_medicos', JSON.stringify(medicos));
             updateUserDisplay();
+
+            // Limpiar campos de contraseña por seguridad
+            document.getElementById('current-doc-pass').value = '';
+            document.getElementById('new-doc-pass').value = '';
         }
     };
 

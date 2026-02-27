@@ -1,130 +1,117 @@
 document.addEventListener('DOMContentLoaded', () => {
     const qslForm = document.getElementById('qsl-form');
-    const qslInput = document.getElementById('qsl-code');
-    const nameInput = document.getElementById('user-name');
-    const docNameInput = document.getElementById('doc-name');
-    const docPassInput = document.getElementById('doc-pass');
-
-    const patientFields = document.getElementById('patient-fields');
-    const doctorFields = document.getElementById('doctor-fields');
-
+    // Select the new unified inputs
+    const loginNameInput = document.getElementById('login-name');
+    const loginCodeInput = document.getElementById('login-code');
     const submitBtn = document.getElementById('submit-btn');
     const toastContainer = document.getElementById('toast-container');
-    const roleBtns = document.querySelectorAll('.role-btn');
 
-    let currentRole = 'paciente';
+    // 1. Inicializar tabla Medicos si no existe (Migración) para tenerlos en memoria listos
+    let medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+    if (medicos.length === 0) {
+        const legacyName = localStorage.getItem('doctor_master_name') || 'Médico Maestro';
+        const legacyPass = localStorage.getItem('doctor_master_pass') || btoa('S2026GUATE'); // defaults
+        const newDocId = 'MED-' + Date.now();
 
-    // Manejo de Roles
-    roleBtns.forEach(btn => {
-        btn.addEventListener('click', () => {
-            roleBtns.forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            currentRole = btn.dataset.role;
+        const oldList = localStorage.getItem('doctor_patients_list');
+        if (oldList) {
+            localStorage.setItem(`doctor_patients_list_${newDocId}`, oldList);
+        }
 
-            if (currentRole === 'medico') {
-                patientFields.style.display = 'none';
-                doctorFields.style.display = 'block';
-            } else {
-                patientFields.style.display = 'block';
-                doctorFields.style.display = 'none';
-            }
+        medicos.push({
+            id_medico: newDocId,
+            nombre_completo: legacyName,
+            especialidad: 'Medicina General',
+            cedula_profesional: '000000',
+            usuario: legacyName,
+            password_hash: legacyPass
         });
-    });
-
-    qslForm.addEventListener('submit', (e) => {
-        e.preventDefault();
-
-        if (currentRole === 'medico') {
-            handleDoctorLogin();
-        } else {
-            handlePatientLogin();
-        }
-    });
-
-    function handleDoctorLogin() {
-        const user = docNameInput.value.trim();
-        const pass = docPassInput.value.trim();
-
-        if (!user || !pass) {
-            showToast('Complete usuario y clave', 'error');
-            return;
-        }
-
-        // 1. Inicializar tabla Medicos si no existe (Migración)
-        let medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
-        if (medicos.length === 0) {
-            const legacyName = localStorage.getItem('doctor_master_name') || 'Médico Maestro';
-            const legacyPass = localStorage.getItem('doctor_master_pass') || btoa('S2026GUATE'); // defaults
-            const newDocId = 'MED-' + Date.now();
-
-            // Migrar lista de pacientes
-            const oldList = localStorage.getItem('doctor_patients_list');
-            if (oldList) {
-                localStorage.setItem(`doctor_patients_list_${newDocId}`, oldList);
-                // No lo borramos de momento por seguridad, pero ya está copiado.
-            }
-
-            medicos.push({
-                id_medico: newDocId,
-                nombre_completo: legacyName,
-                especialidad: 'Medicina General',
-                cedula_profesional: '000000',
-                usuario: legacyName,    // en modo antiguo el usuario era el nombre
-                password_hash: legacyPass
-            });
-            // También agregar el usuario fallback
-            medicos.push({
-                id_medico: 'MED-MASTER',
-                nombre_completo: 'Administrador Principal',
-                especialidad: 'Admin',
-                cedula_profesional: '000000',
-                usuario: 'MEDICO',
-                password_hash: btoa('S2026GUATE')
-            });
-            localStorage.setItem('tabla_medicos', JSON.stringify(medicos));
-        }
-
-        // 2. Buscar en tabla Medicos
-        const passHash = btoa(pass); // Encriptación básica simulada
-        const medicoEncontrado = medicos.find(m =>
-            m.usuario.toUpperCase() === user.toUpperCase() &&
-            m.password_hash === passHash
-        );
-
-        if (medicoEncontrado) {
-            // Guardamos todo en sesión
-            localStorage.setItem('current_doctor_id', medicoEncontrado.id_medico);
-            loginSuccess(medicoEncontrado.nombre_completo, 'medico', medicoEncontrado.id_medico);
-        } else {
-            showToast('Usuario o clave incorrectos', 'error');
-        }
+        medicos.push({
+            id_medico: 'MED-MASTER',
+            nombre_completo: 'Administrador Principal',
+            especialidad: 'Admin',
+            cedula_profesional: '000000',
+            usuario: 'MEDICO',
+            password_hash: btoa('S2026GUATE')
+        });
+        localStorage.setItem('tabla_medicos', JSON.stringify(medicos));
     }
 
-    function handlePatientLogin() {
-        const code = qslInput.value.trim().toUpperCase();
-        const inputName = nameInput.value.trim().toLowerCase();
+    if (!medicos.find(m => m.usuario.toUpperCase() === 'ROMULO DIAZ')) {
+        medicos.push({
+            id_medico: 'MED-' + Date.now() + '-ROMULO',
+            nombre_completo: 'Romulo Diaz',
+            especialidad: 'Medicina',
+            cedula_profesional: '000001',
+            usuario: 'ROMULO DIAZ',
+            password_hash: btoa('1111')
+        });
+        localStorage.setItem('tabla_medicos', JSON.stringify(medicos));
+    }
 
-        if (code.length < 3 || !inputName) {
-            showToast('Complete código y nombre', 'error');
-            return;
-        }
+    if (qslForm) {
+        qslForm.addEventListener('submit', (e) => {
+            e.preventDefault();
 
-        const patientsList = JSON.parse(localStorage.getItem('doctor_patients_list') || '[]');
-        if (!patientsList.includes(code)) {
-            showToast('Datos incorrectos', 'error');
-            return;
-        }
+            const user = loginNameInput.value.trim();
+            const pass = loginCodeInput.value.trim();
 
-        const storedName = (localStorage.getItem(`patient_name_${code}`) || '').trim();
-        const storedNameLower = storedName.toLowerCase();
-        const storedParts = storedNameLower.split(/\s+/);
+            if (!user || !pass) {
+                showToast('Complete usuario y clave', 'error');
+                return;
+            }
 
-        if (inputName !== storedNameLower && inputName !== storedParts[0]) {
-            showToast('Datos incorrectos', 'error');
-            return;
-        }
+            // --- 1. INTENTAR LOGIN COMO MÉDICO ---
+            const passHash = btoa(pass);
+            const medicoEncontrado = medicos.find(m =>
+                m.usuario.toUpperCase() === user.toUpperCase() &&
+                m.password_hash === passHash
+            );
 
-        loginSuccess(storedName, 'paciente', code);
+            if (medicoEncontrado) {
+                localStorage.setItem('current_doctor_id', medicoEncontrado.id_medico);
+                loginSuccess(medicoEncontrado.nombre_completo, 'medico', medicoEncontrado.id_medico);
+                return; // Detener aquí porque entró exitosamente
+            }
+
+            // --- 2. INTENTAR LOGIN COMO PACIENTE ---
+            const code = pass.toUpperCase();
+            const inputName = user.toLowerCase();
+
+            const storedName = (localStorage.getItem(`patient_name_${code}`) || '').trim();
+
+            if (!storedName) {
+                // Logica amigable: buscar si el nombre existe con otro QSL
+                let foundCode = null;
+                for (let i = 0; i < localStorage.length; i++) {
+                    const key = localStorage.key(i);
+                    if (key && key.startsWith('patient_name_')) {
+                        const name = (localStorage.getItem(key) || '').toLowerCase().trim();
+                        if (name === inputName || name.includes(inputName) || inputName.includes(name)) {
+                            foundCode = key.replace('patient_name_', '');
+                            break;
+                        }
+                    }
+                }
+
+                if (foundCode) {
+                    showToast(`El código correcto es: ${foundCode}`, 'error');
+                } else {
+                    showToast('Datos incorrectos. Intente de nuevo.', 'error');
+                }
+                return;
+            }
+
+            const storedNameLower = storedName.toLowerCase();
+            const storedParts = storedNameLower.split(/\s+/);
+
+            if (inputName !== storedNameLower && inputName !== storedParts[0] && !storedNameLower.includes(inputName) && !inputName.includes(storedNameLower)) {
+                showToast('El nombre no coincide con el código', 'error');
+                return;
+            }
+
+            loginSuccess(storedName, 'paciente', code);
+        });
     }
 
     function loginSuccess(name, role, codeOrId) {
