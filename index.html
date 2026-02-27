@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Acceso Control de Salud - Código QSL</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap" rel="stylesheet">
+    <meta name="description"
+        content="Portal de acceso seguro para el sistema de Control de Salud utilizando su código QSL exclusivo.">
+</head>
+
+<body>
+    <div class="background-blur"></div>
+    <main class="container">
+        <div class="glass-card animate-in">
+            <header>
+                <div class="logo-container">
+                    <svg class="heart-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path
+                            d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"
+                            fill="currentColor" />
+                    </svg>
+                </div>
+                <h1>H-Control Pro</h1>
+                <p class="subtitle">Seleccione su perfil de acceso</p>
+            </header>
+
+            <div class="role-selector">
+                <button type="button" class="role-btn active" data-role="paciente">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path>
+                        <circle cx="12" cy="7" r="4"></circle>
+                    </svg>
+                    <span>Paciente</span>
+                </button>
+                <button type="button" class="role-btn" data-role="medico">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22 12h-4l-3 9L9 3l-3 9H2"></path>
+                    </svg>
+                    <span>Médico</span>
+                </button>
+            </div>
+
+            <form id="qsl-form">
+                <div id="doctor-fields" style="display: none;">
+                    <div class="input-group" style="margin-bottom: 20px;">
+                        <label for="doc-name">NOMBRE DEL MÉDICO</label>
+                        <input type="text" id="doc-name" placeholder="Ingrese su nombre..." maxlength="50"
+                            autocomplete="off">
+                        <div class="input-focus-line"></div>
+                    </div>
+                    <div class="input-group" style="margin-bottom: 20px;">
+                        <label for="doc-pass">CLAVE DE ACCESO</label>
+                        <input type="password" id="doc-pass" placeholder="Ingrese su clave..." maxlength="20"
+                            autocomplete="off">
+                        <div class="input-focus-line"></div>
+                    </div>
+                </div>
+
+                <div id="patient-fields">
+                    <div class="input-group" style="margin-bottom: 20px;">
+                        <label for="user-name">NOMBRE COMPLETO</label>
+                        <input type="text" id="user-name" placeholder="Ingrese su nombre..." maxlength="50"
+                            autocomplete="off">
+                        <div class="input-focus-line"></div>
+                    </div>
+                    <div class="input-group" style="margin-bottom: 20px;">
+                        <label id="input-label" for="qsl-code">CÓDIGO QSL DE PACIENTE</label>
+                        <input type="text" id="qsl-code" placeholder="Ingrese el código..." maxlength="20"
+                            autocomplete="off">
+                        <div class="input-focus-line"></div>
+                    </div>
+                </div>
+
+                <button type="submit" id="submit-btn" class="btn-primary">
+                    <span>Iniciar Sesión</span>
+                    <svg class="arrow-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M5 12h14M12 5l7 7-7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                            stroke-linejoin="round" />
+                    </svg>
+                </button>
+            </form>
+
+            <footer>
+                <p>&copy; 2026 Control de Salud. Todos los derechos reservados.</p>
+            </footer>
+        </div>
+    </main>
+
+    <div id="toast-container"></div>
+    <script src="app.js"></script>
+</body>
+
+</html>
