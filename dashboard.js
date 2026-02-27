@@ -143,13 +143,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     </button>
                 </div>
 
-                <h3 class="widget-title" style="font-size: 26px; padding-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.1); margin-top: 40px; opacity: 0.9;">Expedientes Activos (${patients.length})</h3>
+                <h3 class="widget-title" style="font-size: 26px; padding-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.1); margin-top: 40px; opacity: 0.9; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px;">
+                    <span>Expedientes Activos (<span id="patient-count">${patients.length}</span>)</span>
+                    <input type="text" id="patient-search" placeholder="🔍 Buscar por nombre o teléfono..." onkeyup="window.filterPatients()" style="max-width: 350px; width: 100%; padding: 12px 20px; font-size: 16px; border-radius: 12px; background: rgba(0,0,0,0.3); color: white; border: 1px solid rgba(34, 211, 238, 0.3); outline: none; transition: 0.3s;" onfocus="this.style.borderColor='var(--accent)';" onblur="this.style.borderColor='rgba(34, 211, 238, 0.3)';">
+                </h3>
                 <div class="patient-list">
                     ${patients.length > 0 ? patients.map(qsl => {
             const name = localStorage.getItem(`patient_name_${qsl}`) || 'Paciente sin nombre';
             const data = getPatientData(qsl);
             return `
-                            <div class="med-item" style="cursor: pointer; transition: 0.3s; padding: 20px; background: rgba(255,255,255,0.03); border-radius: 16px;" onclick="window.selectPatient('${qsl}')">
+                            <div class="med-item patient-row" data-search="${name.toLowerCase()} ${qsl.toLowerCase()} ${(data.phone || '').toLowerCase()}" style="cursor: pointer; transition: 0.3s; padding: 20px; background: rgba(255,255,255,0.03); border-radius: 16px;" onclick="window.selectPatient('${qsl}')">
                                 <div class="med-info">
                                     <h4 style="color: white; font-size: 24px; margin-bottom: 10px;">${name}</h4>
                                     <p style="color: var(--text-muted); font-size: 18px;">QSL: <b style="color:var(--accent); font-size: 20px;">${qsl}</b> | ${data.illness || 'Sin diagnóstico'}</p>
@@ -205,6 +208,25 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         };
     }
+
+    window.filterPatients = () => {
+        const query = document.getElementById('patient-search').value.toLowerCase();
+        const rows = document.querySelectorAll('.patient-row');
+        let visibleCount = 0;
+
+        rows.forEach(row => {
+            const searchData = row.getAttribute('data-search');
+            if (searchData.includes(query)) {
+                row.style.display = '';
+                visibleCount++;
+            } else {
+                row.style.display = 'none';
+            }
+        });
+
+        const countSpan = document.getElementById('patient-count');
+        if (countSpan) countSpan.textContent = visibleCount;
+    };
 
     window.selectPatient = (qsl) => {
         selectedPatientQSL = qsl;
