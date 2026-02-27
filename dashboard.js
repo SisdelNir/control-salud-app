@@ -255,8 +255,15 @@ document.addEventListener('DOMContentLoaded', () => {
                             <input type="text" id="patient-phone" value="${data.phone || ''}" placeholder="Ej: +502 1234 5678" ${userRole === 'paciente' ? 'disabled' : ''}>
                         </div>
                         <div class="input-group">
-                            <label>Nivel de Glucosa (Ayunas/Pos)</label>
-                            <input type="text" id="patient-glucose" value="${data.glucose || ''}" placeholder="Ej: 98 mg/dL (10:00 am)" ${userRole === 'paciente' ? 'disabled' : ''}>
+                            <label>Nivel de Glucosa actual (Ayunas/Pos)</label>
+                            <div style="display: flex; gap: 10px; align-items: flex-start;">
+                                <input type="text" id="patient-glucose" placeholder="Nuevo nivel (Ej: 98 mg/dL)" style="flex:1;" ${userRole === 'paciente' ? 'disabled' : ''}>
+                                ${userRole === 'medico' ? `<button class="btn-primary" style="padding: 0 15px; height: 50px; font-size: 14px; margin-bottom: 12px; border-radius: 8px;" onclick="window.addGlucose()">Añadir</button>` : ''}
+                            </div>
+                            <div style="font-size: 14px; color: rgba(255,255,255,0.7); margin-top: -5px; padding: 0 5px; line-height: 1.6; max-height: 80px; overflow-y: auto;">
+                                <div style="font-size: 13px; color: var(--accent); margin-bottom: 5px; text-transform: uppercase;">Últimos Registros:</div>
+                                ${(data.glucoseHistory || []).map(r => `<div style="display:flex; justify-content:space-between; border-bottom:1px solid rgba(255,255,255,0.1); padding-bottom:4px; margin-bottom:6px;"><span>${r.value}</span> <span style="font-size:12px; opacity:0.6;">${r.date}</span></div>`).join('') || '<span style="opacity:0.5; font-size:13px; font-style: italic;">Sin registros recientes.</span>'}
+                            </div>
                         </div>
                     </div>
                     <div class="input-group" style="margin-bottom: 25px;">
@@ -414,6 +421,41 @@ document.addEventListener('DOMContentLoaded', () => {
 
     }
 
+    window.addGlucose = () => {
+        const input = document.getElementById('patient-glucose');
+        const val = input.value.trim();
+        if (!val) return;
+        const data = getPatientData(selectedPatientQSL);
+        if (!data.glucoseHistory) data.glucoseHistory = [];
+        const now = new Date();
+        const dateStr = now.toLocaleDateString('es-ES') + ' a las ' + now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+        data.glucoseHistory.unshift({ value: val, date: dateStr });
+        if (data.glucoseHistory.length > 2) data.glucoseHistory = data.glucoseHistory.slice(0, 2);
+        savePatientData(selectedPatientQSL, data);
+        loadSection('overview'); // Refrescar para ver el listado actualizado
+    };
+
+    window.addQuickGlucose = () => {
+        const input = document.getElementById('patient-glucose-quick');
+        let val = input.value.trim();
+        if (!val) return;
+
+        // Formatear valor si sólo ponen el número
+        if (!val.toLowerCase().includes('mg/dl')) val += ' mg/dL';
+
+        const data = getPatientData(selectedPatientQSL);
+        if (!data.glucoseHistory) data.glucoseHistory = [];
+        const now = new Date();
+        const dateStr = now.toLocaleDateString('es-ES') + ' a las ' + now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+
+        data.glucoseHistory.unshift({ value: val, date: dateStr });
+        if (data.glucoseHistory.length > 2) data.glucoseHistory = data.glucoseHistory.slice(0, 2);
+
+        savePatientData(selectedPatientQSL, data);
+        window.showElegantAlert('¡Guardado!', `Nivel de glucosa ${val} registrado en su expediente.`);
+        loadSection('reminders'); // Recarga en la misma página del paciente
+    };
+
     window.savePatientDataBtn = () => {
         const data = getPatientData(selectedPatientQSL);
         data.illness = document.getElementById('patient-illness').value.trim();
@@ -421,10 +463,22 @@ document.addEventListener('DOMContentLoaded', () => {
         data.blood = document.getElementById('patient-blood').value.trim();
         data.weight = document.getElementById('patient-weight').value.trim();
         data.phone = document.getElementById('patient-phone').value.trim();
-        data.glucose = document.getElementById('patient-glucose').value.trim();
+
+        // Si hay algo escrito en glucosa sin guardar, guardarlo también
+        const glucoseInput = document.getElementById('patient-glucose').value.trim();
+        if (glucoseInput) {
+            if (!data.glucoseHistory) data.glucoseHistory = [];
+            const now = new Date();
+            const dateStr = now.toLocaleDateString('es-ES') + ' a las ' + now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+            data.glucoseHistory.unshift({ value: glucoseInput, date: dateStr });
+            if (data.glucoseHistory.length > 2) data.glucoseHistory = data.glucoseHistory.slice(0, 2);
+        }
+
         data.notes = document.getElementById('patient-notes').value.trim();
         savePatientData(selectedPatientQSL, data);
+
         window.showElegantAlert('¡Guardado Exitoso!', 'Datos del paciente actualizados correctamente en el sistema.');
+        loadSection('overview'); // Refresca para mostrar la glucosa si se auto-agregó
     };
 
     window.activateCode = (qsl) => {
@@ -492,6 +546,24 @@ document.addEventListener('DOMContentLoaded', () => {
                             </div>
                         `}
                     </div>
+                    
+                    ${isPaciente ? `
+                        <div style="background: rgba(0, 0, 0, 0.2); border: 1px dashed rgba(255, 255, 255, 0.1); border-radius: 20px; padding: 15px; margin-bottom: 25px; display: flex; flex-direction: column; gap: 10px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <label style="font-size: 13px; color: rgba(255,255,255,0.7); text-transform: uppercase; font-weight: 600; letter-spacing: 1px; display: flex; align-items: center; gap: 6px;">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+                                    Nivel Glucosa
+                                </label>
+                            </div>
+                            <div style="display: flex; gap: 8px;">
+                                <input type="number" id="patient-glucose-quick" placeholder="Ej: 98" style="flex: 1; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 10px 15px; color: white; font-size: 16px;">
+                                <button class="btn-primary" style="padding: 0 20px; border-radius: 12px; font-size: 14px; background: rgba(34, 211, 238, 0.15); color: var(--accent); border: 1px solid rgba(34, 211, 238, 0.3);" onclick="window.addQuickGlucose()">Registrar</button>
+                            </div>
+                            <div style="font-size: 12px; color: rgba(255,255,255,0.5); text-align: left; max-height: 40px; overflow-y: auto;">
+                                ${(data.glucoseHistory && data.glucoseHistory.length > 0) ? `Último: <strong style="color:var(--accent);">${data.glucoseHistory[0].value}</strong> <span style="font-size:10px;">(${data.glucoseHistory[0].date})</span>` : 'Sin registros de glucosa'}
+                            </div>
+                        </div>
+                    ` : ''}
                     
                     <div style="background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 24px; padding: 25px 20px; box-shadow: inset 0 2px 10px rgba(0,0,0,0.2);">
                         <div style="display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 25px;">
