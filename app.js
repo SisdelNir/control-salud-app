@@ -72,17 +72,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function handlePatientLogin() {
         const code = qslInput.value.trim().toUpperCase();
-        const name = nameInput.value.trim();
+        const inputName = nameInput.value.trim().toLowerCase();
 
-        if (code.length < 3 || !name) {
+        if (code.length < 3 || !inputName) {
             showToast('Complete código y nombre', 'error');
             return;
         }
 
-        // Guardar relación QSL-Nombre para que el médico la vea
-        localStorage.setItem(`patient_name_${code}`, name);
+        const patientsList = JSON.parse(localStorage.getItem('doctor_patients_list') || '[]');
+        if (!patientsList.includes(code)) {
+            showToast('Datos incorrectos', 'error');
+            return;
+        }
 
-        loginSuccess(name, 'paciente', code);
+        const storedName = (localStorage.getItem(`patient_name_${code}`) || '').trim();
+        const storedNameLower = storedName.toLowerCase();
+        const storedParts = storedNameLower.split(/\s+/);
+
+        if (inputName !== storedNameLower && inputName !== storedParts[0]) {
+            showToast('Datos incorrectos', 'error');
+            return;
+        }
+
+        loginSuccess(storedName, 'paciente', code);
     }
 
     function loginSuccess(name, role, codeOrId) {
@@ -111,5 +123,4 @@ document.addEventListener('DOMContentLoaded', () => {
             toast.style.transform = 'translateX(50px)';
             setTimeout(() => toast.remove(), 500);
         }, 3000);
-    }
-});
+
