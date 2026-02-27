@@ -171,16 +171,16 @@ document.addEventListener('DOMContentLoaded', () => {
             const illness = document.getElementById('new-patient-illness').value.trim();
 
             if (name && phone.length >= 4) {
-                // Generar QSL Automático (Primera letra + Letra aleatoria + Últimos 4 dígitos del teléfono)
-                const firstLetter = name.charAt(0).toUpperCase() || 'A';
-                const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-                const randomLetter = alphabet.charAt(Math.floor(Math.random() * alphabet.length));
+                // Generar QSL Automático (1ra letra nombre + 1ra letra primer apellido + últimos 4 dígitos del teléfono)
+                const nameParts = name.trim().split(/\s+/);
+                const firstLetter = nameParts[0] ? nameParts[0].charAt(0).toUpperCase() : 'A';
+                const secondLetter = nameParts.length > 1 ? nameParts[1].charAt(0).toUpperCase() : 'X';
 
                 // Extraer solo dígitos del teléfono por seguridad y tomar los últimos 4
                 const digitsOnly = phone.replace(/\D/g, '');
                 const last4Phone = digitsOnly.length >= 4 ? digitsOnly.slice(-4) : phone.slice(-4).padStart(4, '0').toUpperCase();
 
-                let baseQsl = `${firstLetter}${randomLetter}${last4Phone}`;
+                let baseQsl = `${firstLetter}${secondLetter}${last4Phone}`;
                 let qsl = baseQsl;
 
                 const existingPatients = JSON.parse(localStorage.getItem('doctor_patients_list') || '[]');
