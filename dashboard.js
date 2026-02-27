@@ -299,6 +299,29 @@ document.addEventListener('DOMContentLoaded', () => {
                                 ${(data.glucoseHistory || []).map(r => `<div style="display:flex; justify-content:space-between; border-bottom:1px solid rgba(255,255,255,0.1); padding-bottom:4px; margin-bottom:6px;"><span>${r.value}</span> <span style="font-size:12px; opacity:0.6;">${r.date}</span></div>`).join('') || '<span style="opacity:0.5; font-size:13px; font-style: italic;">Sin registros recientes.</span>'}
                             </div>
                         </div>
+                        <div style="grid-column: span 2;">
+                            <button id="btn-toggle-additional" class="btn-primary" style="margin-top: 10px; width: 100%; box-sizing: border-box; background: rgba(34, 211, 238, 0.05); border: 1px dashed rgba(34, 211, 238, 0.3); color: var(--accent); padding: 15px; font-size: 16px; transition: 0.3s;" onclick="const f = document.getElementById('additional-data-form'); f.style.display = f.style.display === 'none' ? 'grid' : 'none';">
+                                + Configurar Datos Adicionales (Correo, Documento, Seguro, Emergencia)
+                            </button>
+                            <div id="additional-data-form" style="display: ${data.email || data.dpi || data.insurance || data.emergency ? 'grid' : 'none'}; grid-template-columns: 1fr 1fr; gap: 30px; margin-top: 25px; padding-top: 25px; border-top: 1px dashed rgba(255,255,255,0.1);">
+                                <div class="input-group">
+                                    <label>Correo Electrónico</label>
+                                    <input type="email" id="patient-email" value="${data.email || ''}" placeholder="Ej: paciente@correo.com" ${userRole === 'paciente' ? 'disabled' : ''}>
+                                </div>
+                                <div class="input-group">
+                                    <label>Documento de Identificación Especial (DPI, DNI o Pasaporte)</label>
+                                    <input type="text" id="patient-dpi" value="${data.dpi || ''}" placeholder="Ej: 1234 56789 0101" ${userRole === 'paciente' ? 'disabled' : ''}>
+                                </div>
+                                <div class="input-group">
+                                    <label>Seguro Médico Prominente / Cobertura</label>
+                                    <input type="text" id="patient-insurance" value="${data.insurance || ''}" placeholder="Ej: Aseguradora General..." ${userRole === 'paciente' ? 'disabled' : ''}>
+                                </div>
+                                <div class="input-group">
+                                    <label>Persona Encargada / Contacto de Emergencia</label>
+                                    <input type="text" id="patient-emergency" value="${data.emergency || ''}" placeholder="Ej: Esposa - María Pérez (55551234)" ${userRole === 'paciente' ? 'disabled' : ''}>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                     <div class="input-group" style="margin-bottom: 25px;">
                         <label>Notas / Observaciones Clínicas</label>
@@ -519,6 +542,15 @@ document.addEventListener('DOMContentLoaded', () => {
         data.blood = document.getElementById('patient-blood').value.trim();
         data.weight = document.getElementById('patient-weight').value.trim();
         data.phone = document.getElementById('patient-phone').value.trim();
+
+        const emailInput = document.getElementById('patient-email');
+        if (emailInput) data.email = emailInput.value.trim();
+        const dpiInput = document.getElementById('patient-dpi');
+        if (dpiInput) data.dpi = dpiInput.value.trim();
+        const insInput = document.getElementById('patient-insurance');
+        if (insInput) data.insurance = insInput.value.trim();
+        const emerInput = document.getElementById('patient-emergency');
+        if (emerInput) data.emergency = emerInput.value.trim();
 
         const enabledCheckbox = document.getElementById('patient-glucose-enabled');
         if (enabledCheckbox) {
