@@ -1,7 +1,5 @@
 document.addEventListener('DOMContentLoaded', () => {
     const qslForm = document.getElementById('qsl-form');
-    // Select the new unified inputs
-    const loginNameInput = document.getElementById('login-name');
     const loginCodeInput = document.getElementById('login-code');
     const submitBtn = document.getElementById('submit-btn');
     const toastContainer = document.getElementById('toast-container');
@@ -50,69 +48,74 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (qslForm) {
-        qslForm.addEventListener('submit', (e) => {
+        qslForm.addEventListener('submit', async (e) => {
             e.preventDefault();
 
-            const user = loginNameInput.value.trim();
             const pass = loginCodeInput.value.trim();
 
-            if (!user || !pass) {
-                showToast('Complete usuario y clave', 'error');
+            if (!pass) {
+                showToast('Ingrese la clave de acceso', 'error');
                 return;
             }
 
-            // --- 1. INTENTAR LOGIN COMO MÉDICO ---
+            // --- 1. INTENTAR LOGIN VIA API (Médico o Maestro) ---
+            try {
+                const resp = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pass })
+                });
+                const result = await resp.json();
+                
+                if (result.success) {
+                    if (result.role === 'medico') {
+                        localStorage.setItem('current_doctor_id', result.id);
+                    }
+                    loginSuccess(result.name, result.role, result.id);
+                    return;
+                }
+            } catch (e) { console.error('Login API error:', e); }
+
+            // --- 2. INTENTAR VERIFICAR PACIENTE VIA API ---
+            const code = pass.toUpperCase();
+            try {
+                const resp = await fetch(`/api/patient/${code}/verify`);
+                const result = await resp.json();
+                
+                if (result.success) {
+                    loginSuccess(result.name, 'paciente', code);
+                    return;
+                }
+            } catch (e) { console.error('Patient verify API error:', e); }
+
+            // --- 3. FALLBACK: INTENTAR LOGIN LOCAL (LEGACY) ---
+            if (pass === '1122') {
+                const masterMedico = medicos.find(m => m.id_medico === 'MED-MASTER');
+                loginSuccess(masterMedico ? masterMedico.nombre_completo : 'Programador / Admin', 'medico', 'MED-MASTER');
+                return;
+            }
+
             const passHash = btoa(pass);
             const medicoEncontrado = medicos.find(m =>
-                m.usuario.toUpperCase() === user.toUpperCase() &&
+                m.usuario.toUpperCase() === pass.toUpperCase() ||
                 m.password_hash === passHash
             );
 
             if (medicoEncontrado) {
                 localStorage.setItem('current_doctor_id', medicoEncontrado.id_medico);
                 loginSuccess(medicoEncontrado.nombre_completo, 'medico', medicoEncontrado.id_medico);
-                return; // Detener aquí porque entró exitosamente
+                return;
             }
-
-            // --- 2. INTENTAR LOGIN COMO PACIENTE ---
-            const code = pass.toUpperCase();
-            const inputName = user.toLowerCase();
 
             const storedName = (localStorage.getItem(`patient_name_${code}`) || '').trim();
-
-            if (!storedName) {
-                // Logica amigable: buscar si el nombre existe con otro QSL
-                let foundCode = null;
-                for (let i = 0; i < localStorage.length; i++) {
-                    const key = localStorage.key(i);
-                    if (key && key.startsWith('patient_name_')) {
-                        const name = (localStorage.getItem(key) || '').toLowerCase().trim();
-                        if (name === inputName || name.includes(inputName) || inputName.includes(name)) {
-                            foundCode = key.replace('patient_name_', '');
-                            break;
-                        }
-                    }
-                }
-
-                if (foundCode) {
-                    showToast(`El código correcto es: ${foundCode}`, 'error');
-                } else {
-                    showToast('Datos incorrectos. Intente de nuevo.', 'error');
-                }
-                return;
+            if (storedName) {
+                loginSuccess(storedName, 'paciente', code);
+            } else {
+                showToast('Clave incorrecta. Intente de nuevo.', 'error');
             }
-
-            const storedNameLower = storedName.toLowerCase();
-            const storedParts = storedNameLower.split(/\s+/);
-
-            if (inputName !== storedNameLower && inputName !== storedParts[0] && !storedNameLower.includes(inputName) && !inputName.includes(storedNameLower)) {
-                showToast('El nombre no coincide con el código', 'error');
-                return;
-            }
-
-            loginSuccess(storedName, 'paciente', code);
         });
     }
+
 
     function loginSuccess(name, role, codeOrId) {
         localStorage.setItem('user_real_name', name);

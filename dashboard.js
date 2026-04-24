@@ -41,12 +41,45 @@ document.addEventListener('DOMContentLoaded', () => {
         setInterval(checkAndShowAlerts, 10000);
         setTimeout(checkAndShowAlerts, 2000);
     } else {
-        loadSection('overview');
+        if (qslCode === 'MED-MASTER') {
+            // Caso Programador: Solo ve el módulo de administración
+            const progNav = document.getElementById('nav-programmer');
+            if (progNav) progNav.style.display = 'block';
+            
+            // Ocultar secciones clínicas para el programador
+            navItems.forEach(n => {
+                const section = n.getAttribute('data-section');
+                if (section === 'overview' || section === 'reminders' || section === 'consultation') {
+                    n.style.display = 'none';
+                }
+            });
+            
+            navItems.forEach(n => n.classList.remove('active'));
+            if (progNav) progNav.classList.add('active');
+            loadSection('programmer');
+        } else {
+            // Caso Médico regular: Ve secciones clínicas, no el módulo programador
+            loadSection('overview');
+        }
     }
 
     function updateUserDisplay() {
         const name = localStorage.getItem('user_real_name') || qslCode;
-        qslDisplay.textContent = userRole === 'medico' ? `Dr. ${name}` : `Paciente: ${name}`;
+        const activeCompany = JSON.parse(localStorage.getItem('active_company') || 'null');
+        const companyBranding = activeCompany ? ` | ${activeCompany.nombre}` : '';
+        
+        qslDisplay.textContent = userRole === 'medico' ? (qslCode === 'MED-MASTER' ? `Admin: ${name}` : `Dr. ${name}${companyBranding}`) : `Paciente: ${name}`;
+        
+        // Actualizar etiquetas de la sidebar según el rol
+        const sidebarLogoText = document.querySelector('.logo span');
+        if (sidebarLogoText && activeCompany) {
+            sidebarLogoText.textContent = activeCompany.nombre;
+        }
+
+        const settingsLabel = document.querySelector('li[data-section="settings"] span');
+        if (settingsLabel) {
+            settingsLabel.textContent = qslCode === 'MED-MASTER' ? 'Ajustes del Sistema' : 'Datos del Médico';
+        }
     }
 
     // Navegación
@@ -76,14 +109,30 @@ document.addEventListener('DOMContentLoaded', () => {
         return id === 'MED-MASTER' ? 'doctor_patients_list' : (id ? `doctor_patients_list_${id}` : 'doctor_patients_list');
     }
 
-    function getPatientData(qsl) {
+    async function getPatientData(qsl) {
+        try {
+            const resp = await fetch(`/api/patient/${qsl}`);
+            const result = await resp.json();
+            if (result.success) {
+                localStorage.setItem(`patient_data_${qsl}`, JSON.stringify(result.data));
+                localStorage.setItem(`active_qsl_${qsl}`, result.alerts_enabled ? 'true' : 'false');
+                return result.data;
+            }
+        } catch (e) { console.error('Fetch error:', e); }
         const data = localStorage.getItem(`patient_data_${qsl}`);
         return data ? JSON.parse(data) : { illness: '', meds: [] };
     }
 
-    function savePatientData(qsl, data) {
+    async function savePatientData(qsl, data) {
         localStorage.setItem(`patient_data_${qsl}`, JSON.stringify(data));
-        // Registrar QSL en la lista de pacientes del médico
+        try {
+            await fetch(`/api/patient/${qsl}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ data })
+            });
+        } catch (e) { console.error(e); }
+
         const key = getDocPatientsKey();
         let list = JSON.parse(localStorage.getItem(key) || '[]');
         if (!list.includes(qsl)) {
@@ -93,25 +142,54 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // 3. Motor de Secciones
-    function loadSection(sectionName) {
+    async function loadSection(sectionName) {
+        if (qslCode === 'MED-MASTER' && (sectionName === 'overview' || sectionName === 'reminders' || sectionName === 'consultation')) {
+            sectionName = 'programmer';
+        }
+        
         sectionTitle.textContent = getSectionTitle(sectionName);
         contentArea.innerHTML = `<div class="loading-state"><div class="spinner"></div></div>`;
-        setTimeout(() => renderSection(sectionName), 300);
+        
+        let data = null;
+        if (selectedPatientQSL && (sectionName === 'overview' || sectionName === 'reminders' || sectionName === 'consultation')) {
+            data = await getPatientData(selectedPatientQSL);
+        }
+        
+        setTimeout(() => renderSection(sectionName, data), 300);
     }
 
-    function renderSection(name) {
-        if (userRole === 'medico' && !selectedPatientQSL && name !== 'settings') {
+    function renderSection(name, data) {
+        if (userRole === 'medico' && !selectedPatientQSL && name !== 'settings' && name !== 'programmer') {
             renderDoctorHome();
             return;
         }
 
-        const data = getPatientData(selectedPatientQSL);
+        const patientData = data || (selectedPatientQSL ? getPatientDataFallback(selectedPatientQSL) : null);
 
         switch (name) {
-            case 'overview': renderOverview(data); break;
-            case 'reminders': renderReminders(data); break;
-            case 'settings': renderSettings(); break;
+            case 'overview':
+                renderOverview(patientData);
+                break;
+            case 'reminders':
+                renderReminders(patientData);
+                break;
+            case 'consultation':
+                renderConsultation(patientData);
+                break;
+            case 'settings':
+                renderSettings();
+                break;
+            case 'programmer':
+                renderProgrammer();
+                break;
+            default:
+                renderOverview(patientData);
         }
+    }
+
+    function getPatientDataFallback(qsl) {
+        const data = localStorage.getItem(`patient_data_${qsl}`);
+        return data ? JSON.parse(data) : { illness: '', meds: [] };
     }
 
     // --- VISTAS DEL MÉDICO ---
@@ -121,105 +199,230 @@ document.addEventListener('DOMContentLoaded', () => {
         const patients = JSON.parse(localStorage.getItem(key) || '[]');
 
         contentArea.innerHTML = `
-            <div class="widget-card animate-in" style="max-width: 950px; margin: 0 auto; padding: 50px 40px; border: 3px solid rgba(34, 211, 238, 0.45); box-shadow: 0 0 20px rgba(34, 211, 238, 0.15), inset 0 0 10px rgba(34, 211, 238, 0.05); border-radius: 24px;">
-                <h3 class="widget-title" style="color: var(--accent); border-bottom: 2px solid rgba(255,255,255,0.05); padding-bottom: 25px; font-size: 32px; display: flex; align-items: center;">
-                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-right: 15px; filter: drop-shadow(0 0 5px rgba(34, 211, 238, 0.5));">
+            <div class="widget-card animate-in" style="max-width: 1000px; margin: 0 auto; padding: 40px; border: 3px solid rgba(34, 211, 238, 0.45); border-radius: 24px;">
+                <h3 class="widget-title" style="color: var(--accent); border-bottom: 2px solid rgba(255,255,255,0.1); padding-bottom: 20px; font-size: 28px; display: flex; align-items: center;">
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-right: 15px;">
                         <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/>
                     </svg>
-                    Aperturar Nuevo Expediente Clínico
+                    Nuevo Expediente Clínico (Ficha Médica)
                 </h3>
                 
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 30px; margin: 40px 0; padding: 40px; background: rgba(0,0,0,0.3); border-radius: 20px; box-shadow: inset 0 0 15px rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.02);">
-                    <div class="input-group">
-                        <label>Nombre Completo del Paciente</label>
-                        <input type="text" id="new-patient-name" placeholder="Ingrese nombre y apellido...">
+                <div id="patient-form" style="margin: 30px 0; background: rgba(0,0,0,0.2); border-radius: 15px; border: 1px solid rgba(255,255,255,0.05); padding: 30px;">
+                    <!-- Sección 1: Datos Personales -->
+                    <h4 style="color: #22d3ee; margin-bottom: 20px; text-transform: uppercase; font-size: 14px; letter-spacing: 1px;">1. Datos de Filiación</h4>
+                    <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 20px; margin-bottom: 25px;">
+                        <div class="input-group">
+                            <label>Nombre Completo *</label>
+                            <input type="text" id="p-nombre" placeholder="Nombres y Apellidos">
+                        </div>
+                        <div class="input-group">
+                            <label>Fecha Nacimiento</label>
+                            <input type="date" id="p-fecha-nac">
+                        </div>
+                        <div class="input-group">
+                            <label>Edad</label>
+                            <input type="number" id="p-edad" placeholder="Años">
+                        </div>
                     </div>
-                    <div class="input-group">
-                        <label>Teléfono</label>
-                        <input type="text" id="new-patient-phone" placeholder="Ingrese su teléfono...">
+                    
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 25px;">
+                        <div class="input-group">
+                            <label>Género</label>
+                            <select id="p-genero" style="width: 100%; background: rgba(0,0,0,0.3); color: white; border: 1px solid var(--card-border); padding: 12px; border-radius: 12px;">
+                                <option value="Masculino">Masculino</option>
+                                <option value="Femenino">Femenino</option>
+                                <option value="Otro">Otro</option>
+                            </select>
+                        </div>
+                        <div class="input-group">
+                            <label>ID (DPI, Pasaporte, etc.)</label>
+                            <input type="text" id="p-id" placeholder="No. Identificación">
+                        </div>
+                        <div class="input-group">
+                            <label>Estado Civil</label>
+                            <input type="text" id="p-civil" placeholder="Soltero, Casado, etc.">
+                        </div>
                     </div>
-                    <div class="input-group">
-                        <label>Código de Acceso</label>
-                        <input type="text" id="new-patient-qsl" placeholder="Generado automáticamente al crear" disabled style="opacity: 0.5;">
+
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px;">
+                        <div class="input-group">
+                            <label>Ocupación</label>
+                            <input type="text" id="p-ocupacion" placeholder="Profesión u oficio">
+                        </div>
+                        <div class="input-group">
+                            <label>Dirección de Domicilio</label>
+                            <input type="text" id="p-direccion" placeholder="Dirección completa">
+                        </div>
                     </div>
-                    <div class="input-group">
-                        <label>Motivo Principal / Diagnóstico Inicial</label>
-                        <input type="text" id="new-patient-illness" placeholder="Opcional. Ej: Diabetes Tipo 2, Hipertensión...">
+
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px;">
+                        <div class="input-group">
+                            <label>Teléfono de Contacto *</label>
+                            <input type="text" id="p-telefono" placeholder="Ej: +502 ...">
+                        </div>
+                        <div class="input-group">
+                            <label>Correo Electrónico</label>
+                            <input type="email" id="p-email" placeholder="paciente@ejemplo.com">
+                        </div>
                     </div>
-                    <button id="btn-add-patient" class="btn-primary" style="grid-column: span 2; margin-top: 25px; padding: 24px; font-size: 20px; font-weight: 700; background: linear-gradient(135deg, var(--primary) 0%, #312e81 100%);">
-                        <span>CREAR EXPEDIENTE Y ASIGNAR MEDICAMENTOS</span>
+
+                    <!-- Sección 2: Emergencia y Seguro -->
+                    <h4 style="color: #22d3ee; margin-bottom: 20px; text-transform: uppercase; font-size: 14px; letter-spacing: 1px; margin-top: 40px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 20px;">2. Contacto y Cobertura</h4>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 25px;">
+                        <div class="input-group">
+                            <label>Contacto Emergencia (Nombre)</label>
+                            <input type="text" id="p-emerg-nombre" placeholder="Nombre completo">
+                        </div>
+                        <div class="input-group">
+                            <label>Relación</label>
+                            <input type="text" id="p-emerg-rel" placeholder="Ej: Madre, Esposo">
+                        </div>
+                        <div class="input-group">
+                            <label>Teléfono Emergencia</label>
+                            <input type="text" id="p-emerg-tel" placeholder="Número contacto">
+                        </div>
+                    </div>
+                    <div class="input-group" style="margin-bottom: 25px;">
+                        <label>Seguro Médico / Cobertura</label>
+                        <input type="text" id="p-seguro" placeholder="Aseguradora y No. Póliza">
+                    </div>
+
+                    <!-- Sección 3: Antecedentes Médicos -->
+                    <h4 style="color: #22d3ee; margin-bottom: 20px; text-transform: uppercase; font-size: 14px; letter-spacing: 1px; margin-top: 40px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 20px;">3. Historia Clínica</h4>
+                    <div style="display: grid; grid-template-columns: 1fr 2fr; gap: 20px; margin-bottom: 25px;">
+                        <div class="input-group">
+                            <label>Tipo de Sangre</label>
+                            <input type="text" id="p-sangre" placeholder="Ej: O+">
+                        </div>
+                        <div class="input-group">
+                            <label>Alergias (Med, Alimentos, etc.)</label>
+                            <input type="text" id="p-alergias" placeholder="Detallar alergias">
+                        </div>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+                        <div class="input-group">
+                            <label>Antecedentes Personales</label>
+                            <textarea id="p-ant-pers" style="height: 80px; width: 100%;" placeholder="Enfermedades crónicas, etc."></textarea>
+                        </div>
+                        <div class="input-group">
+                            <label>Antecedentes Quirúrgicos</label>
+                            <textarea id="p-ant-quir" style="height: 80px; width: 100%;" placeholder="Operaciones previas"></textarea>
+                        </div>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+                        <div class="input-group">
+                            <label>Antecedentes Familiares</label>
+                            <textarea id="p-ant-fam" style="height: 80px; width: 100%;" placeholder="Diabetes, corazón, etc."></textarea>
+                        </div>
+                        <div class="input-group">
+                            <label>Medicamentos Actuales</label>
+                            <textarea id="p-meds-act" style="height: 80px; width: 100%;" placeholder="Tratamientos en curso"></textarea>
+                        </div>
+                    </div>
+                    <div class="input-group" style="margin-bottom: 25px;">
+                        <label>Hábitos (Tabaco, Alcohol, Ejercicio, etc.)</label>
+                        <input type="text" id="p-habitos" placeholder="Estilo de vida">
+                    </div>
+
+                    <!-- Sección 4: Motivo -->
+                    <h4 style="color: #22d3ee; margin-bottom: 20px; text-transform: uppercase; font-size: 14px; letter-spacing: 1px; margin-top: 40px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 20px;">4. Motivo de Consulta</h4>
+                    <div class="input-group" style="margin-bottom: 30px;">
+                        <label>Motivo Principal / Diagnóstico Inicial *</label>
+                        <input type="text" id="p-motivo" placeholder="Ej. Control de diabetes, Dolor agudo...">
+                    </div>
+
+                    <button id="btn-add-patient" class="btn-primary" style="width: 100%; padding: 22px; font-size: 18px; font-weight: 700;">
+                        GUARDAR FICHA MÉDICA Y CREAR EXPEDIENTE
                     </button>
                 </div>
 
-                <h3 class="widget-title" style="font-size: 26px; padding-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.1); margin-top: 40px; opacity: 0.9; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px;">
-                    <span>Expedientes Activos (<span id="patient-count">${patients.length}</span>)</span>
-                    <input type="text" id="patient-search" placeholder="🔍 Buscar por nombre o teléfono..." onkeyup="window.filterPatients()" style="max-width: 350px; width: 100%; padding: 12px 20px; font-size: 16px; border-radius: 12px; background: rgba(0,0,0,0.3); color: white; border: 1px solid rgba(34, 211, 238, 0.3); outline: none; transition: 0.3s;" onfocus="this.style.borderColor='var(--accent)';" onblur="this.style.borderColor='rgba(34, 211, 238, 0.3)';">
+                <h3 class="widget-title" style="font-size: 24px; padding-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.1); margin-top: 50px;">
+                    Expedientes Activos (<span id="patient-count">${patients.length}</span>)
                 </h3>
-                <div class="patient-list">
+                <div class="patient-list" style="margin-top: 20px;">
                     ${patients.length > 0 ? patients.map(qsl => {
-            const name = localStorage.getItem(`patient_name_${qsl}`) || 'Paciente sin nombre';
+            const name = localStorage.getItem(`patient_name_${qsl}`) || 'Paciente';
             const data = getPatientData(qsl);
             return `
-                            <div class="med-item patient-row" data-search="${name.toLowerCase()} ${qsl.toLowerCase()} ${(data.phone || '').toLowerCase()}" style="cursor: pointer; transition: 0.3s; padding: 20px; background: rgba(255,255,255,0.03); border-radius: 16px;" onclick="window.selectPatient('${qsl}')">
+                            <div class="med-item patient-row" style="cursor: pointer; padding: 20px;" onclick="window.selectPatient('${qsl}')">
                                 <div class="med-info">
-                                    <h4 style="color: white; font-size: 24px; margin-bottom: 10px;">${name}</h4>
-                                    <p style="color: var(--text-muted); font-size: 18px;">Código: <b style="color:var(--accent); font-size: 20px;">${qsl}</b> | ${data.illness || 'Sin diagnóstico'}</p>
+                                    <h4 style="color: white; font-size: 20px;">${name}</h4>
+                                    <p style="color: var(--text-muted);">Código: <b style="color:var(--accent);">${qsl}</b> | ${data.illness || 'Sin diagnóstico'}</p>
                                 </div>
-                                <div style="text-align: right; display: flex; flex-direction: column; gap: 12px;">
-                                    <span class="status-badge" style="background: rgba(34, 211, 238, 0.1); padding: 12px 20px; font-size: 16px; font-weight: 700; display: inline-block; text-align: center;">Ver Detalle</span>
-                                    <span class="status-badge" style="background: rgba(239, 68, 68, 0.1); color: var(--error); padding: 12px 20px; font-size: 16px; font-weight: 700; display: inline-block; text-align: center; cursor: pointer;" onclick="event.stopPropagation(); window.deletePatient('${qsl}')">Eliminar</span>
+                                <div style="display: flex; gap: 10px;">
+                                    <span class="status-badge">Ver Detalle</span>
+                                    <button class="status-badge" style="background: rgba(239, 68, 68, 0.1); color: var(--error);" onclick="event.stopPropagation(); window.deletePatient('${qsl}')">Eliminar</button>
                                 </div>
                             </div>
                         `;
-        }).join('') : '<div style="text-align:center; padding: 40px; font-size: 18px; opacity: 0.5;">No hay expedientes registrados todavía.</div>'}
+        }).join('') : '<div style="text-align:center; padding: 40px; opacity: 0.5;">No hay expedientes todavía.</div>'}
                 </div>
             </div>
         `;
 
         document.getElementById('btn-add-patient').onclick = () => {
-            const name = document.getElementById('new-patient-name').value.trim();
-            const phone = document.getElementById('new-patient-phone').value.trim();
-            const illness = document.getElementById('new-patient-illness').value.trim();
+            const nombre = document.getElementById('p-nombre').value.trim();
+            const telefono = document.getElementById('p-telefono').value.trim();
+            const motivo = document.getElementById('p-motivo').value.trim();
 
-            const nameParts = name.trim().split(/\s+/);
-            if (nameParts.length < 2) {
-                window.showElegantAlert('Atención', 'Por favor, ingrese al menos un nombre y un apellido.', true);
+            if (!nombre || !telefono) {
+                window.showElegantAlert('Error', 'Nombre y Teléfono son obligatorios.', true);
                 return;
             }
 
-            if (name && phone.length >= 4) {
-                // Generar QSL Automático (1ra letra nombre + 1ra letra primer apellido + últimos 4 dígitos del teléfono)
-                const firstLetter = nameParts[0] ? nameParts[0].charAt(0).toUpperCase() : 'A';
-                const secondLetter = nameParts.length > 1 ? nameParts[1].charAt(0).toUpperCase() : 'X';
+            // Generar QSL Automático
+            const parts = nombre.split(/\s+/);
+            const first = (parts[0] || 'A').charAt(0).toUpperCase();
+            const second = (parts.length > 1 ? parts[1].charAt(0) : 'X').toUpperCase();
+            const digitsOnly = telefono.replace(/\D/g, '');
+            const last4Phone = digitsOnly.length >= 4 ? digitsOnly.slice(-4) : telefono.slice(-4).padStart(4, '0').toUpperCase();
+            
+            let baseQsl = `${first}${second}${last4Phone}`;
+            let qsl = baseQsl;
 
-                // Extraer solo dígitos del teléfono por seguridad y tomar los últimos 4
-                const digitsOnly = phone.replace(/\D/g, '');
-                const last4Phone = digitsOnly.length >= 4 ? digitsOnly.slice(-4) : phone.slice(-4).padStart(4, '0').toUpperCase();
+            const patientData = {
+                nombre_completo: nombre,
+                fecha_nacimiento: document.getElementById('p-fecha-nac').value,
+                edad: document.getElementById('p-edad').value,
+                genero: document.getElementById('p-genero').value,
+                id_identificacion: document.getElementById('p-id').value,
+                estado_civil: document.getElementById('p-civil').value,
+                ocupacion: document.getElementById('p-ocupacion').value,
+                direccion: document.getElementById('p-direccion').value,
+                telefono: telefono,
+                email: document.getElementById('p-email').value,
+                contacto_emergencia_nombre: document.getElementById('p-emerg-nombre').value,
+                contacto_emergencia_relacion: document.getElementById('p-emerg-rel').value,
+                contacto_emergencia_tel: document.getElementById('p-emerg-tel').value,
+                seguro_medico: document.getElementById('p-seguro').value,
+                tipo_sangre: document.getElementById('p-sangre').value,
+                alergias: document.getElementById('p-alergias').value,
+                antecedentes_personales: document.getElementById('p-ant-pers').value,
+                antecedentes_quirurgicos: document.getElementById('p-ant-quir').value,
+                antecedentes_familiares: document.getElementById('p-ant-fam').value,
+                medicamentos_actuales: document.getElementById('p-meds-act').value,
+                habitos: document.getElementById('p-habitos').value,
+                illness: motivo,
+                meds: []
+            };
 
-                let baseQsl = `${firstLetter}${secondLetter}${last4Phone}`;
-                let qsl = baseQsl;
-
-                const key = getDocPatientsKey();
-                const existingPatients = JSON.parse(localStorage.getItem(key) || '[]');
-                let counter = 1;
-                while (existingPatients.includes(qsl)) {
-                    qsl = `${baseQsl}-${counter}`;
-                    counter++;
-                }
-
-                // Guardar Nombre y Diagnóstico inicial
-                localStorage.setItem(`patient_name_${qsl}`, name);
-                const data = getPatientData(qsl);
-                data.illness = illness;
-                data.phone = phone; // Guardarlo de una vez en el expediente
-                savePatientData(qsl, data);
-
-                selectedPatientQSL = qsl;
-                loadSection('overview');
-                window.showElegantAlert('¡Expediente Creado!', `Se ha registrado exitosamente a ${name}.`);
-            } else {
-                window.showElegantAlert('Atención', 'Por favor, ingrese el nombre del paciente y un teléfono de al menos 4 dígitos.', true);
+            // Guardar
+            const key = getDocPatientsKey();
+            const existingPatients = JSON.parse(localStorage.getItem(key) || '[]');
+            if (existingPatients.includes(qsl)) {
+                qsl = baseQsl + Math.floor(Math.random() * 90);
             }
+
+            localStorage.setItem(`patient_name_${qsl}`, nombre);
+            localStorage.setItem(`patient_data_${qsl}`, JSON.stringify(patientData));
+            
+            if (!existingPatients.includes(qsl)) {
+                existingPatients.push(qsl);
+                localStorage.setItem(key, JSON.stringify(existingPatients));
+            }
+
+            window.showElegantAlert('Expediente Creado', `Se ha registrado exitosamente a ${nombre}. Código de acceso: ${qsl}`);
+            renderDoctorHome();
         };
     }
 
@@ -252,9 +455,6 @@ document.addEventListener('DOMContentLoaded', () => {
             localStorage.removeItem(`patient_name_${qsl}`);
             localStorage.removeItem(`patient_data_${qsl}`);
             localStorage.removeItem(`active_qsl_${qsl}`);
-            const key = getDocPatientsKey();
-            let list = JSON.parse(localStorage.getItem(key) || '[]');
-            list = list.filter(id => id !== qsl);
             localStorage.setItem(key, JSON.stringify(list));
             loadSection('overview');
         }
@@ -262,247 +462,281 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function renderOverview(data) {
         const patientName = localStorage.getItem(`patient_name_${selectedPatientQSL}`) || 'Paciente';
+        const isMed = userRole === 'medico';
+
         contentArea.innerHTML = `
             <div class="dashboard-grid">
-                <div class="widget-card animate-in" style="padding: 40px; margin-bottom: 30px; border: 3px solid rgba(34, 211, 238, 0.45); box-shadow: 0 0 20px rgba(34, 211, 238, 0.15), inset 0 0 10px rgba(34, 211, 238, 0.05); border-radius: 24px;">
-                    <h3 class="widget-title" style="font-size: 28px; color: var(--accent); border-bottom: 2px solid rgba(255,255,255,0.05); padding-bottom: 20px;">Expediente Clínico</h3>
-                    <div style="margin: 25px 0;">
-                        <p style="font-size: 22px; color: var(--text-main); font-weight: 600;">${patientName} <span style="color: var(--accent); font-weight: normal; font-size: 20px;">(${selectedPatientQSL})</span></p>
-                    </div>
-                    
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 30px; margin-bottom: 30px; padding: 30px; background: rgba(0,0,0,0.2); border-radius: 20px; box-shadow: inset 0 0 15px rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.02);">
-                        <div class="input-group" style="grid-column: span 2;">
-                            <label>Enfermedad Principal / Diagnóstico</label>
-                            <input type="text" id="patient-illness" value="${data.illness || ''}" placeholder="Ej: Hipertensión Arterial" ${userRole === 'paciente' ? 'disabled' : ''}>
+                <!-- Seccion 1: FICHA CLINICA -->
+                <div class="widget-card animate-in" style="grid-column: span 2; padding: 40px; border: 3px solid rgba(34, 211, 238, 0.4); border-radius: 24px;">
+                    <h3 class="widget-title" style="font-size: 26px; color: var(--accent); border-bottom: 2px solid rgba(34, 211, 238, 0.1); padding-bottom: 15px; margin-bottom: 25px; display: flex; justify-content: space-between;">
+                        <span>Ficha Clínica Permanente</span>
+                        <span style="font-size: 16px; opacity: 0.7;">QSL: ${selectedPatientQSL}</span>
+                    </h3>
+
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 30px;">
+                        <div class="input-group">
+                            <label>Nombre Completo</label>
+                            <input type="text" id="view-nombre" value="${data.nombre_completo || patientName}" ${!isMed ? 'disabled' : ''}>
                         </div>
                         <div class="input-group">
-                            <label>Alergias Conocidas</label>
-                            <input type="text" id="patient-allergies" value="${data.allergies || ''}" placeholder="Ej: Ninguna, Penicilina..." ${userRole === 'paciente' ? 'disabled' : ''}>
+                            <label>Fecha Nacimiento</label>
+                            <input type="text" id="view-fecha-nac" value="${data.fecha_nacimiento || ''}" ${!isMed ? 'disabled' : ''}>
+                        </div>
+                        <div class="input-group">
+                            <label>Edad</label>
+                            <input type="text" id="view-edad" value="${data.edad || ''}" ${!isMed ? 'disabled' : ''}>
+                        </div>
+                    </div>
+
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 30px;">
+                        <div class="input-group">
+                            <label>Género</label>
+                            <input type="text" id="view-genero" value="${data.genero || ''}" ${!isMed ? 'disabled' : ''}>
+                        </div>
+                        <div class="input-group">
+                            <label>DPI / Identificación</label>
+                            <input type="text" id="view-id" value="${data.id_identificacion || ''}" ${!isMed ? 'disabled' : ''}>
+                        </div>
+                        <div class="input-group">
+                            <label>Estado Civil</label>
+                            <input type="text" id="view-civil" value="${data.estado_civil || ''}" ${!isMed ? 'disabled' : ''}>
+                        </div>
+                    </div>
+
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 30px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 30px;">
+                        <div class="input-group">
+                            <label>Ocupación</label>
+                            <input type="text" id="view-ocupacion" value="${data.ocupacion || ''}" ${!isMed ? 'disabled' : ''}>
+                        </div>
+                        <div class="input-group">
+                            <label>Dirección</label>
+                            <input type="text" id="view-direccion" value="${data.direccion || ''}" ${!isMed ? 'disabled' : ''}>
+                        </div>
+                        <div class="input-group">
+                            <label>Teléfono</label>
+                            <input type="text" id="view-telefono" value="${data.telefono || ''}" ${!isMed ? 'disabled' : ''}>
+                        </div>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 30px;">
+                        <div class="input-group">
+                            <label>Correo Electrónico</label>
+                            <input type="email" id="view-email" value="${data.email || ''}" ${!isMed ? 'disabled' : ''}>
+                        </div>
+                        <div class="input-group">
+                            <label>Seguro Médico / Póliza</label>
+                            <input type="text" id="view-seguro" value="${data.seguro_medico || ''}" ${!isMed ? 'disabled' : ''}>
+                        </div>
+                    </div>
+
+                    <h4 style="color: var(--accent); font-size: 14px; text-transform: uppercase; margin: 30px 0 20px;">Contacto de Emergencia</h4>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 30px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 30px;">
+                        <div class="input-group">
+                            <label>Nombre Aviso</label>
+                            <input type="text" id="view-emerg-nombre" value="${data.contacto_emergencia_nombre || ''}" ${!isMed ? 'disabled' : ''}>
+                        </div>
+                        <div class="input-group">
+                            <label>Relación</label>
+                            <input type="text" id="view-emerg-rel" value="${data.contacto_emergencia_relacion || ''}" ${!isMed ? 'disabled' : ''}>
+                        </div>
+                        <div class="input-group">
+                            <label>Teléfono Aviso</label>
+                            <input type="text" id="view-emerg-tel" value="${data.contacto_emergencia_tel || ''}" ${!isMed ? 'disabled' : ''}>
+                        </div>
+                    </div>
+
+                    <h4 style="color: var(--accent); font-size: 14px; text-transform: uppercase; margin: 30px 0 20px;">Antecedentes y Estilo de Vida</h4>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px;">
+                        <div class="input-group">
+                            <label>Alergias</label>
+                            <textarea id="view-alergias" style="height: 60px; width: 100%;" ${!isMed ? 'disabled' : ''}>${data.alergias || ''}</textarea>
                         </div>
                         <div class="input-group">
                             <label>Tipo de Sangre</label>
-                            <input type="text" id="patient-blood" value="${data.blood || ''}" placeholder="Ej: O+, A-..." ${userRole === 'paciente' ? 'disabled' : ''}>
-                        </div>
-                        <div class="input-group">
-                            <label>Peso (kg) / Altura</label>
-                            <input type="text" id="patient-weight" value="${data.weight || ''}" placeholder="Ej: 75kg / 1.75m" ${userRole === 'paciente' ? 'disabled' : ''}>
-                        </div>
-                        <div class="input-group">
-                            <label>Teléfono de Contacto</label>
-                            <input type="text" id="patient-phone" value="${data.phone || ''}" placeholder="Ej: +502 1234 5678" ${userRole === 'paciente' ? 'disabled' : ''}>
-                        </div>
-                        <div class="input-group">
-                            <label style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-                                <span>Nivel de Glucosa actual (Ayunas/Pos)</span>
-                                ${userRole === 'medico' ? `
-                                <span style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer; color:var(--accent); text-transform:none; font-weight:normal;">
-                                    Activar para Paciente
-                                    <input type="checkbox" id="patient-glucose-enabled" onchange="window.toggleGlucoseFeature(this.checked)" ${data.glucoseEnabled ? 'checked' : ''} style="width: 16px; height: 16px; margin: 0; accent-color: var(--accent);">
-                                </span>` : ''}
-                            </label>
-                            <div style="display: flex; gap: 10px; align-items: flex-start;">
-                                <input type="text" id="patient-glucose" placeholder="Nuevo nivel (Ej: 98 mg/dL)" style="flex:1;" ${userRole === 'paciente' ? 'disabled' : ''}>
-                                ${userRole === 'medico' ? `<button class="btn-primary" style="padding: 0 15px; height: 50px; font-size: 14px; margin-bottom: 12px; border-radius: 8px;" onclick="window.addGlucose()">Añadir</button>` : ''}
-                            </div>
-                            <div style="font-size: 14px; color: rgba(255,255,255,0.7); margin-top: -5px; padding: 0 5px; line-height: 1.6; max-height: 80px; overflow-y: auto;">
-                                <div style="font-size: 13px; color: var(--accent); margin-bottom: 5px; text-transform: uppercase;">Últimos Registros:</div>
-                                ${(data.glucoseHistory || []).map(r => `<div style="display:flex; justify-content:space-between; border-bottom:1px solid rgba(255,255,255,0.1); padding-bottom:4px; margin-bottom:6px;"><span>${r.value}</span> <span style="font-size:12px; opacity:0.6;">${r.date}</span></div>`).join('') || '<span style="opacity:0.5; font-size:13px; font-style: italic;">Sin registros recientes.</span>'}
-                            </div>
-                        </div>
-                        <div style="grid-column: span 2;">
-                            <button id="btn-toggle-additional" class="btn-primary" style="margin-top: 10px; width: 100%; box-sizing: border-box; background: rgba(34, 211, 238, 0.05); border: 1px dashed rgba(34, 211, 238, 0.3); color: var(--accent); padding: 15px; font-size: 16px; transition: 0.3s;" onclick="const f = document.getElementById('additional-data-form'); f.style.display = f.style.display === 'none' ? 'grid' : 'none';">
-                                + Configurar Datos Adicionales (Correo, Documento, Seguro, Emergencia)
-                            </button>
-                            <div id="additional-data-form" style="display: ${data.email || data.dpi || data.insurance || data.emergency ? 'grid' : 'none'}; grid-template-columns: 1fr 1fr; gap: 30px; margin-top: 25px; padding-top: 25px; border-top: 1px dashed rgba(255,255,255,0.1);">
-                                <div class="input-group">
-                                    <label>Correo Electrónico</label>
-                                    <input type="email" id="patient-email" value="${data.email || ''}" placeholder="Ej: paciente@correo.com" ${userRole === 'paciente' ? 'disabled' : ''}>
-                                </div>
-                                <div class="input-group">
-                                    <label>Documento de Identificación Especial (DPI, DNI o Pasaporte)</label>
-                                    <input type="text" id="patient-dpi" value="${data.dpi || ''}" placeholder="Ej: 1234 56789 0101" ${userRole === 'paciente' ? 'disabled' : ''}>
-                                </div>
-                                <div class="input-group">
-                                    <label>Seguro Médico Prominente / Cobertura</label>
-                                    <input type="text" id="patient-insurance" value="${data.insurance || ''}" placeholder="Ej: Aseguradora General..." ${userRole === 'paciente' ? 'disabled' : ''}>
-                                </div>
-                                <div class="input-group">
-                                    <label>Persona Encargada / Contacto de Emergencia</label>
-                                    <input type="text" id="patient-emergency" value="${data.emergency || ''}" placeholder="Ej: Esposa - María Pérez (55551234)" ${userRole === 'paciente' ? 'disabled' : ''}>
-                                </div>
-                            </div>
+                            <input type="text" id="view-sangre" value="${data.tipo_sangre || ''}" ${!isMed ? 'disabled' : ''}>
                         </div>
                     </div>
-                    <div class="input-group" style="margin-bottom: 25px;">
-                        <label>Notas / Observaciones Clínicas</label>
-                        <textarea id="patient-notes" style="background: rgba(0,0,0,0.2); border: 1px solid var(--card-border); border-radius: 12px; padding: 20px; color: white; font-family: inherit; font-size: 20px; resize: vertical; min-height: 120px;" placeholder="Detalles extra del expediente..." ${userRole === 'paciente' ? 'disabled' : ''}>${data.notes || ''}</textarea>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px;">
+                        <div class="input-group">
+                            <label>Ant. Personales / Quirúrgicos</label>
+                            <textarea id="view-ant-pers" style="height: 80px; width: 100%;" ${!isMed ? 'disabled' : ''}>${data.antecedentes_personales || ''}</textarea>
+                        </div>
+                        <div class="input-group">
+                            <label>Ant. Familiares</label>
+                            <textarea id="view-ant-fam" style="height: 80px; width: 100%;" ${!isMed ? 'disabled' : ''}>${data.antecedentes_familiares || ''}</textarea>
+                        </div>
                     </div>
-                    ${userRole === 'medico' ? `<button class="btn-primary" style="margin-top: 15px; font-size: 18px; width: 100%; box-sizing: border-box; padding: 24px; font-weight: 700; background: linear-gradient(135deg, var(--primary) 0%, #312e81 100%);" onclick="window.savePatientDataBtn()">GUARDAR DATOS DEL PACIENTE</button>` : ''}
-
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 50px; margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.05);">
-                        <h4 style="font-size: 20px; text-transform: uppercase; margin: 0; color: #fff;">Medicación Vigente / Recetas</h4>
-                        ${userRole === 'medico' ? `<button id="add-btn" class="btn-primary" style="margin:0; padding: 12px 20px; font-size: 16px;">+ Nueva Receta</button>` : ''}
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px;">
+                        <div class="input-group">
+                            <label>Medicamentos Actuales</label>
+                            <textarea id="view-meds-act" style="height: 60px; width: 100%;" ${!isMed ? 'disabled' : ''}>${data.medicamentos_actuales || ''}</textarea>
+                        </div>
+                        <div class="input-group">
+                            <label>Hábitos (Tabaco, Alcohol, Actividad)</label>
+                            <textarea id="view-habitos" style="height: 60px; width: 100%;" ${!isMed ? 'disabled' : ''}>${data.habitos || ''}</textarea>
+                        </div>
                     </div>
 
-                    <div id="med-form" style="display: none; background: rgba(0,0,0,0.3); padding: 40px; border-radius: 20px; margin-bottom: 30px; border: 1px solid rgba(255,255,255,0.05); box-shadow: inset 0 0 15px rgba(0,0,0,0.3);">
-                        <h4 style="color: var(--accent); margin-top: 0; margin-bottom: 25px; font-size: 20px; padding-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.1);">Agregando receta obligatoria a: <span style="color: #fff;">${patientName}</span></h4>
-                        <div class="dashboard-grid" style="gap: 30px;">
-                            <div class="input-group">
-                                <label>Nombre Medicamento</label>
-                                <input type="text" id="m-name">
-                            </div>
-                            <div class="input-group">
-                                <label>Dosis / Cantidad</label>
-                                <input type="text" id="m-dose">
-                            </div>
-                            <div class="input-group">
-                                <label>Frecuencia (Horas)</label>
-                                <input type="number" id="m-freq" placeholder="Ej: 8">
-                            </div>
-                            <div class="input-group">
-                                <label>Comenzar a las:</label>
-                                <input type="time" id="m-start" value="08:00">
-                            </div>
-                            <div class="input-group">
-                                <label>Periodo de Tratamiento (Días)</label>
-                                <input type="number" id="m-days" placeholder="Ej: 7">
-                            </div>
+                    <div class="input-group" style="margin-top: 30px; border-top: 2px solid var(--accent); padding-top: 25px;">
+                        <label style="font-size: 18px; color: var(--accent); margin-bottom: 10px;">Motivo de Consulta Actual / Evolución</label>
+                        <textarea id="view-motivo" style="height: 100px; width: 100%; background: rgba(34, 211, 238, 0.05); font-size: 18px;" ${!isMed ? 'disabled' : ''}>${data.illness || ''}</textarea>
+                    </div>
+
+                    ${isMed ? `<button class="btn-primary" style="width: 100%; margin-top: 30px; padding: 20px;" onclick="window.savePatientChanges()">ACTUALIZAR DATOS DEL EXPEDIENTE</button>` : ''}
+                </div>
+
+                <!-- Seccion 2: RECETAS -->
+                <div class="widget-card animate-in" style="grid-column: span 2; margin-top: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 15px; margin-bottom: 20px;">
+                        <h3 class="widget-title" style="margin: 0;">Medicación y Recetas</h3>
+                        ${isMed ? `<button id="add-btn" class="status-badge" style="background: var(--accent); color: #000; cursor: pointer; border: none; font-weight: 700; padding: 8px 15px;">+ NUEVA RECETA</button>` : ''}
+                    </div>
+                    
+                    <div id="med-form" style="display: none; background: rgba(0,0,0,0.2); padding: 25px; border-radius: 15px; margin-bottom: 25px; border: 1px dashed var(--accent);">
+                        <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                            <div class="input-group"><label>Medicamento</label><input type="text" id="m-name"></div>
+                            <div class="input-group"><label>Dosis</label><input type="text" id="m-dose"></div>
+                            <div class="input-group"><label>Frecuencia(h)</label><input type="number" id="m-freq"></div>
                         </div>
-                        <div class="input-group" style="margin-top: 25px;">
-                            <label>Indicaciones Extra</label>
-                            <input type="text" id="m-notes">
+                        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px;">
+                            <div class="input-group"><label>Inicio</label><input type="time" id="m-start" value="08:00"></div>
+                            <div class="input-group"><label>Días</label><input type="number" id="m-days"></div>
+                            <div class="input-group"><label>Indicaciones</label><input type="text" id="m-notes"></div>
                         </div>
-                        <div style="display: flex; gap: 20px; margin-top: 35px;">
-                            <button id="btn-med-save" class="btn-primary" style="flex: 2; padding: 24px; font-size: 18px;">GUARDAR RECETA AL EXPEDIENTE</button>
-                            <button id="btn-med-cancel" class="btn-primary" style="flex: 1; background: transparent; border: 1px solid var(--card-border); padding: 24px; font-size: 18px; color: var(--text-muted);">CANCELAR</button>
+                        <div style="display: flex; gap: 10px; margin-top: 20px;">
+                            <button id="btn-med-save" class="btn-primary" style="flex: 1; padding: 15px;">Guardar Receta</button>
+                            <button id="btn-med-cancel" class="btn-secondary" style="flex: 1; padding: 15px;">Cancelar</button>
                         </div>
                     </div>
 
                     <div class="med-list">
-                        ${data.meds.length > 0 ? data.meds.map(m => `
-                            <div class="widget-card" style="margin-bottom: 10px; background: rgba(255,255,255,0.02); padding: 15px;">
-                                <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                                    <div class="med-info">
-                                        <h4 style="color: var(--accent); margin-bottom: 5px; font-size: 18px;">${m.name}</h4>
-                                        <div style="background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px; margin: 8px 0;">
-                                            <p style="font-size: 16px;">Dosis: ${m.dose} | Cada ${m.frequency}h durante ${m.days} días</p>
-                                            <p style="font-size: 16px; color: #10b981; margin-top: 5px;"><strong>Horarios:</strong> ${window.getDailySchedule ? window.getDailySchedule(m.startTime, m.frequency) : m.startTime}</p>
-                                        </div>
-                                        <p style="font-size: 14px; color: var(--text-muted); font-style: italic; margin-top: 5px;">"${m.notes || 'Sin notas'}"</p>
-                                    </div>
-                                    ${userRole === 'medico' ? `<button class="status-badge" style="background: rgba(239, 68, 68, 0.1); color: var(--error); border:none; cursor:pointer;" onclick="window.deleteMed(${m.id})">QUITAR</button>` : '<span class="status-badge">Activo</span>'}
+                        ${(data.meds || []).length > 0 ? data.meds.map(m => `
+                            <div style="padding: 15px; background: rgba(255,255,255,0.03); border-radius: 12px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+                                <div>
+                                    <strong style="color: var(--accent); font-size: 18px;">${m.name}</strong>
+                                    <p style="font-size: 14px; opacity: 0.8; margin-top: 4px;">${m.dose} | Cada ${m.frequency}h | ${m.days} días | <span style="color: #10b981;">Inicia: ${m.startTime}</span></p>
+                                    <p style="font-size: 13px; font-style: italic; opacity: 0.6;">"${m.notes || 'Sin observaciones'}"</p>
                                 </div>
+                                ${isMed ? `<button class="status-badge" style="background: rgba(239, 68, 68, 0.1); color: var(--error); border: none;" onclick="window.deleteMed(${m.id})">Borrar</button>` : ''}
                             </div>
-                        `).join('') : '<p style="text-align: center; color: var(--text-muted);">Sin medicamentos/recetas asignados todavía.</p>'}
+                        `).join('') : '<p style="text-align: center; opacity: 0.5; padding: 20px;">No hay medicación asignada.</p>'}
                     </div>
                 </div>
 
-                <div class="widget-card animate-in" style="animation-delay: 0.1s; border: 3px solid rgba(34, 211, 238, 0.45); box-shadow: 0 0 20px rgba(34, 211, 238, 0.15), inset 0 0 10px rgba(34, 211, 238, 0.05); border-radius: 24px;">
-                    <h3 class="widget-title">Control de Conexión</h3>
-                    <p style="font-size: 16px; color: var(--text-muted); margin-bottom: 20px;">
-                        Active este código para que el paciente reciba las alertas en su dispositivo móvil.
-                    </p>
-                    <div style="text-align: center; padding: 20px; background: rgba(0,0,0,0.2); border-radius: 15px;">
-                        <h2 style="color: var(--accent); margin-bottom: 15px;">${selectedPatientQSL}</h2>
-                        ${localStorage.getItem(`active_qsl_${selectedPatientQSL}`) === 'true' ? `
-                            <p style="color: #10b981; font-size: 20px; margin-top: 15px; display: flex; align-items: center; justify-content: center; gap: 8px; font-weight: 700; background: rgba(16, 185, 129, 0.1); padding: 15px; border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.3);">
-                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
-                                ¡RECORDATORIOS ACTIVADOS!
-                            </p>
-                        ` : `
-                            <button id="btn-activate-reminders" class="btn-primary" style="width: 100%; background: #10b981; padding: 20px; font-size: 16px;">
-                                ACTIVAR OPCIÓN DE RECORDATORIOS
-                            </button>
-                        `}
-                    </div>
-                    ${userRole === 'medico' ? `
-                        <div style="display: flex; flex-direction: column; gap: 15px; margin-top: 25px;">
-                            <button id="btn-new-patient" class="btn-primary" style="width: 100%; background: var(--primary); padding: 20px; font-size: 16px;">+ Registro de Pacientes</button>
-                            <button id="btn-list-patients" class="btn-primary" style="width: 100%; background: rgba(255,255,255,0.05); padding: 20px; font-size: 16px;">Volver a Lista de Pacientes</button>
+                <!-- Seccion 3: OTROS DATOS -->
+                <div class="widget-card animate-in" style="grid-column: span 2; margin-top: 20px;">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 30px;">
+                        <div>
+                            <h4 style="color: var(--accent); font-size: 14px; text-transform: uppercase;">Acompañante / Emergencia</h4>
+                            <p style="margin-top: 10px;"><strong>Nombre:</strong> ${data.contacto_emergencia_nombre || 'No registrado'}</p>
+                            <p><strong>Relación:</strong> ${data.contacto_emergencia_relacion || '-'}</p>
+                            <p><strong>Tel:</strong> ${data.contacto_emergencia_tel || '-'}</p>
                         </div>
-                    ` : ''}
+                        <div>
+                            <h4 style="color: var(--accent); font-size: 14px; text-transform: uppercase;">Configuración de Conexión</h4>
+                            <div style="background: rgba(0,0,0,0.2); padding: 20px; border-radius: 15px; text-align: center; margin-top: 10px; border: 1px solid rgba(255,255,255,0.05);">
+                                <h3 style="color: var(--accent); margin-bottom: 10px; font-size: 24px;">${selectedPatientQSL}</h3>
+                                <p style="font-size: 13px; opacity: 0.6; margin-bottom: 20px;">Código para acceso desde app móvil</p>
+                                
+                                ${isMed ? `
+                                    <div id="status-container-${selectedPatientQSL}">
+                                        ${localStorage.getItem(`active_qsl_${selectedPatientQSL}`) === 'true' ? `
+                                            <div style="color: #10b981; font-weight: 700; background: rgba(16, 185, 129, 0.1); padding: 12px; border-radius: 10px; border: 1px solid rgba(16, 185, 129, 0.3); margin-bottom: 15px;">
+                                                ✓ SERVICIO ACTIVADO
+                                            </div>
+                                            <button class="status-badge" style="background: rgba(239, 68, 68, 0.1); color: var(--error); border: none; cursor: pointer; width: 100%;" onclick="window.toggleAlerts('${selectedPatientQSL}', false)">DESACTIVAR ALERTAS</button>
+                                        ` : `
+                                            <button class="btn-primary" style="width: 100%; background: #10b981; padding: 15px;" onclick="window.toggleAlerts('${selectedPatientQSL}', true)">
+                                                ACTIVAR ALERTAS MÓVILES
+                                            </button>
+                                        `}
+                                    </div>
+                                ` : `
+                                     <div style="color: ${localStorage.getItem(`active_qsl_${selectedPatientQSL}`) === 'true' ? '#10b981' : 'var(--error)'}; font-weight: 600;">
+                                        STATUS: ${localStorage.getItem(`active_qsl_${selectedPatientQSL}`) === 'true' ? 'ACTIVADO' : 'PENDIENTE'}
+                                     </div>
+                                `}
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         `;
 
-        if (userRole === 'medico') {
-            const inputsToAutoSave = Array.from(contentArea.querySelectorAll('input:not([type="checkbox"]):not([type="button"]):not([type="time"]), textarea'));
-            inputsToAutoSave.forEach((input, index) => {
-                input.addEventListener('keydown', (e) => {
-                    if (e.key === 'Enter' || e.key === 'Tab') {
-                        window.savePatientDataBtn(true);
-
-                        if (e.key === 'Enter') {
-                            e.preventDefault();
-                            if (index + 1 < inputsToAutoSave.length) {
-                                inputsToAutoSave[index + 1].focus();
-                            }
-                        }
-                    }
-                });
-            });
-
-            const addBtn = document.getElementById('add-btn');
-            if (addBtn) {
-                addBtn.onclick = () => {
-                    document.getElementById('med-form').style.display = 'block';
-                    addBtn.style.display = 'none';
-                };
-            }
-
-            const btnCancel = document.getElementById('btn-med-cancel');
-            if (btnCancel) {
-                btnCancel.onclick = () => {
-                    document.getElementById('med-form').style.display = 'none';
-                    if (addBtn) addBtn.style.display = 'block';
-                };
-            }
-
-            const btnSave = document.getElementById('btn-med-save');
-            if (btnSave) {
-                btnSave.onclick = () => {
-                    const med = {
-                        id: Date.now(),
-                        name: document.getElementById('m-name').value,
-                        dose: document.getElementById('m-dose').value,
-                        frequency: document.getElementById('m-freq').value,
-                        startTime: document.getElementById('m-start').value,
-                        days: document.getElementById('m-days').value,
-                        notes: document.getElementById('m-notes').value
-                    };
-                    if (med.name && med.dose && med.frequency) {
-                        const patientData = getPatientData(selectedPatientQSL);
-                        patientData.meds.push(med);
-                        savePatientData(selectedPatientQSL, patientData);
-                        loadSection('overview');
-                        window.showElegantAlert('Receta Agregada', `Se ha agregado ${med.name} correctamente al expediente.`);
-                    } else { window.showElegantAlert('Campos Incompletos', 'Complete los campos obligatorios para guardar la receta', true); }
-                };
-            }
-
-            const btnActivate = document.getElementById('btn-activate-reminders');
-            if (btnActivate) {
-                btnActivate.onclick = () => window.activateCode(selectedPatientQSL);
-            }
-
-            const btnNewPatient = document.getElementById('btn-new-patient');
-            if (btnNewPatient) {
-                btnNewPatient.onclick = () => {
-                    selectedPatientQSL = null;
-                    loadSection('overview');
-                };
-            }
-
-            const btnListPatients = document.getElementById('btn-list-patients');
-            if (btnListPatients) {
-                btnListPatients.onclick = () => {
-                    selectedPatientQSL = null;
-                    loadSection('overview');
-                };
-            }
+        if (isMed) {
+            setupMedFormActions();
         }
-
     }
+
+    window.savePatientChanges = () => {
+        const data = getPatientData(selectedPatientQSL);
+        data.nombre_completo = document.getElementById('view-nombre').value;
+        data.fecha_nacimiento = document.getElementById('view-fecha-nac').value;
+        data.edad = document.getElementById('view-edad').value;
+        data.genero = document.getElementById('view-genero').value;
+        data.id_identificacion = document.getElementById('view-id').value;
+        data.estado_civil = document.getElementById('view-civil').value;
+        data.ocupacion = document.getElementById('view-ocupacion').value;
+        data.direccion = document.getElementById('view-direccion').value;
+        data.telefono = document.getElementById('view-telefono').value;
+        data.email = document.getElementById('view-email').value;
+        data.seguro_medico = document.getElementById('view-seguro').value;
+        data.contacto_emergencia_nombre = document.getElementById('view-emerg-nombre').value;
+        data.contacto_emergencia_relacion = document.getElementById('view-emerg-rel').value;
+        data.contacto_emergencia_tel = document.getElementById('view-emerg-tel').value;
+        data.alergias = document.getElementById('view-alergias').value;
+        data.tipo_sangre = document.getElementById('view-sangre').value;
+        data.antecedentes_personales = document.getElementById('view-ant-pers').value;
+        data.antecedentes_familiares = document.getElementById('view-ant-fam').value;
+        data.medicamentos_actuales = document.getElementById('view-meds-act').value;
+        data.habitos = document.getElementById('view-habitos').value;
+        data.illness = document.getElementById('view-motivo').value;
+
+        savePatientData(selectedPatientQSL, data);
+        localStorage.setItem(`patient_name_${selectedPatientQSL}`, data.nombre_completo);
+        window.showElegantAlert('Cambios Guardados', 'El expediente ha sido actualizado exitosamente.');
+        renderOverview(data);
+    };
+
+    function setupMedFormActions() {
+        const addBtn = document.getElementById('add-btn');
+        const medForm = document.getElementById('med-form');
+        const btnSave = document.getElementById('btn-med-save');
+        const btnCancel = document.getElementById('btn-med-cancel');
+
+        if (addBtn && medForm) {
+            addBtn.onclick = () => { medForm.style.display = 'block'; addBtn.style.display = 'none'; };
+            btnCancel.onclick = () => { medForm.style.display = 'none'; addBtn.style.display = 'inline-block'; };
+            btnSave.onclick = () => {
+                const med = {
+                    id: Date.now(),
+                    name: document.getElementById('m-name').value,
+                    dose: document.getElementById('m-dose').value,
+                    frequency: document.getElementById('m-freq').value,
+                    startTime: document.getElementById('m-start').value,
+                    days: document.getElementById('m-days').value,
+                    notes: document.getElementById('m-notes').value
+                };
+                if (med.name && med.dose && med.frequency) {
+                    const data = getPatientData(selectedPatientQSL);
+                    data.meds.push(med);
+                    savePatientData(selectedPatientQSL, data);
+                    renderOverview(data);
+                    window.showElegantAlert('Receta Guardada', 'Medicamento añadido al historial.');
+                }
+            };
+        }
+    }
+
+
+
+    window.deleteMed = (id) => {
+        if (confirm('¿Eliminar este medicamento de la receta actual?')) {
+            const data = getPatientData(selectedPatientQSL);
+            data.meds = data.meds.filter(m => m.id !== id);
+            savePatientData(selectedPatientQSL, data);
+            renderOverview(data);
+        }
+    };
 
     window.toggleGlucoseFeature = (enabled) => {
         const data = getPatientData(selectedPatientQSL);
@@ -512,6 +746,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     window.addGlucose = () => {
         const input = document.getElementById('patient-glucose');
+        if (!input) return;
         const val = input.value.trim();
         if (!val) return;
         const data = getPatientData(selectedPatientQSL);
@@ -519,83 +754,52 @@ document.addEventListener('DOMContentLoaded', () => {
         const now = new Date();
         const dateStr = now.toLocaleDateString('es-ES') + ' a las ' + now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
         data.glucoseHistory.unshift({ value: val, date: dateStr });
-        if (data.glucoseHistory.length > 2) data.glucoseHistory = data.glucoseHistory.slice(0, 2);
+        if (data.glucoseHistory.length > 5) data.glucoseHistory = data.glucoseHistory.slice(0, 5);
         savePatientData(selectedPatientQSL, data);
-        loadSection('overview'); // Refrescar para ver el listado actualizado
+        renderOverview(data);
     };
 
     window.addQuickGlucose = () => {
         const input = document.getElementById('patient-glucose-quick');
+        if (!input) return;
         let val = input.value.trim();
         if (!val) return;
-
-        // Formatear valor si sólo ponen el número
         if (!val.toLowerCase().includes('mg/dl')) val += ' mg/dL';
-
         const data = getPatientData(selectedPatientQSL);
         if (!data.glucoseHistory) data.glucoseHistory = [];
         const now = new Date();
         const dateStr = now.toLocaleDateString('es-ES') + ' a las ' + now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
-
         data.glucoseHistory.unshift({ value: val, date: dateStr });
-        if (data.glucoseHistory.length > 2) data.glucoseHistory = data.glucoseHistory.slice(0, 2);
-
+        if (data.glucoseHistory.length > 5) data.glucoseHistory = data.glucoseHistory.slice(0, 5);
         savePatientData(selectedPatientQSL, data);
-        window.showElegantAlert('¡Guardado!', `Nivel de glucosa ${val} registrado en su expediente.`);
-        loadSection('reminders'); // Recarga en la misma página del paciente
+        window.showElegantAlert('¡Guardado!', `Nivel de glucosa ${val} registrado.`);
     };
 
-    window.savePatientDataBtn = (silent = false) => {
-        const data = getPatientData(selectedPatientQSL);
-        data.illness = document.getElementById('patient-illness').value.trim();
-        data.allergies = document.getElementById('patient-allergies').value.trim();
-        data.blood = document.getElementById('patient-blood').value.trim();
-        data.weight = document.getElementById('patient-weight').value.trim();
-        data.phone = document.getElementById('patient-phone').value.trim();
-
-        const emailInput = document.getElementById('patient-email');
-        if (emailInput) data.email = emailInput.value.trim();
-        const dpiInput = document.getElementById('patient-dpi');
-        if (dpiInput) data.dpi = dpiInput.value.trim();
-        const insInput = document.getElementById('patient-insurance');
-        if (insInput) data.insurance = insInput.value.trim();
-        const emerInput = document.getElementById('patient-emergency');
-        if (emerInput) data.emergency = emerInput.value.trim();
-
-        const enabledCheckbox = document.getElementById('patient-glucose-enabled');
-        if (enabledCheckbox) {
-            data.glucoseEnabled = enabledCheckbox.checked;
-        }
-
-        // Si hay algo escrito en glucosa sin guardar, guardarlo también
-        const glucoseInput = document.getElementById('patient-glucose');
-        if (glucoseInput) {
-            const glucoseVal = glucoseInput.value.trim();
-            if (glucoseVal && !silent) {
-                if (!data.glucoseHistory) data.glucoseHistory = [];
-                const now = new Date();
-                const dateStr = now.toLocaleDateString('es-ES') + ' a las ' + now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
-                data.glucoseHistory.unshift({ value: glucoseVal, date: dateStr });
-                if (data.glucoseHistory.length > 2) data.glucoseHistory = data.glucoseHistory.slice(0, 2);
+    window.toggleAlerts = async (qsl, enabled) => {
+        try {
+            const resp = await fetch(`/api/patient/${qsl}/alerts`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled })
+            });
+            const result = await resp.json();
+            if (result.success) {
+                localStorage.setItem(`active_qsl_${qsl}`, enabled ? 'true' : 'false');
+                const data = await getPatientData(qsl);
+                renderOverview(data);
+                if (enabled) {
+                    window.showElegantAlert('Servicio Activado', `¡El paciente con código ${qsl} ya recibirá sus alertas en su dispositivo!`);
+                } else {
+                    window.showElegantAlert('Servicio Desactivado', `Se han pausado las alertas para el paciente ${qsl}.`);
+                }
             }
-        }
-
-        data.notes = document.getElementById('patient-notes').value.trim();
-        savePatientData(selectedPatientQSL, data);
-
-        if (!silent) {
-            window.showElegantAlert('¡Guardado Exitoso!', 'Datos del paciente actualizados correctamente en el sistema.');
-            loadSection('overview'); // Refresca para mostrar la glucosa si se auto-agregó
+        } catch (e) {
+            console.error(e);
+            window.showElegantAlert('Error', 'No se pudo sincronizar con el servidor.', true);
         }
     };
 
-    window.activateCode = (qsl) => {
-        // En un sistema real, esto activaría un socket o notificación push.
-        // Aquí simulamos que el QSL ahora es "rastreable".
-        localStorage.setItem(`active_qsl_${qsl}`, 'true');
-        loadSection('overview'); // Refresca la vista para mostrar el chequecito de Activado
-        window.showElegantAlert('Servicio Activado', `¡El paciente con código ${qsl} ya recibirá sus alertas en su dispositivo!`);
-    };
+    window.activateCode = (qsl) => window.toggleAlerts(qsl, true);
 
     window.showElegantAlert = (title, message, isError = false) => {
         const modal = document.getElementById('custom-alert-modal');
@@ -611,17 +815,6 @@ document.addEventListener('DOMContentLoaded', () => {
             icon.style.filter = 'drop-shadow(0 0 10px rgba(34, 211, 238, 0.4))';
         }
         modal.style.display = 'flex';
-    };
-
-
-
-    window.deleteMed = (id) => {
-        if (confirm('¿Eliminar medicamento del expediente?')) {
-            const data = getPatientData(selectedPatientQSL);
-            data.meds = data.meds.filter(m => m.id !== id);
-            savePatientData(selectedPatientQSL, data);
-            loadSection('overview');
-        }
     };
 
     function renderReminders(data) {
@@ -722,7 +915,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         html += `
                     ${medsToDisplay.map(m => {
-            if (isPaciente && !isActivated) return ''; // No renderizar si no está activado
 
             const nextDose = calculateNextDose(m.startTime, m.frequency);
             const isDue = isDoseDue(m.id, m.startTime, m.frequency);
@@ -780,13 +972,13 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }).join('')}
                 </div>
-                ${medsToDisplay.length === 0 || (isPaciente && !isActivated) ? `
+                ${medsToDisplay.length === 0 ? `
                     <div style="text-align: center; padding: 40px 20px; background: rgba(0,0,0,0.15); border-radius: 16px; margin-top: 15px; border: 1px dashed rgba(255,255,255,0.08); display: flex; flex-direction: column; align-items: center; justify-content: center;">
                         <div style="width: 50px; height: 50px; border-radius: 50%; background: rgba(255,255,255,0.03); display: flex; align-items: center; justify-content: center; margin-bottom: 15px;">
                             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
                         </div>
                         <h4 style="color: rgba(255,255,255,0.9); font-size: 16px; margin-bottom: 8px; font-weight: 600;">Sin medicamentos pendientes</h4>
-                        <p style="color: rgba(255,255,255,0.5); font-size: 14px; line-height: 1.5; max-width: 250px;">${!isActivated && isPaciente ? 'Su médico aún no ha habilitado las alertas para su perfil.' : 'Ha completado sus tomas o no tiene recetas activas por ahora.'}</p>
+                        <p style="color: rgba(255,255,255,0.5); font-size: 14px; line-height: 1.5; max-width: 250px;">Ha completado sus tomas o no tiene recetas activas por ahora.</p>
                     </div>
                 ` : ''}
                 
@@ -943,25 +1135,34 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (e) { return false; }
     }
 
-    function renderSettings() {
+    async function renderSettings() {
         const isDoc = userRole === 'medico';
+        const isProgrammer = qslCode === 'MED-MASTER';
         const docId = localStorage.getItem('current_doctor_id');
         let docName = '';
         if (isDoc) {
-            const medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
-            const doc = medicos.find(m => m.id_medico === docId);
-            docName = doc ? doc.usuario : (localStorage.getItem('doctor_master_name') || 'Médico');
+            try {
+                const resp = await fetch('/api/medicos');
+                const result = await resp.json();
+                const medicos = result.medicos || [];
+                const doc = medicos.find(m => m.id_medico === docId);
+                docName = doc ? doc.usuario : (localStorage.getItem('doctor_master_name') || 'Admin');
+            } catch (e) {
+                const medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+                const doc = medicos.find(m => m.id_medico === docId);
+                docName = doc ? doc.usuario : (localStorage.getItem('doctor_master_name') || 'Admin');
+            }
         }
 
         contentArea.innerHTML = `
-            <div class="widget-card animate-in" style="max-width: 500px; margin: 0 auto; border: 3px solid rgba(34, 211, 238, 0.45); box-shadow: 0 0 20px rgba(34, 211, 238, 0.15), inset 0 0 10px rgba(34, 211, 238, 0.05); border-radius: 24px; padding: 40px;">
-                <h3 class="widget-title">Datos del Médico</h3>
+            <div class="widget-card animate-in" style="max-width: 500px; margin: 0 auto; border: 3px solid #fbbf24; box-shadow: 0 0 20px rgba(251, 191, 36, 0.1); border-radius: 24px; padding: 40px;">
+                <h3 class="widget-title" style="color: #fbbf24;">${isProgrammer ? 'Perfil de Programador' : 'Datos del Médico'}</h3>
                 <div class="input-group" style="margin-bottom: 20px;">
-                    <label>Nombre Maestro (Médico)</label>
+                    <label>${isProgrammer ? 'Nombre de Administrador' : 'Nombre Maestro (Médico)'}</label>
                     <input type="text" id="new-doc-name" value="${docName}" disabled style="opacity: 0.7; cursor: not-allowed;">
                 </div>
                 <div class="input-group" style="margin-bottom: 20px;">
-                    <label>Clave de Acceso Actual *</label>
+                    <label>Clave Maestra Actual *</label>
                     <input type="password" id="current-doc-pass" placeholder="Ingresar clave actual para autorizar..." ${!isDoc ? 'disabled' : ''}>
                 </div>
                 <div class="input-group" style="margin-bottom: 20px;">
@@ -969,26 +1170,32 @@ document.addEventListener('DOMContentLoaded', () => {
                     <input type="password" id="new-doc-pass" placeholder="Ingresar nueva clave..." ${!isDoc ? 'disabled' : ''}>
                 </div>
                 ${isDoc ? `
-                    <button class="btn-primary" style="width: 100%; margin-bottom: 20px;" onclick="window.updateDocProfile()">GUARDAR CAMBIO DE CLAVE</button>
-                ` : '<p style="font-size: 16px; color: var(--text-muted); opacity: 0.7;">Los pacientes gestionan su perfil mediante su código único.</p>'}
+                    <button class="btn-primary" style="width: 100%; margin-bottom: 20px; background: #fbbf24; color: #000; font-weight: 800;" onclick="window.updateDocProfile()">ACTUALIZAR CREDENCIALES</button>
+                ` : ''}
                 <hr style="border:0; border-top: 1px solid var(--card-border); margin: 20px 0;">
                 <button class="btn-primary" style="width: 100%; background: var(--error);" onclick="localStorage.removeItem('user_qsl_code'); window.location.href='index.html';">CERRAR SESIÓN</button>
             </div>
         `;
     }
 
-    window.updateDocProfile = () => {
+    window.updateDocProfile = async () => {
         const name = document.getElementById('new-doc-name').value.trim();
         const currentPass = document.getElementById('current-doc-pass').value.trim();
         const newPass = document.getElementById('new-doc-pass').value.trim();
 
         const docId = localStorage.getItem('current_doctor_id');
-        let medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
-        const docIndex = medicos.findIndex(m => m.id_medico === docId);
+        let medicos = [];
+        try {
+            const resp = await fetch('/api/medicos');
+            const result = await resp.json();
+            medicos = result.medicos || [];
+        } catch (e) {
+            medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+        }
 
+        const docIndex = medicos.findIndex(m => m.id_medico === docId);
         if (docIndex === -1) return;
 
-        // Validar clave actual
         if (!currentPass || btoa(currentPass) !== medicos[docIndex].password_hash) {
             window.showElegantAlert('Error de Autorización', 'La clave actual ingresada es incorrecta. No se pueden guardar cambios.', true);
             return;
@@ -997,9 +1204,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (name) {
             medicos[docIndex].usuario = name;
             medicos[docIndex].nombre_completo = name;
-            localStorage.setItem('user_real_name', name); // Actualizar interfaz activa
+            localStorage.setItem('user_real_name', name);
 
-            // Si el master antiguo está activo
             if (docId === 'MED-MASTER') {
                 localStorage.setItem('doctor_master_name', name);
             }
@@ -1007,22 +1213,119 @@ document.addEventListener('DOMContentLoaded', () => {
             if (newPass) {
                 const passHash = btoa(newPass);
                 medicos[docIndex].password_hash = passHash;
-
-                if (docId === 'MED-MASTER') {
-                    localStorage.setItem('doctor_master_pass', passHash);
-                }
-
-                window.showElegantAlert('Clave Actualizada', 'Nombre y Clave actualizados con éxito. Recuerde la nueva clave.');
+                if (docId === 'MED-MASTER') localStorage.setItem('doctor_master_pass', passHash);
+                window.showElegantAlert('Clave Actualizada', 'Nombre y Clave actualizados con éxito.');
             } else {
                 window.showElegantAlert('Perfil Actualizado', 'Nombre actualizado correctamente.');
             }
 
-            localStorage.setItem('tabla_medicos', JSON.stringify(medicos));
-            updateUserDisplay();
+            try {
+                await fetch(`/api/medico/${docId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(medicos[docIndex])
+                });
+                localStorage.setItem('tabla_medicos', JSON.stringify(medicos));
+            } catch (e) { console.error('Save medico error:', e); }
 
-            // Limpiar campos de contraseña por seguridad
+            updateUserDisplay();
             document.getElementById('current-doc-pass').value = '';
             document.getElementById('new-doc-pass').value = '';
+        }
+    };
+
+    function renderConsultation(data) {
+        if (!data.consultations) data.consultations = [];
+        const isMed = userRole === 'medico';
+
+        let html = `
+            <div class="dashboard-grid">
+                <div class="widget-card animate-in" style="grid-column: span 2; padding: 40px; border: 3px solid rgba(16, 185, 129, 0.4); border-radius: 24px;">
+                    <h3 class="widget-title" style="font-size: 26px; color: #10b981; border-bottom: 2px solid rgba(16, 185, 129, 0.1); padding-bottom: 15px; margin-bottom: 25px; display: flex; justify-content: space-between;">
+                        <span>Gestión de Consultas Médicas</span>
+                        <span style="font-size: 16px; opacity: 0.7;">QSL: ${selectedPatientQSL}</span>
+                    </h3>
+                    
+                    ${isMed ? `
+                    <div style="background: rgba(0,0,0,0.2); padding: 25px; border-radius: 15px; margin-bottom: 30px; border: 1px solid rgba(255,255,255,0.05);">
+                        <h4 style="color: #10b981; margin-bottom: 20px; font-size: 18px;">Nueva Consulta</h4>
+                        <div class="input-group" style="margin-bottom: 20px;">
+                            <label>Motivo de Consulta / Síntomas</label>
+                            <input type="text" id="c-moivo" placeholder="Describa el motivo principal...">
+                        </div>
+                        <div class="input-group" style="margin-bottom: 20px;">
+                            <label>Notas Clínicas / Evolución</label>
+                            <textarea id="c-notas" style="height: 100px; width: 100%;" placeholder="Examen físico, hallazgos, diagnóstico..."></textarea>
+                        </div>
+                        <div class="input-group" style="margin-bottom: 20px;">
+                            <label>Referencias / Anexos / Exámenes Extras</label>
+                            <textarea id="c-referencias" style="height: 70px; width: 100%;" placeholder="Laboratorios solicitados, referencias a especialistas..."></textarea>
+                        </div>
+                        <button class="btn-primary" style="width: 100%; background: #10b981; padding: 15px;" onclick="window.saveConsultation()">
+                            GUARDAR CONSULTA
+                        </button>
+                    </div>
+                    ` : '<div style="text-align: center; color: var(--text-muted); margin-bottom: 30px; font-style: italic;">Solo su médico tratante puede editar las consultas.</div>'}
+
+                    <h3 class="widget-title" style="font-size: 20px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 10px; margin-bottom: 20px;">
+                        Historial de Consultas (${data.consultations.length})
+                    </h3>
+                    <div class="consultation-list">
+                        ${data.consultations.length > 0 ? data.consultations.slice().sort((a,b)=>b.id-a.id).map(c => `
+                            <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); padding: 20px; border-radius: 15px; margin-bottom: 15px; position:relative;">
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 10px; align-items:flex-start;">
+                                    <strong style="color: #10b981; font-size: 18px;">Consulta: ${c.date}</strong>
+                                    ${isMed ? `<button class="status-badge" style="background: rgba(239, 68, 68, 0.1); color: var(--error); border: none;" onclick="window.deleteConsultation(${c.id})">Borrar</button>` : ''}
+                                </div>
+                                <p style="margin-bottom: 8px; font-size:16px;"><strong>Motivo:</strong> ${c.motivo}</p>
+                                <p style="margin-bottom: 8px; color: rgba(255,255,255,0.85); font-size:15px; line-height:1.4;"><strong>Notas:</strong><br/>${c.notas.replace(/\n/g, '<br>')}</p>
+                                ${c.referencias ? `<p style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.1); color: #fbbf24; font-size:14px;"><strong>Referencias/Estudios:</strong><br/>${c.referencias.replace(/\n/g, '<br>')}</p>` : ''}
+                            </div>
+                        `).join('') : '<p style="text-align:center; opacity:0.5; padding: 20px;">No hay consultas registradas todavía.</p>'}
+                    </div>
+
+                    <div style="margin-top: 30px; text-align: center;">
+                        <button class="btn-secondary" style="border: 2px solid var(--accent); color: white;" onclick="loadSection('overview')">Ver Expediente y Recetas</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        contentArea.innerHTML = html;
+    }
+
+    window.saveConsultation = () => {
+        const motivo = document.getElementById('c-moivo').value.trim();
+        const notas = document.getElementById('c-notas').value.trim();
+        const referencias = document.getElementById('c-referencias').value.trim();
+        if (!motivo || !notas) {
+            window.showElegantAlert('Faltan Datos', 'El motivo y las notas clínicas son obligatorios.', true);
+            return;
+        }
+
+        const data = getPatientData(selectedPatientQSL);
+        if(!data.consultations) data.consultations = [];
+        const now = new Date();
+        data.consultations.push({
+            id: now.getTime(),
+            date: now.toLocaleDateString('es-ES') + ' a las ' + now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }),
+            motivo,
+            notas,
+            referencias
+        });
+        
+        savePatientData(selectedPatientQSL, data);
+        window.showElegantAlert('Consulta Guardada', 'La consulta y la evolución han sido registradas en el historial.');
+        renderConsultation(data);
+    };
+
+    window.deleteConsultation = (id) => {
+        if (confirm('¿Eliminar esta consulta del historial? Esta acción no se puede deshacer.')) {
+            const data = getPatientData(selectedPatientQSL);
+            if(data.consultations) {
+                data.consultations = data.consultations.filter(c => c.id !== id);
+                savePatientData(selectedPatientQSL, data);
+                renderConsultation(data);
+            }
         }
     };
 
@@ -1064,12 +1367,233 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function getSectionTitle(name) {
-        const titles = { overview: 'Expediente', reminders: 'Seguimiento', settings: 'Datos del Médico' };
+        const titles = { 
+            overview: 'Expediente', 
+            reminders: 'Seguimiento', 
+            consultation: 'Consulta Médica',
+            settings: 'Datos del Médico',
+            programmer: 'Módulo Programador (Super Admin)'
+        };
         return titles[name] || 'H-Control';
     }
 
     function updateDate() {
-        const options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
-        dateDisplay.textContent = new Date().toLocaleDateString('es-ES', options);
+        const activeCompany = JSON.parse(localStorage.getItem('active_company') || 'null');
+        const locale = activeCompany ? activeCompany.dateLocale : 'es-ES';
+        const tz = activeCompany ? activeCompany.timezone : undefined;
+        
+        const options = { 
+            weekday: 'long', 
+            year: 'numeric', 
+            month: 'long', 
+            day: 'numeric',
+            timeZone: tz
+        };
+        
+        try {
+            const now = new Date();
+            const dateStr = now.toLocaleDateString(locale, options);
+            const timeStr = now.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: tz });
+            dateDisplay.textContent = `${dateStr} | ${timeStr}`;
+        } catch (e) {
+            dateDisplay.textContent = new Date().toLocaleDateString('es-ES', options);
+        }
     }
+    
+    // Actualizar reloj cada segundo
+    setInterval(updateDate, 1000);
+
+    // --- MÓDULO PROGRAMADOR ---
+    const countryData = {
+        "GT": { name: "Guatemala", currency: "GTQ", timezone: "America/Guatemala", dateLocale: "es-GT", taxIdName: "NIT" },
+        "ES": { name: "España", currency: "EUR", timezone: "Europe/Madrid", dateLocale: "es-ES", taxIdName: "NIF/CIF" },
+        "US": { name: "Estados Unidos", currency: "USD", timezone: "America/New_York", dateLocale: "en-US", taxIdName: "Tax ID" },
+        "MX": { name: "México", currency: "MXN", timezone: "America/Mexico_City", dateLocale: "es-MX", taxIdName: "RFC" },
+        "CO": { name: "Colombia", currency: "COP", timezone: "America/Bogota", dateLocale: "es-CO", taxIdName: "NIT" },
+        "AR": { name: "Argentina", currency: "ARS", timezone: "America/Argentina/Buenos_Aires", dateLocale: "es-AR", taxIdName: "CUIT" },
+        "CL": { name: "Chile", currency: "CLP", timezone: "America/Santiago", dateLocale: "es-CL", taxIdName: "RUT" }
+    };
+
+    async function renderProgrammer() {
+        let medicos = [];
+        try {
+            const resp = await fetch('/api/medicos');
+            const result = await resp.json();
+            medicos = result.medicos || [];
+        } catch (e) {
+            medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+        }
+        
+        contentArea.innerHTML = `
+            <div class="programmer-dashboard animate-in">
+                <div style="display: grid; grid-template-columns: 1fr 400px; gap: 30px;">
+                    <div class="widget-card" style="border: 3px solid #fbbf24; box-shadow: 0 0 20px rgba(251, 191, 36, 0.1);">
+                        <h3 class="widget-title" style="color: #fbbf24; border-bottom: 2px solid rgba(251, 191, 36, 0.2); padding-bottom: 20px;">
+                            Lista de Médicos Registrados
+                        </h3>
+                        <div class="doctor-list" style="margin-top: 30px; display: grid; gap: 20px;">
+                            ${medicos.length > 0 ? medicos.map(doc => `
+                                <div class="med-item" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); padding: 20px; border-radius: 16px;">
+                                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                                        <div>
+                                            <h4 style="font-size: 20px; color: white; margin-bottom: 5px;">${doc.nombre_completo}</h4>
+                                            <p style="color: var(--accent); font-weight: 600; font-size: 14px;">DPI/ID: ${doc.id_medico} | NIT: ${doc.nit || 'N/A'}</p>
+                                            <p style="color: var(--text-muted); font-size: 13px; margin-top: 5px;">
+                                                País: ${doc.pais_nombre || doc.pais} | Moneda: ${doc.moneda}
+                                                <br>Contacto: ${doc.telefono || 'Sin tel.'} | ${doc.correo || 'Sin correo'}
+                                            </p>
+                                        </div>
+                                        <div style="text-align: right;">
+                                            <div style="background: #fbbf24; color: #000; padding: 10px 15px; border-radius: 10px; font-weight: 800; font-size: 18px; margin-bottom: 10px; display: inline-block; letter-spacing: 2px; font-family: monospace;">
+                                                 ${doc.password_hash ? atob(doc.password_hash) : '---'}
+                                            </div>
+                                            <br>
+                                            <button class="status-badge" style="background: rgba(239, 68, 68, 0.1); color: var(--error); border: 1px solid rgba(239, 68, 68, 0.2); cursor: pointer;" onclick="window.deleteDoctor('${doc.id_medico}')">ELIMINAR</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            `).join('') : '<div style="text-align:center; padding: 40px; border: 2px dashed rgba(255,255,255,0.05); border-radius: 20px; color: var(--text-muted);">No hay médicos registrados todavía.</div>'}
+                        </div>
+                    </div>
+
+                    <div class="widget-card" style="border: 2px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2);">
+                        <h3 class="widget-title" style="font-size: 22px; color: #fbbf24;">Registrar Nuevo Médico</h3>
+                        <div class="input-group" style="margin-bottom: 12px;">
+                            <label>Nombre Completo</label>
+                            <input type="text" id="doc-new-name" placeholder="Ej. Dr. Roberto Gómez">
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                            <div class="input-group" style="margin-bottom: 12px;">
+                                <label>DPI / ID (Clave Primaria)</label>
+                                <input type="text" id="doc-new-dpi" placeholder="ID Único">
+                            </div>
+                            <div class="input-group" style="margin-bottom: 12px;">
+                                <label>NIT / Tax ID</label>
+                                <input type="text" id="doc-new-nit" placeholder="Nit">
+                            </div>
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1.5fr; gap: 15px;">
+                            <div class="input-group" style="margin-bottom: 12px;">
+                                <label>Edad</label>
+                                <input type="number" id="doc-new-age" placeholder="Años">
+                            </div>
+                            <div class="input-group" style="margin-bottom: 12px;">
+                                <label>País</label>
+                                <select id="doc-new-country" onchange="window.updateDocNewDefaults()" style="width: 100%; background: rgba(0,0,0,0.4); border: 1px solid var(--card-border); padding: 12px; border-radius: 12px; color: white;">
+                                    ${Object.keys(countryData).map(code => `<option value="${code}">${countryData[code].name}</option>`).join('')}
+                                </select>
+                            </div>
+                        </div>
+                        <div class="input-group" style="margin-bottom: 12px;">
+                            <label>Teléfono</label>
+                            <input type="text" id="doc-new-phone" placeholder="+502 ...">
+                        </div>
+                        <div class="input-group" style="margin-bottom: 12px;">
+                            <label>Correo Electrónico</label>
+                            <input type="email" id="doc-new-email" placeholder="medico@ejemplo.com">
+                        </div>
+                        <div class="input-group" style="margin-bottom: 25px;">
+                            <label>Moneda Configurada</label>
+                            <input type="text" id="doc-new-currency" readonly style="opacity: 0.6; background: rgba(255,255,255,0.05);">
+                        </div>
+                        
+                        <button class="btn-primary" style="width: 100%; background: #fbbf24; color: #000; font-weight: 800; padding: 22px; font-size: 18px;" onclick="window.saveNewDoctor()">
+                            GENERAR ACCESO Y REGISTRAR
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+        window.updateDocNewDefaults();
+    }
+
+    window.updateDocNewDefaults = () => {
+        const countryCode = document.getElementById('doc-new-country').value;
+        const data = countryData[countryCode];
+        if (data) {
+            document.getElementById('doc-new-currency').value = data.currency;
+        }
+    };
+
+    window.saveNewDoctor = async () => {
+        const nombre = document.getElementById('doc-new-name').value.trim();
+        const dpi = document.getElementById('doc-new-dpi').value.trim();
+        const nit = document.getElementById('doc-new-nit').value.trim();
+        const age = document.getElementById('doc-new-age').value.trim();
+        const pais = document.getElementById('doc-new-country').value;
+        const phone = document.getElementById('doc-new-phone').value.trim();
+        const email = document.getElementById('doc-new-email').value.trim();
+        
+        if (!nombre || !dpi) {
+            window.showElegantAlert('Datos Incompletos', 'Se requiere al menos el Nombre y el número de Identificación (DPI/ID).', true);
+            return;
+        }
+
+        const data = countryData[pais];
+        const randomCode = Math.floor(100000 + Math.random() * 900000).toString();
+        
+        const newDoc = {
+            id_medico: dpi,
+            nombre_completo: nombre,
+            especialidad: 'Medicina General',
+            usuario: nombre.replace(/\s+/g, '').toUpperCase(),
+            password_hash: btoa(randomCode),
+            nit, edad: age, pais,
+            pais_nombre: data.name,
+            telefono: phone, correo: email,
+            moneda: data.currency,
+            timezone: data.timezone,
+            dateLocale: data.dateLocale
+        };
+
+        try {
+            const resp = await fetch(`/api/medico/${dpi}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(newDoc)
+            });
+            const result = await resp.json();
+            if (result.success) {
+                let medicosList = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+                medicosList.push(newDoc);
+                localStorage.setItem('tabla_medicos', JSON.stringify(medicosList));
+                
+                if (medicosList.length === 1) {
+                    localStorage.setItem('active_company', JSON.stringify(newDoc));
+                }
+
+                window.showElegantAlert('Médico Registrado', `Se ha generado el acceso para ${nombre}. El código de entrada es: ${randomCode}`);
+                renderProgrammer();
+            }
+        } catch (e) {
+            window.showElegantAlert('Error', 'No se pudo guardar el médico en el servidor.', true);
+        }
+    };
+
+    window.deleteDoctor = async (id) => {
+        if (id === 'MED-MASTER') {
+            window.showElegantAlert('Acción denegada', 'No se puede eliminar la cuenta maestra.', true);
+            return;
+        }
+        if (confirm('¿Seguro que desea eliminar este médico? Perderá acceso al sistema.')) {
+            try {
+                const resp = await fetch(`/api/medico/${id}`, { method: 'DELETE' });
+                const result = await resp.json();
+                if (result.success) {
+                    let medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+                    medicos = medicos.filter(m => m.id_medico !== id);
+                    localStorage.setItem('tabla_medicos', JSON.stringify(medicos));
+                    renderProgrammer();
+                    window.showElegantAlert('Eliminado', 'El médico ha sido removido del sistema.');
+                }
+            } catch (e) {
+                window.showElegantAlert('Error', 'No se pudo eliminar el médico del servidor.', true);
+            }
+        }
+    };
+
+
+    // --- INICIALIZACIÓN ---
+    updateUserDisplay();
+    updateDate();
 });

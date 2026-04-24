@@ -317,3 +317,43 @@
         gap: 15px;
     }
 }
+/* Programmer Dashboard */
+.programmer-dashboard {
+    animation: fadeIn 0.5s ease;
+}
+
+.programmer-dashboard .widget-card {
+    transition: 0.3s;
+}
+
+.programmer-dashboard .med-item:hover {
+    background: rgba(251, 191, 36, 0.05) !important;
+}
+
+@media screen and (max-width: 1200px) {
+    .programmer-dashboard > div {
+        grid-template-columns: 1fr !important;
+    }
+}
+
+/* Tabs in Programmer Module */
+.tab-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 16px;
+    font-weight: 700;
+    padding: 10px 20px;
+    cursor: pointer;
+    transition: 0.3s;
+    border-bottom: 2px solid transparent;
+}
+
+.tab-btn.active {
+    color: #fbbf24;
+    border-bottom-color: #fbbf24;
+}
+
+.tab-btn:hover {
+    color: #fff;
+}
