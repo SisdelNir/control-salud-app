@@ -3592,7 +3592,7 @@ function renderSection(name, data) {
             settings: 'Datos del Médico',
             programmer: 'Módulo Programador (Super Admin)'
         };
-        return titles[name] || 'H-Control';
+        return titles[name] || 'DR-SISDEL';
     }
 
     function updateDate() {
