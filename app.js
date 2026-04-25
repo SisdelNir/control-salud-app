@@ -70,8 +70,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (result.success) {
                     if (result.role === 'medico') {
                         localStorage.setItem('current_doctor_id', result.id);
+                    } else if (result.role === 'admin_general') {
+                        localStorage.setItem('id_centro', result.id_centro);
+                        localStorage.setItem('max_medicos', result.max_medicos);
+                        localStorage.setItem('nombre_centro', result.nombre_centro);
                     }
-                    loginSuccess(result.name, result.role, result.id);
+                    loginSuccess(result.name, result.role, result.id || result.id_centro);
                     return;
                 }
             } catch (e) { console.error('Login API error:', e); }
@@ -95,6 +99,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
+            const centros = JSON.parse(localStorage.getItem('tabla_centros') || '[]');
+            const centro = centros.find(c => c.admin_code === pass);
+            if (centro) {
+                localStorage.setItem('id_centro', centro.id_centro);
+                localStorage.setItem('max_medicos', centro.max_medicos);
+                localStorage.setItem('nombre_centro', centro.nombre);
+                localStorage.setItem('active_company', JSON.stringify({
+                    timezone: centro.timezone,
+                    dateLocale: centro.dateLocale,
+                    moneda: centro.moneda,
+                    pais: centro.pais
+                }));
+                loginSuccess('Administrador Central', 'admin_general', centro.id_centro);
+                return;
+            }
+
             const passHash = btoa(pass);
             const medicoEncontrado = medicos.find(m =>
                 m.usuario.toUpperCase() === pass.toUpperCase() ||
@@ -103,6 +123,28 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (medicoEncontrado) {
                 localStorage.setItem('current_doctor_id', medicoEncontrado.id_medico);
+                
+                const centros = JSON.parse(localStorage.getItem('tabla_centros') || '[]');
+                const centro = centros.find(c => c.id_centro === medicoEncontrado.id_centro);
+                
+                if (centro) {
+                    localStorage.setItem('active_company', JSON.stringify({
+                        nombre: centro.nombre, 
+                        timezone: centro.timezone,
+                        dateLocale: centro.dateLocale,
+                        moneda: centro.moneda,
+                        pais: centro.pais
+                    }));
+                } else {
+                    localStorage.setItem('active_company', JSON.stringify({
+                        nombre: 'Clínica Independiente',
+                        timezone: medicoEncontrado.timezone,
+                        dateLocale: medicoEncontrado.dateLocale,
+                        moneda: medicoEncontrado.moneda,
+                        pais: medicoEncontrado.pais
+                    }));
+                }
+
                 loginSuccess(medicoEncontrado.nombre_completo, 'medico', medicoEncontrado.id_medico);
                 return;
             }

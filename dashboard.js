@@ -22,6 +22,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Inicialización
     updateUserDisplay();
     updateDate();
+    if (userRole !== 'paciente' && window.syncAppointmentsFromCloud) {
+        window.syncAppointmentsFromCloud();
+    }
     if (userRole === 'paciente') {
         document.querySelector('.sidebar').style.display = 'none';
         document.querySelector('.top-bar').style.display = 'none';
@@ -40,6 +43,10 @@ document.addEventListener('DOMContentLoaded', () => {
         // Iniciar detector de alertas automático
         setInterval(checkAndShowAlerts, 10000);
         setTimeout(checkAndShowAlerts, 2000);
+        
+        // Iniciar detector de cola de turnos
+        setInterval(() => { if(window.pollQueueNotifications) window.pollQueueNotifications(); }, 5000);
+        setTimeout(() => { if(window.pollQueueNotifications) window.pollQueueNotifications(); }, 1000);
     } else {
         if (qslCode === 'MED-MASTER') {
             // Caso Programador: Solo ve el módulo de administración
@@ -49,7 +56,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // Ocultar secciones clínicas para el programador
             navItems.forEach(n => {
                 const section = n.getAttribute('data-section');
-                if (section === 'overview' || section === 'reminders' || section === 'consultation') {
+                if (section === 'overview' || section === 'reminders' || section === 'consultation' || section === 'scheduler') {
                     n.style.display = 'none';
                 }
             });
@@ -57,9 +64,24 @@ document.addEventListener('DOMContentLoaded', () => {
             navItems.forEach(n => n.classList.remove('active'));
             if (progNav) progNav.classList.add('active');
             loadSection('programmer');
+        } else if (userRole === 'admin_general') {
+            const adminNav = document.getElementById('nav-admin-general');
+            if (adminNav) adminNav.style.display = 'block';
+            
+            // Ocultar secciones clínicas
+            navItems.forEach(n => {
+                const section = n.getAttribute('data-section');
+                if (section === 'overview' || section === 'reminders' || section === 'consultation' || section === 'scheduler') {
+                    n.style.display = 'none';
+                }
+            });
+            
+            navItems.forEach(n => n.classList.remove('active'));
+            if (adminNav) adminNav.classList.add('active');
+            loadSection('admin_general');
         } else {
             // Caso Médico regular: Ve secciones clínicas, no el módulo programador
-            loadSection('overview');
+            loadSection('consultation');
         }
     }
 
@@ -87,7 +109,7 @@ document.addEventListener('DOMContentLoaded', () => {
         item.addEventListener('click', (e) => {
             e.preventDefault();
             const section = item.getAttribute('data-section');
-            if (userRole === 'medico' && section === 'overview') {
+            if (userRole === 'medico' && (section === 'overview' || section === 'consultation')) {
                 selectedPatientQSL = null;
             }
             navItems.forEach(nav => nav.classList.remove('active'));
@@ -108,17 +130,26 @@ document.addEventListener('DOMContentLoaded', () => {
         // Si entra como MASTER (fallback/admin genérico sin pacientes propios), usa global, sino su propio namespace
         return id === 'MED-MASTER' ? 'doctor_patients_list' : (id ? `doctor_patients_list_${id}` : 'doctor_patients_list');
     }
-
-    async function getPatientData(qsl) {
+    async function syncPatientDataWithServer(qsl) {
         try {
             const resp = await fetch(`/api/patient/${qsl}`);
             const result = await resp.json();
             if (result.success) {
                 localStorage.setItem(`patient_data_${qsl}`, JSON.stringify(result.data));
                 localStorage.setItem(`active_qsl_${qsl}`, result.alerts_enabled ? 'true' : 'false');
-                return result.data;
             }
-        } catch (e) { console.error('Fetch error:', e); }
+        } catch (e) {
+            console.error('Fetch error during sync:', e);
+        }
+    }
+
+    async function fetchPatientDataAsync(qsl) {
+        await syncPatientDataWithServer(qsl);
+        const data = localStorage.getItem(`patient_data_${qsl}`);
+        return data ? JSON.parse(data) : { illness: '', meds: [] };
+    }
+
+    function getPatientData(qsl) {
         const data = localStorage.getItem(`patient_data_${qsl}`);
         return data ? JSON.parse(data) : { illness: '', meds: [] };
     }
@@ -147,20 +178,558 @@ document.addEventListener('DOMContentLoaded', () => {
             sectionName = 'programmer';
         }
         
+        // Prevent closing consultation if a recipe was added but consultation isn't saved yet
+        if (window.unsavedConsultation === true) {
+            window.showElegantAlert('Atención: Consulta en Proceso', 'Ha guardado una receta nueva pero no ha completado el formulario clínico. Por favor, **ingrese el Motivo de la Visita** y pulse **Guardar Consulta Médica** antes de poder salir o recargar esta pantalla.', true);
+            const motivoEl = document.getElementById('c-motivo');
+            if (motivoEl && motivoEl.value.trim() === '') motivoEl.focus();
+            return;
+        }
+
+        
         sectionTitle.textContent = getSectionTitle(sectionName);
         contentArea.innerHTML = `<div class="loading-state"><div class="spinner"></div></div>`;
         
+        Array.from(navItems).forEach(i => i.classList.remove('active'));
+        const activeNav = Array.from(navItems).find(i => i.getAttribute('data-section') === sectionName);
+        if (activeNav) activeNav.classList.add('active');
+
         let data = null;
         if (selectedPatientQSL && (sectionName === 'overview' || sectionName === 'reminders' || sectionName === 'consultation')) {
-            data = await getPatientData(selectedPatientQSL);
+            // Wait for remote sync only when loading sections to ensure patient has up to date initial data
+            data = await fetchPatientDataAsync(selectedPatientQSL);
         }
         
         setTimeout(() => renderSection(sectionName, data), 300);
     }
 
-    function renderSection(name, data) {
-        if (userRole === 'medico' && !selectedPatientQSL && name !== 'settings' && name !== 'programmer') {
-            renderDoctorHome();
+    
+    // --- MÓDULO AGENDAR CONSULTAS ---
+    let currentCalDate = new Date(); // To track current month/year being viewed
+    
+    window.getAppointmentsKey = function() {
+        const id = localStorage.getItem('current_doctor_id');
+        return id === 'MED-MASTER' ? 'appointments_data' : (id ? `appointments_data_\${id}` : 'appointments_data');
+    };
+
+    window.getAppointments = function() {
+        const data = localStorage.getItem(window.getAppointmentsKey());
+        return data ? JSON.parse(data) : [];
+    };
+
+    window.saveAppointment = function(appt) {
+        const appointments = window.getAppointments();
+        appointments.push(appt);
+        // Sort chronologically
+        appointments.sort((a, b) => new Date(a.date + 'T' + a.time) - new Date(b.date + 'T' + b.time));
+        localStorage.setItem(window.getAppointmentsKey(), JSON.stringify(appointments));
+        
+        // --- Nube Sync ---
+        const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+        fetch('/api/appointments', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ doctor_id, qsl_code: appt.qsl, paciente_nombre: appt.name, fecha: appt.date, hora: appt.time, motivo: appt.motivo })
+        }).catch(e => console.error('Cloud sync err', e));
+    };
+
+    window.deleteAppointment = function(qsl, dateStr, timeStr) {
+        if(confirm(`¿Estás seguro de que deseas cancelar la cita programada para el ${dateStr} a las ${timeStr}?`)) {
+            let appointments = window.getAppointments();
+            appointments = appointments.filter(a => !(a.qsl === qsl && a.date === dateStr && a.time === timeStr));
+            localStorage.setItem(window.getAppointmentsKey(), JSON.stringify(appointments));
+            
+            // --- Nube Sync ---
+            const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+            fetch('/api/appointments', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ doctor_id, qsl_code: qsl, fecha: dateStr, hora: timeStr })
+            }).catch(e => console.error('Cloud sync err', e));
+
+            window.renderDayDetail(dateStr); // re-render
+        }
+    };
+    
+    window.syncAppointmentsFromCloud = async function() {
+        const doctor_id = localStorage.getItem('current_doctor_id');
+        if (!doctor_id) return;
+        try {
+            const res = await fetch(`/api/appointments?doctor_id=${doctor_id}`);
+            const data = await res.json();
+            if (data.success && data.appointments) {
+                const appts = data.appointments.map(a => ({
+                    qsl: a.qsl_code,
+                    name: a.paciente_nombre,
+                    date: a.fecha.split('T')[0],
+                    time: a.hora,
+                    motivo: a.motivo || ''
+                }));
+                localStorage.setItem(window.getAppointmentsKey(), JSON.stringify(appts));
+            }
+        } catch (e) { console.error('Initial Cloud sync failed', e); }
+    };
+
+    // Called when clicking "Agendar Consultas"
+    window.renderScheduler = function() {
+        const appointments = window.getAppointments();
+        
+        let year = currentCalDate.getFullYear();
+        let month = currentCalDate.getMonth();
+        
+        const monthNames = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+        
+        // Days logic
+        const firstDay = new Date(year, month, 1).getDay(); // 0 is Sunday
+        const daysInMonth = new Date(year, month + 1, 0).getDate();
+        
+        // Generate Calendar Grid
+        let cells = '';
+        const dayHeaders = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'].map(d => `<div class="calendar-day-header">${d}</div>`).join('');
+        
+        // Offset for previous month days
+        const prevMonthDays = new Date(year, month, 0).getDate();
+        for (let i = firstDay - 1; i >= 0; i--) {
+            cells += `<div class="calendar-cell other-month"><span class="day-number">${prevMonthDays - i}</span></div>`;
+        }
+        
+        const today = new Date();
+        for (let i = 1; i <= daysInMonth; i++) {
+            const isToday = i === today.getDate() && month === today.getMonth() && year === today.getFullYear();
+            const cellDateStr = `${year}-${String(month+1).padStart(2, '0')}-${String(i).padStart(2, '0')}`;
+            
+            const cellAppts = appointments.filter(a => a.date === cellDateStr);
+            const countBadge = cellAppts.length > 0 ? `<div class="appoint-count">${cellAppts.length} citas</div>` : '';
+            
+            cells += `
+                <div class="calendar-cell ${isToday ? 'current-day' : ''}" onclick="window.renderDayDetail('${cellDateStr}')">
+                    <span class="day-number">${i}</span>
+                    ${countBadge}
+                </div>
+            `;
+        }
+        // Filler for end of month
+        const remaining = 42 - (firstDay + daysInMonth); // standard 6 rows grid
+        for (let i = 1; i <= remaining; i++) {
+            cells += `<div class="calendar-cell other-month"><span class="day-number">${i}</span></div>`;
+        }
+
+        // Generate upcoming list (Top 10)
+        const todayStr = new Date().toISOString().slice(0,10);
+        const upcoming = appointments.filter(a => a.date >= todayStr).sort((a,b) => new Date(a.date + 'T' + a.time) - new Date(b.date + 'T' + b.time)).slice(0, 10);
+        let upcomingHtml = '';
+        if(upcoming.length === 0) {
+            upcomingHtml = '<div style="text-align:center; opacity:0.5; margin-top:20px;">No hay citas agendadas próximas.</div>';
+        } else {
+            upcomingHtml = upcoming.map(u => `
+                <div class="upcoming-item" onclick="window.selectPatientAndGoToConsultation('${u.qsl}')">
+                    <div class="upcoming-date">${u.date} a las ${u.time}</div>
+                    <div class="upcoming-name">${u.name}</div>
+                    <div style="font-size:12px; color:var(--text-muted); margin-top:5px;">ID: ${u.qsl}</div>
+                </div>
+            `).join('');
+        }
+
+        contentArea.innerHTML = `
+            <div class="scheduler-container animate-in">
+                <!-- COLUMNA IZQUIERDA: CALENDARIO -->
+                <div class="calendar-widget" id="scheduler-main-panel">
+                    <div class="calendar-header">
+                        <div style="display:flex; align-items:center; gap: 15px;">
+                            <button class="calendar-nav-btn" onclick="window.changeCalendarMonth(-1)">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                            </button>
+                            <button class="calendar-nav-btn" onclick="window.changeCalendarMonth(1)">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                            </button>
+                            <h3 style="margin:0; text-transform: uppercase;">${monthNames[month]} <span style="color:white; font-weight:300;">${year}</span></h3>
+                        </div>
+                        
+                    </div>
+                        <div style="display:flex;gap:10px;align-items:center;">
+                            <button class="calendar-nav-btn" title="Hoy" onclick="window.currentCalDate = new Date(); window.renderScheduler();" style="width: auto; padding: 0 15px; font-weight:bold; font-size:14px;">HOY</button>
+                            <button onclick="window.showPatientList()" style="background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.35);color:#60a5fa;padding:0 15px;height:38px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px;">👥 Lista de Pacientes</button>
+                        </div>
+                    <div class="calendar-grid" style="margin-bottom: 10px;">
+                        ${dayHeaders}
+                    </div>
+                    <div class="calendar-grid">
+                        ${cells}
+                    </div>
+                </div>
+            </div>
+        `;
+    };
+
+    window.pollQueueNotifications = async function() {
+        if (localStorage.getItem('user_role') !== 'paciente') return;
+        const myQsl = localStorage.getItem('user_qsl_code');
+        if (!myQsl) return;
+
+        // 1. Recepción de Alertas Oficiales DR-SISDEL (Mensajería Masiva/Individual) desde Supabase/Nube
+        try {
+            const res = await fetch(`/api/patient/${myQsl}/alerts/messages`);
+            const data = await res.json();
+            if (data.success && data.alerts) {
+                const unreadSysAlerts = data.alerts.filter(a => !a.leido);
+                
+                if (unreadSysAlerts.length > 0) {
+                    unreadSysAlerts.forEach(a => {
+                        // Mark as read in DB instantaneously
+                        fetch(`/api/patient/${myQsl}/alerts/messages`, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({ id: a.id, mensaje: a.mensaje, leido: true })
+                        }).catch(e => console.error(e));
+                        
+                        // Intento de reproducir tono nativo o sonido base
+                        try {
+                            const audio = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
+                            audio.play().catch(e => console.log('Audio autoplay blocked', e));
+                        } catch(e) {}
+                        
+                        // Vibración
+                        if (navigator.vibrate) {
+                            navigator.vibrate([200, 100, 200, 100, 300]);
+                        }
+                        
+                        const fsAlert = document.createElement('div');
+                        fsAlert.style.position = 'fixed';
+                        fsAlert.style.top = '0';
+                        fsAlert.style.left = '0';
+                        fsAlert.style.width = '100vw';
+                        fsAlert.style.height = '100vh';
+                        fsAlert.style.backgroundColor = 'rgba(15, 23, 42, 0.98)'; 
+                        fsAlert.style.backdropFilter = 'blur(10px)';
+                        fsAlert.style.color = '#ffffff';
+                        fsAlert.style.zIndex = '99999999';
+                        fsAlert.style.display = 'flex';
+                        fsAlert.style.flexDirection = 'column';
+                        fsAlert.style.justifyContent = 'center';
+                        fsAlert.style.alignItems = 'center';
+                        fsAlert.style.textAlign = 'center';
+                        fsAlert.style.padding = '30px';
+                        fsAlert.style.boxSizing = 'border-box';
+                        
+                        const formatTime = a.created_at ? new Date(a.created_at).toLocaleString('es-ES') : 'Recién recibido';
+
+                        fsAlert.innerHTML = `
+                            <div style="font-size: 70px; margin-bottom:20px; animation: pulse 1.5s infinite; color:#3b82f6;">💬</div>
+                            <h2 style="font-size: 24px; color:#60a5fa; margin:0 0 20px 0; font-weight:700; text-transform:uppercase; letter-spacing:2px;">Mensaje de Clínica Médica</h2>
+                            <div style="background:rgba(255,255,255,0.05); border:1px solid rgba(59,130,246,0.3); border-left:4px solid #3b82f6; border-radius:16px; padding:30px; font-size: 22px; font-weight: normal; line-height: 1.5; text-align:left; max-width:600px; width:100%; box-shadow:0 10px 40px rgba(0,0,0,0.5);">
+                                ${a.mensaje ? a.mensaje.replace(/\n/g, '<br>') : '[Mensaje Vacío]'}
+                            </div>
+                            <p style="font-size:14px; color:rgba(255,255,255,0.3); margin-top:20px;">Recibido: ${formatTime}</p>
+                            <button id="btn-close-sysalert-${a.id}" style="margin-top: 40px; background:linear-gradient(135deg, #3b82f6, #1d4ed8); color: white; border: none; padding: 20px 60px; font-size: 18px; border-radius: 12px; cursor: pointer; font-weight:bold; box-shadow:0 6px 20px rgba(59,130,246,0.4); text-transform:uppercase; letter-spacing:1px; transition:transform 0.2s;" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='none'">ENTENDIDO</button>
+                        `;
+                        document.body.appendChild(fsAlert);
+                        
+                        document.getElementById(`btn-close-sysalert-${a.id}`).onclick = () => fsAlert.remove();
+                    });
+                }
+            }
+        } catch(e) { console.error('Cloud Sync Error', e); }
+
+        // 2. Mostrar mensajes de turnos (Ej: Faltan 4 pacientes)
+        const notifKey = `patient_notifications_${myQsl}`;
+        const queueObj = JSON.parse(localStorage.getItem(notifKey) || '[]');
+        const unread = queueObj.filter(q => !q.read);
+        if (unread.length > 0) {
+            unread.forEach(u => {
+                u.read = true;
+                window.showElegantAlert('🏥 Sala de Espera', u.msg);
+                if(navigator.vibrate) navigator.vibrate(300);
+            });
+            localStorage.setItem(notifKey, JSON.stringify(queueObj));
+        }
+
+        // 3. Revisar si quedan exactamente 15 minutos para su cita programada
+        const appointments = window.getAppointments ? window.getAppointments() : [];
+        const todayStr = new Date().toISOString().slice(0, 10);
+        
+        const myAppt = appointments.find(a => a.qsl === myQsl && a.date === todayStr);
+        if (myAppt) {
+            const now = new Date();
+            const [apptH, apptM] = myAppt.time.split(':').map(Number);
+            const apptDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), apptH, apptM, 0);
+            
+            const diffMs = apptDate - now;
+            const diffMins = Math.floor(diffMs / 60000);
+            
+            const alertedKey = `alerted_15min_today_${myQsl}`;
+            const alreadyAlertedDate = localStorage.getItem(alertedKey);
+            
+            if (diffMins === 15 && alreadyAlertedDate !== todayStr) {
+                localStorage.setItem(alertedKey, todayStr);
+                
+                const fsAlert = document.createElement('div');
+                fsAlert.style.position = 'fixed';
+                fsAlert.style.top = '0';
+                fsAlert.style.left = '0';
+                fsAlert.style.width = '100vw';
+                fsAlert.style.height = '100vh';
+                fsAlert.style.backgroundColor = '#dc2626'; 
+                fsAlert.style.color = '#ffffff';
+                fsAlert.style.zIndex = '9999999';
+                fsAlert.style.display = 'flex';
+                fsAlert.style.flexDirection = 'column';
+                fsAlert.style.justifyContent = 'center';
+                fsAlert.style.alignItems = 'center';
+                fsAlert.style.textAlign = 'center';
+                fsAlert.style.padding = '40px';
+                
+                fsAlert.innerHTML = `
+                    <div style="font-size: 100px; margin-bottom:20px; animation: pulse 1s infinite;">⏰</div>
+                    <h1 style="font-size: 44px; font-weight: 900; line-height: 1.2; text-transform: uppercase;">SU TURNO SERÁ EN 15 MINUTOS</h1>
+                    <p style="font-size: 22px; font-weight: normal; margin-top:25px; opacity:0.9;">Aproxímese al área de consulta.</p>
+                    <button class="btn-primary" id="btn-close-15min" style="margin-top: 50px; background: rgba(0,0,0,0.3); color: white; border: 2px solid rgba(255,255,255,0.5); padding: 20px 40px; font-size: 22px; border-radius: 16px; cursor: pointer; font-weight:bold;">ENTENDIDO</button>
+                `;
+                document.body.appendChild(fsAlert);
+                
+                document.getElementById('btn-close-15min').onclick = () => fsAlert.remove();
+                
+                if(navigator.vibrate) {
+                    navigator.vibrate([1000, 500, 1000, 500, 1000]);
+                }
+            }
+        }
+    };
+
+    window.processQueueNotifications = function() {
+        const pref = localStorage.getItem('notification_preference') || 'sisdel';
+        const appointments = window.getAppointments ? window.getAppointments() : [];
+        const todayStr = new Date().toISOString().slice(0, 10);
+        const nowTimeStr = new Date().toTimeString().slice(0, 5);
+        
+        const remainingAppts = appointments
+            .filter(a => a.date === todayStr && a.time >= nowTimeStr)
+            .sort((a,b) => (a.time > b.time ? 1 : -1));
+            
+        remainingAppts.forEach((appt, index) => {
+            const turnosFaltantes = index + 1; // index 0 (the immediate next) is "faltan 1 paciente"
+            if (turnosFaltantes <= 5) {
+                const msjs = {
+                    1: '¡Prepárese! Es su turno en la siguiente consulta.',
+                    2: 'Faltan 2 pacientes para su turno.',
+                    3: 'Faltan 3 pacientes para su turno.',
+                    4: 'Faltan 4 pacientes para su turno.',
+                    5: 'Faltan 5 pacientes para su turno.'
+                };
+                const customMsg = msjs[turnosFaltantes] || `Faltan ${turnosFaltantes} pacientes`;
+
+                if (pref === 'whatsapp') {
+                    console.log(`[API Meta WhatsApp] Simulando envío a ${appt.name} (QSL: ${appt.qsl}): ${customMsg}`);
+                } else {
+                    const notifKey = `patient_notifications_${appt.qsl}`;
+                    let queue = JSON.parse(localStorage.getItem(notifKey) || '[]');
+                    // Prevent duplicate consecutive messages
+                    if (queue.length === 0 || queue[queue.length - 1].msg !== customMsg) {
+                        queue.push({
+                            time: Date.now(),
+                            msg: customMsg,
+                            read: false
+                        });
+                        localStorage.setItem(notifKey, JSON.stringify(queue));
+                    }
+                }
+            }
+        });
+    };
+
+    window.changeCalendarMonth = function(delta) {
+        currentCalDate.setMonth(currentCalDate.getMonth() + delta);
+        window.renderScheduler();
+    };
+
+    window.selectPatientAndGoToConsultation = function(qsl) {
+        selectedPatientQSL = qsl;
+        Array.from(navItems).forEach(n => n.classList.remove('active'));
+        const consultTab = Array.from(navItems).find(item => item.getAttribute('data-section') === 'consultation');
+        if (consultTab) consultTab.classList.add('active');
+        
+        loadSection('consultation');
+        
+        // Notify the waiting patients in the queue!
+        window.processQueueNotifications();
+    };
+
+    window.renderDayDetail = function(dateStr) {
+        const appointments = window.getAppointments();
+        const dayAppts = appointments.filter(a => a.date === dateStr);
+        
+        let timeslotsHtml = '';
+        for(let i = 0; i <= 23; i++) {
+            for(let j of ['00', '30']) {
+                const timeStr = `${String(i).padStart(2, '0')}:${j}`;
+                const apptBlock = dayAppts.find(a => a.time === timeStr);
+                
+                if(apptBlock) {
+                    timeslotsHtml += `
+                        <div class="time-slot">
+                            <div class="time-label">\${timeStr}</div>
+                            <div class="time-content booked" style="display: flex; justify-content: space-between; align-items: center;">
+                                <div onclick="window.showAppointmentPreview('\\${apptBlock.qsl}', '\\${dateStr}', '\\${timeStr}')" style="cursor:pointer; flex: 1;">
+                                    <b>\${apptBlock.name}</b> &mdash; Cita Programada (Clic para iniciar)
+                                </div>
+                                <button onclick="window.deleteAppointment('\\${apptBlock.qsl}', '\\${dateStr}', '\\${timeStr}')" style="background: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid #ef4444; border-radius: 8px; padding: 4px 10px; font-size: 11px; cursor: pointer; text-transform: uppercase; font-weight: bold;">
+                                    Anular
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    timeslotsHtml += `
+                        <div class="time-slot" onclick="window.promptSchedulePatient('${dateStr}', '${timeStr}')">
+                            <div class="time-label">${timeStr}</div>
+                            <div class="time-content">
+                                Disponible + (Clic para agendar cita)
+                            </div>
+                        </div>
+                    `;
+                }
+            }
+        }
+
+        const panel = document.getElementById('scheduler-main-panel');
+        if(!panel) return;
+        
+        panel.innerHTML = `
+            <div class="calendar-header">
+                <div style="display:flex; align-items:center; gap: 15px;">
+                    <button class="calendar-nav-btn" onclick="window.renderScheduler()" style="width: auto; padding: 0 15px;">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:5px;"><polyline points="15 18 9 12 15 6"></polyline></svg> Volver
+                    </button>
+                    <h3 style="margin:0; font-size:20px; color:white;">Programación para el <span style="color:var(--accent);">${dateStr}</span></h3>
+                </div>
+            </div>
+            <div class="day-detail-view">
+                ${timeslotsHtml}
+            </div>
+        `;
+    };
+
+    window.promptSchedulePatient = function(dateStr, timeStr) {
+        // First choice: New or Existing?
+        const mainOverlay = document.createElement('div');
+        mainOverlay.id = 'scheduler-modal';
+        mainOverlay.style.position = 'fixed';
+        mainOverlay.style.top = '0';
+        mainOverlay.style.left = '0';
+        mainOverlay.style.width = '100%';
+        mainOverlay.style.height = '100%';
+        mainOverlay.style.background = 'rgba(0,0,0,0.85)';
+        mainOverlay.style.display = 'flex';
+        mainOverlay.style.alignItems = 'center';
+        mainOverlay.style.justifyContent = 'center';
+        mainOverlay.style.zIndex = '99999';
+        mainOverlay.style.backdropFilter = 'blur(5px)';
+
+        mainOverlay.innerHTML = `
+            <div class="widget-card animate-in" style="background: #0f172a; padding: 40px; border-radius: 24px; border: 2px solid rgba(16, 185, 129, 0.4); text-align: center; max-width: 450px; width:100%;">
+                <h3 style="color: white; font-size: 24px; margin-bottom: 15px;">Agendar Cita a las ${timeStr}</h3>
+                <p style="color: rgba(255,255,255,0.7); margin-bottom: 30px; font-size: 16px;">Elija una opción para vincular la cita del ${dateStr}.</p>
+                
+                <button onclick="window.scheduleNewPatient('${dateStr}', '${timeStr}')" style="width: 100%; border-radius: 12px; padding: 18px; font-size: 16px; font-weight: bold; cursor: pointer; margin-bottom: 15px; background: rgba(59, 130, 246, 0.15); border: 2px solid #3b82f6; color: #60a5fa; transition: all 0.2s;">
+                    Registrar Paciente Nuevo
+                </button>
+                
+                <button onclick="window.scheduleSearchPatient('${dateStr}', '${timeStr}')" style="width: 100%; border-radius: 12px; padding: 18px; font-size: 16px; font-weight: bold; cursor: pointer; margin-bottom: 25px; background: rgba(16, 185, 129, 0.15); border: 2px solid #10b981; color: #34d399; transition: all 0.2s;">
+                    Paciente Existente (Buscar)
+                </button>
+                
+                <button onclick="document.body.removeChild(document.getElementById('scheduler-modal'))" style="background: none; border: none; font-size: 14px; text-decoration: underline; color: rgba(255,255,255,0.5); cursor: pointer;">Cancelar</button>
+            </div>
+        `;
+        document.body.appendChild(mainOverlay);
+    };
+
+    window.scheduleSearchPatient = function(dateStr, timeStr) {
+        document.body.removeChild(document.getElementById('scheduler-modal'));
+        
+        const key = getDocPatientsKey();
+        const patients = JSON.parse(localStorage.getItem(key) || '[]');
+        
+        let selectHtml = '<div style="max-height:300px; overflow-y:auto;text-align:left;">';
+        if(patients.length === 0) {
+            selectHtml += '<p style="color:white;">No hay pacientes registrados.</p>';
+        } else {
+            patients.forEach(qsl => {
+                const name = localStorage.getItem(`patient_name_${qsl}`) || 'Paciente';
+                const data = getPatientData(qsl);
+                selectHtml += `
+                    <div style="padding:15px; border-bottom:1px solid rgba(255,255,255,0.1); cursor:pointer; transition:background 0.2s;" 
+                         onmouseenter="this.style.background='rgba(34, 211, 238, 0.1)'" 
+                         onmouseleave="this.style.background='transparent'"
+                         onclick="window.commitSchedule('${qsl}', '${name}', '${dateStr}', '${timeStr}')">
+                        <strong style="color:white; font-size:16px;">${name}</strong><br>
+                        <span style="color:var(--text-muted); font-size:12px;">DPI: ${data.id_identificacion || 'N/A'} | Tel: ${data.telefono || 'N/A'}</span>
+                    </div>
+                `;
+            });
+        }
+        selectHtml += '</div>';
+
+        const mainOverlay = document.createElement('div');
+        mainOverlay.id = 'scheduler-search-modal';
+        mainOverlay.style.position = 'fixed';
+        mainOverlay.style.top = '0';
+        mainOverlay.style.left = '0';
+        mainOverlay.style.width = '100%';
+        mainOverlay.style.height = '100%';
+        mainOverlay.style.background = 'rgba(0,0,0,0.85)';
+        mainOverlay.style.display = 'flex';
+        mainOverlay.style.alignItems = 'center';
+        mainOverlay.style.justifyContent = 'center';
+        mainOverlay.style.zIndex = '99999';
+
+        mainOverlay.innerHTML = `
+            <div class="widget-card animate-in" style="background: #0f172a; padding: 40px; border-radius: 24px; border: 2px solid rgba(16, 185, 129, 0.4); text-align: center; max-width: 500px; width:100%;">
+                <h3 style="color: white; font-size: 24px; margin-bottom: 20px;">Seleccione al Paciente</h3>
+                ${selectHtml}
+                <button onclick="document.body.removeChild(document.getElementById('scheduler-search-modal'))" style="margin-top:20px; background: none; border: none; font-size: 14px; text-decoration: underline; color: rgba(255,255,255,0.5); cursor: pointer;">Cancelar</button>
+            </div>
+        `;
+        document.body.appendChild(mainOverlay);
+    };
+
+    window.scheduleNewPatient = function(dateStr, timeStr) {
+        document.body.removeChild(document.getElementById('scheduler-modal'));
+        
+        localStorage.setItem('pending_appt_date', dateStr);
+        localStorage.setItem('pending_appt_time', timeStr);
+        
+        selectedPatientQSL = null; // Clear to allow new patient flow
+        
+        // Transition to register flow
+        loadSection('overview');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        window.showElegantAlert('Agendar Cita', 'Llene los datos del paciente nuevo. La cita quedará agendada al terminar automáticamente.');
+    };
+
+    window.commitSchedule = function(qsl, name, dateStr, timeStr) {
+        const modal = document.getElementById('scheduler-search-modal');
+        if(modal) document.body.removeChild(modal);
+        
+        window.saveAppointment({ qsl: qsl, name: name, date: dateStr, time: timeStr });
+        window.showElegantAlert('Cita Programada', `Cita guardada para ${name} el día ${dateStr} a las ${timeStr}`);
+        
+        // Refresh the detail or scheduler (if we were in day detail, re-render it)
+        window.renderDayDetail(dateStr);
+        // Refresh overall right sidebar indirectly by just letting it render on view switch, but renderDayDetail doesn't reload the whole UI.
+        // For simplicity, just renderScheduler and then optionally open renderDayDetail or just go to month view.
+        window.renderScheduler();
+        setTimeout(() => window.renderDayDetail(dateStr), 200);
+    };
+
+    /* End of Scheduler logic */
+
+function renderSection(name, data) {
+        if (userRole === 'medico' && !selectedPatientQSL && name !== 'settings' && name !== 'programmer' && name !== 'scheduler') {
+            if (name === 'consultation') {
+                window.renderDoctorHome('search');
+                return;
+            }
+            window.renderDoctorHome('register');
             return;
         }
 
@@ -182,6 +751,12 @@ document.addEventListener('DOMContentLoaded', () => {
             case 'programmer':
                 renderProgrammer();
                 break;
+            case 'admin_general':
+                renderAdminGeneral();
+                break;
+            case 'scheduler':
+                renderScheduler();
+                break;
             default:
                 renderOverview(patientData);
         }
@@ -192,20 +767,650 @@ document.addEventListener('DOMContentLoaded', () => {
         return data ? JSON.parse(data) : { illness: '', meds: [] };
     }
 
+    // --- LISTA DE PACIENTES ---
+    window.showPatientList = function() {
+        const key = getDocPatientsKey();
+        const registry = JSON.parse(localStorage.getItem(key) || '[]');
+        const allAppts = window.getAppointments ? window.getAppointments() : [];
+        const now = new Date();
+
+        // Registry is an array of QSL strings — map each string directly
+        const patients = registry.slice(-50).reverse().map(qsl => {
+            qsl = typeof qsl === 'string' ? qsl : (qsl.qsl || qsl.codigo || qsl.id || String(qsl));
+            const data = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}');
+            const name = data.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || qsl;
+
+            // Next upcoming appointment
+            const upcoming = allAppts
+                .filter(a => a.qsl === qsl && new Date(a.date + 'T' + (a.time || '00:00')) >= now)
+                .sort((a,b) => new Date(a.date+'T'+(a.time||'00:00')) - new Date(b.date+'T'+(b.time||'00:00')))[0];
+            const nextAppt = upcoming
+                ? `${new Date(upcoming.date+'T12:00:00').toLocaleDateString('es-ES',{day:'2-digit',month:'short'})} ${upcoming.time}`
+                : '—';
+
+            // Last consultation note/prescription
+            const consults = data.consultations || [];
+            const lastConsult = consults[consults.length - 1];
+            
+            let lastRxShort = '—';
+            if (data.meds && data.meds.length > 0) {
+                lastRxShort = `🏥 Ver Receta Asignada`;
+            } else {
+                const lastRx = (lastConsult?.referencias || lastConsult?.observaciones || lastConsult?.notas || '').trim();
+                if (lastRx && lastRx !== '=' && lastRx !== '-') {
+                    lastRxShort = lastRx.length > 40 ? lastRx.slice(0, 40) + '…' : lastRx;
+                    lastRxShort = '📝 ' + lastRxShort;
+                } else {
+                    lastRxShort = 'Sin recetas previas';
+                }
+            }
+
+            return {
+                qsl, name,
+                telefono: data.telefono || '—',
+                glucosa:  !!data.glucoseEnabled,
+                presion:  !!data.pressureEnabled,
+                nextAppt,
+                lastRx: lastRxShort
+            };
+        });
+
+        const overlay = document.createElement('div');
+        overlay.id = 'patient-list-overlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.92);z-index:99999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(8px);padding:12px;box-sizing:border-box;';
+
+        const renderList = (q) => {
+            const filtered = patients.filter(p =>
+                !q ||
+                p.name.toLowerCase().includes(q) ||
+                p.telefono.includes(q) ||
+                p.qsl.toLowerCase().includes(q)
+            );
+
+            const rows = filtered.length > 0
+                ? filtered.map(p => `
+                    <tr style="border-bottom:1px solid rgba(255,255,255,0.06); transition:background 0.15s;" onmouseover="this.style.background='rgba(59,130,246,0.08)'" onmouseout="this.style.background='transparent'">
+                        <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; color:white; font-weight:600; font-size:13px; cursor:pointer;">${p.name}</td>
+                        <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; color:rgba(255,255,255,0.6); font-size:13px; cursor:pointer;">${p.telefono}</td>
+                        <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; cursor:pointer;"><span style="background:rgba(34,211,238,0.1);color:#22d3ee;border:1px solid rgba(34,211,238,0.25);border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;">${p.qsl}</span></td>
+                        <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; text-align:center; font-size:15px; cursor:pointer;">${p.glucosa ? '🟢' : '⚫'}</td>
+                        <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; text-align:center; font-size:15px; cursor:pointer;">${p.presion ? '🟢' : '⚫'}</td>
+                        <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; color:#fbbf24; font-size:12px; cursor:pointer;">${p.nextAppt}</td>
+                        <td onclick="window.showPatientLastRx('${p.qsl}')" title="Ver receta en detalle" style="padding:11px 14px; color:#60a5fa; font-size:12px; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; text-decoration:underline;">${p.lastRx}</td>
+                    </tr>`).join('')
+                : `<tr><td colspan="7" style="padding:30px; text-align:center; color:rgba(255,255,255,0.3); font-size:14px;">No se encontraron pacientes.</td></tr>`;
+
+            overlay.innerHTML = `
+                <div style="background:linear-gradient(145deg,#0f172a,#1a2540);border:1px solid rgba(59,130,246,0.3);border-radius:20px;padding:28px;width:98vw;height:96vh;display:flex;flex-direction:column;box-shadow:0 30px 80px rgba(0,0,0,0.6);box-sizing:border-box;">
+
+                    <!-- Header -->
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-shrink:0;">
+                        <div>
+                            <h3 style="color:#60a5fa;margin:0;font-size:20px;display:flex;align-items:center;gap:8px;">👥 Lista de Pacientes</h3>
+                            <p style="color:rgba(255,255,255,0.35);margin:4px 0 0;font-size:12px;">${patients.length} pacientes registrados</p>
+                        </div>
+                        <div style="display:flex; gap:12px;">
+                            <button onclick="window.showMessagingCenter()" style="background:linear-gradient(135deg,rgba(16,185,129,0.2),rgba(16,185,129,0.05));border:1px solid rgba(16,185,129,0.4);border-radius:10px;padding:8px 16px;color:#34d399;font-size:14px;font-weight:700;display:flex;align-items:center;gap:6px;cursor:pointer;transition:transform 0.2s;" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='none'">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+                                Enviar Mensajes
+                            </button>
+                            <button onclick="document.getElementById('patient-list-overlay').remove()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:white;padding:8px 16px;border-radius:10px;cursor:pointer;font-size:14px;">✕ Cerrar</button>
+                        </div>
+                    </div>
+
+                    <!-- Search -->
+                    <div style="margin-bottom:16px;flex-shrink:0;">
+                        <input type="text" id="pl-search" placeholder="🔍  Buscar por nombre, teléfono o código QSL..."
+                            oninput="window._plFilter(this.value.toLowerCase())"
+                            value="${q}"
+                            style="width:100%;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);color:white;padding:11px 16px;border-radius:10px;font-size:14px;box-sizing:border-box;">
+                    </div>
+
+                    <!-- Legend -->
+                    <div style="display:flex;gap:20px;margin-bottom:12px;flex-shrink:0;font-size:12px;color:rgba(255,255,255,0.4);align-items:center;">
+                        <span>🟢 Reportando activo &nbsp;&nbsp; ⚫ No activo</span>
+                        <span style="margin-left:auto;color:rgba(255,255,255,0.25);">Clic en fila para abrir consulta</span>
+                    </div>
+
+                    <!-- Table -->
+                    <div style="overflow-y:auto;flex:1;border-radius:12px;border:1px solid rgba(255,255,255,0.06);">
+                        <table style="width:100%;border-collapse:collapse;">
+                            <thead style="position:sticky;top:0;background:#0f172a;z-index:1;">
+                                <tr>
+                                    <th colspan="3" style="padding:0;"></th>
+                                    <th colspan="2" style="padding:5px 14px 2px;text-align:center;border-bottom:none;">
+                                        <span style="font-size:15px;color:rgba(34,211,238,0.65);font-weight:600;letter-spacing:0.5px;">📡 Estará enviando datos</span>
+                                    </th>
+                                    <th colspan="2" style="padding:0;"></th>
+                                </tr>
+                                <tr>
+                                    <th style="padding:10px 14px;color:rgba(255,255,255,0.5);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);">Nombre</th>
+                                    <th style="padding:10px 14px;color:rgba(255,255,255,0.5);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);">Teléfono</th>
+                                    <th style="padding:10px 14px;color:rgba(255,255,255,0.5);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);">Código</th>
+                                    <th style="padding:10px 14px;color:rgba(34,211,238,0.7);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:center;border-bottom:1px solid rgba(255,255,255,0.08);">Glucosa</th>
+                                    <th style="padding:10px 14px;color:rgba(248,113,113,0.7);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:center;border-bottom:1px solid rgba(255,255,255,0.08);">Presión</th>
+                                    <th style="padding:10px 14px;color:rgba(251,191,36,0.7);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);">Próxima Cita</th>
+                                    <th style="padding:10px 14px;color:rgba(255,255,255,0.5);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);">Última Receta/Nota</th>
+                                </tr>
+                            </thead>
+                            <tbody>${rows}</tbody>
+                        </table>
+                    </div>
+                </div>`;
+
+            overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+            // Re-focus search
+            requestAnimationFrame(() => {
+                const inp = document.getElementById('pl-search');
+                if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+            });
+        };
+
+        window._plFilter = (q) => renderList(q);
+
+        renderList('');
+        document.body.appendChild(overlay);
+    };
+
+    window.showMessagingCenter = () => {
+        const overlay = document.createElement('div');
+        overlay.id = 'messaging-overlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:9999999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px);padding:20px;box-sizing:border-box;';
+
+        const patients = [];
+        const key = getDocPatientsKey();
+        const list = JSON.parse(localStorage.getItem(key) || '[]');
+        list.forEach(qsl => {
+            const pd = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}');
+            const nm = localStorage.getItem(`patient_name_${qsl}`) || 'Sin Nombre';
+            patients.push({ qsl, name: nm, telefono: pd.telefono || '', dpi: pd.dpi || '' });
+        });
+        
+        overlay.innerHTML = `
+            <div class="widget-card animate-in" style="background: linear-gradient(145deg, #0f172a, #1e1b4b); border: 2px solid rgba(139, 92, 246, 0.4); border-radius: 20px; padding: 35px; width: 100%; max-width: 800px; box-shadow: 0 20px 60px rgba(0,0,0,0.6); display:flex; flex-direction:column; max-height: 90vh;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom:15px;">
+                    <h3 style="color:#a78bfa; font-size:24px; margin:0; display:flex; align-items:center; gap:10px;">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+                        Centro de Mensajería
+                    </h3>
+                    <div style="display:flex; gap:8px; align-items:center;">
+                        <button onclick="window.showMsgHistory()" style="background:rgba(139,92,246,0.15); border:1px solid rgba(139,92,246,0.3); color:#c4b5fd; height:35px; padding:0 14px; font-size:13px; border-radius:10px; cursor:pointer; font-weight:600; display:flex; align-items:center; gap:6px; transition:all 0.2s;" onmouseover="this.style.background='rgba(139,92,246,0.25)'" onmouseout="this.style.background='rgba(139,92,246,0.15)'">📜 Historial</button>
+                        <button onclick="document.getElementById('messaging-overlay').remove()" style="background:rgba(255,255,255,0.1); border:none; color:white; width:35px; height:35px; font-size:18px; border-radius:10px; cursor:pointer;">✕</button>
+                    </div>
+                </div>
+                
+                <div style="display:flex; gap:20px; margin-bottom: 20px;">
+                    <div style="flex:1; background:rgba(255,255,255,0.03); padding:15px; border-radius:12px; border:1px solid rgba(255,255,255,0.08);">
+                        <label style="color:#a78bfa; font-size:14px; font-weight:700; margin-bottom:15px; display:block;">PÚBLICO OBJETIVO</label>
+                        <div style="display:flex; flex-direction:column; gap:12px;">
+                            <label style="display:flex; align-items:center; gap:12px; cursor:pointer; color:white;">
+                                <input type="radio" name="msg-target" value="all" checked style="accent-color:#8b5cf6; transform:scale(1.75); margin-left:5px;">
+                                Todos los Pacientes
+                            </label>
+                            <label style="display:flex; align-items:center; gap:12px; cursor:pointer; color:white;">
+                                <input type="radio" name="msg-target" value="days" style="accent-color:#8b5cf6; transform:scale(1.75); margin-left:5px;">
+                                Con Cita Próxima en: <input type="number" id="msg-days" value="7" style="width:50px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.2); color:white; border-radius:4px; padding:2px 6px; text-align:center;"> días
+                            </label>
+                            <label style="display:flex; align-items:center; gap:12px; cursor:pointer; color:white;">
+                                <input type="radio" name="msg-target" value="individual" style="accent-color:#8b5cf6; transform:scale(1.75); margin-left:5px;">
+                                Individual (Búsqueda)
+                            </label>
+                            <div style="position:relative;">
+                                <input type="text" id="msg-ind-search" placeholder="Escriba nombre, teléfono, DPI o QSL..." style="display:none; width:100%; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.2); color:white; padding:8px 12px; border-radius:6px; margin-top:4px; box-sizing:border-box;" autocomplete="off">
+                                <div id="msg-autocomplete-results" style="display:none; position:absolute; top:100%; left:0; width:100%; background:#1e293b; border:1px solid rgba(139,92,246,0.5); border-radius:6px; max-height:200px; overflow-y:auto; z-index:10000; box-shadow: 0 10px 25px rgba(0,0,0,0.5);"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin-bottom:20px;">
+                    <label style="color:#a78bfa; font-size:14px; font-weight:700; margin-bottom:8px; display:flex; justify-content:space-between; align-items:flex-end;">REDACTAR MENSAJE <span style="font-size:11px; font-weight:normal; color:rgba(255,255,255,0.5);">Use [NOMBRE] para personalizar</span></label>
+                    <textarea id="msg-text" style="width:100%; height:110px; background:rgba(0,0,0,0.3); border:1px solid rgba(139,92,246,0.5); color:white; padding:15px; border-radius:12px; border-left:4px solid #8b5cf6; resize:none; font-family:inherit; box-sizing:border-box; font-size:15px;" placeholder="Estimado/a [NOMBRE], le escribimos de Clínica Médica para recordarle..."></textarea>
+                </div>
+
+                <div id="action-buttons-container" style="margin-bottom:15px;">
+                    <button id="btn-prep-msg" style="width:100%; background:linear-gradient(135deg, #8b5cf6, #6d28d9); color:white; border:none; padding:15px; border-radius:12px; font-weight:700; cursor:pointer; font-size:15px; box-shadow:0 4px 15px rgba(139,92,246,0.3); transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='none'">🔍 GENERAR LISTA DE ENVÍO</button>
+                </div>
+                
+                <div id="msg-results" style="flex:1; overflow-y:auto; padding-right:10px;"></div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        const targets = overlay.querySelectorAll('input[name="msg-target"]');
+        const indSearch = document.getElementById('msg-ind-search');
+        
+        targets.forEach(t => t.addEventListener('change', () => {
+            indSearch.style.display = document.querySelector('input[name="msg-target"]:checked').value === 'individual' ? 'block' : 'none';
+            const autoList = document.getElementById('msg-autocomplete-results');
+            if (autoList) autoList.style.display = 'none';
+        }));
+
+        indSearch.addEventListener('input', (e) => {
+            const q = e.target.value.toLowerCase().trim();
+            const autoList = document.getElementById('msg-autocomplete-results');
+            if (!q) {
+                autoList.style.display = 'none';
+                return;
+            }
+            const matched = patients.filter(p => 
+                p.name.toLowerCase().includes(q) || 
+                p.qsl.toLowerCase().includes(q) ||
+                p.telefono.toLowerCase().includes(q) ||
+                p.dpi.toLowerCase().includes(q)
+            ).slice(0, 15);
+            
+            if (matched.length === 0) {
+                autoList.innerHTML = '<div style="padding:10px; color:rgba(255,255,255,0.4); font-size:12px;">Sin resultados para "' + q + '"</div>';
+                autoList.style.display = 'block';
+                return;
+            }
+
+            autoList.innerHTML = matched.map(p => `
+                <div style="padding:10px 12px; border-bottom:1px solid rgba(255,255,255,0.05); cursor:pointer; display:flex; justify-content:space-between; align-items:center; background:transparent; transition:background 0.2s;" onmouseover="this.style.background='rgba(139,92,246,0.15)'" onmouseout="this.style.background='transparent'" onclick="document.getElementById('msg-ind-search').value = '${p.name}'; document.getElementById('msg-autocomplete-results').style.display='none'; document.getElementById('btn-prep-msg').click();">
+                    <span style="color:white; font-size:13px; font-weight:600;">${p.name}</span>
+                    <span style="color:rgba(255,255,255,0.4); font-size:11px;">${p.telefono} • ${p.qsl}</span>
+                </div>
+            `).join('');
+            autoList.style.display = 'block';
+        });
+
+        overlay.addEventListener('click', (e) => {
+            if (e.target.id !== 'msg-ind-search') {
+                const autoList = document.getElementById('msg-autocomplete-results');
+                if(autoList) autoList.style.display = 'none';
+            }
+        });
+
+        window.prepMsgHandler = () => {
+            const targetType = overlay.querySelector('input[name="msg-target"]:checked').value;
+            const msgTemplate = document.getElementById('msg-text').value.trim();
+            const resultsDiv = document.getElementById('msg-results');
+
+            let filtered = [];
+
+            if (targetType === 'all') {
+                filtered = patients;
+            } else if (targetType === 'days') {
+                const daysLimit = parseInt(document.getElementById('msg-days').value) || 0;
+                const now = new Date();
+                const limitDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysLimit, 23, 59, 59);
+                
+                const appts = window.getAppointments ? window.getAppointments() : [];
+                const patientHasAppt = new Set();
+                
+                appts.forEach(a => {
+                    const [y, m, d] = a.date.split('-');
+                    const aDate = new Date(y, m - 1, d);
+                    if (aDate >= new Date(now.getFullYear(), now.getMonth(), now.getDate()) && aDate <= limitDate) {
+                        patientHasAppt.add(a.qsl);
+                    }
+                });
+                
+                filtered = patients.filter(p => patientHasAppt.has(p.qsl));
+            } else if (targetType === 'individual') {
+                const q = indSearch.value.toLowerCase().trim();
+                if (!q) {
+                    window.showElegantAlert('Error', 'Ingrese nombre, teléfono, DPI o QSL para la búsqueda.', false);
+                    return;
+                }
+                filtered = patients.filter(p => 
+                    p.name.toLowerCase().includes(q) || 
+                    p.qsl.toLowerCase().includes(q) ||
+                    p.telefono.toLowerCase().includes(q) ||
+                    p.dpi.toLowerCase().includes(q)
+                );
+            }
+
+            if (filtered.length === 0) {
+                resultsDiv.innerHTML = '<div style="text-align:center; padding:30px; color:rgba(255,255,255,0.4); background:rgba(0,0,0,0.2); border-radius:12px;">No se encontraron pacientes que coincidan con los criterios.</div>';
+                return;
+            }
+
+            window.pendingMsgPatients = filtered;
+
+            window.renderMsgListRows = () => {
+                const actionContainer = document.getElementById('action-buttons-container');
+                const resultsDiv = document.getElementById('msg-results');
+
+                if (!window.pendingMsgPatients || window.pendingMsgPatients.length === 0) {
+                    actionContainer.innerHTML = `<button id="btn-prep-msg" style="width:100%; background:linear-gradient(135deg, #8b5cf6, #6d28d9); color:white; border:none; padding:15px; border-radius:12px; font-weight:700; cursor:pointer; font-size:15px; box-shadow:0 4px 15px rgba(139,92,246,0.3); transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='none'">🔍 GENERAR LISTA DE ENVÍO</button>`;
+                    document.getElementById('btn-prep-msg').onclick = window.prepMsgHandler;
+
+                    resultsDiv.innerHTML = '<div style="text-align:center; padding:30px; color:rgba(255,255,255,0.4); background:rgba(0,0,0,0.2); border-radius:12px;">La lista ha quedado vacía. Modifique los criterios y presione "Generar Lista" de nuevo.</div>';
+                    return;
+                }
+
+                actionContainer.innerHTML = `
+                    <div style="display:flex; flex-direction:column; gap:10px;">
+                        <button onclick="window.processMassWhatsApp()" style="width:100%; background:linear-gradient(135deg, #10b981, #059669); color:white; border:none; padding:16px; border-radius:12px; font-weight:800; cursor:pointer; font-size:15px; box-shadow:0 6px 20px rgba(16,185,129,0.3); text-transform:uppercase; letter-spacing:1px; transition:transform 0.2s; display:flex; align-items:center; justify-content:center; gap:8px;" onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='none'">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+                            Enviar por WhatsApp (${window.pendingMsgPatients.length})
+                        </button>
+                        <div style="display:flex; gap:10px;">
+                            <button onclick="window.processMassDrSisdel()" style="flex:1; background:linear-gradient(135deg, #3b82f6, #1d4ed8); color:white; border:none; padding:16px; border-radius:12px; font-weight:800; cursor:pointer; font-size:15px; box-shadow:0 6px 20px rgba(59,130,246,0.3); text-transform:uppercase; letter-spacing:1px; transition:transform 0.2s; display:flex; align-items:center; justify-content:center; gap:8px;" onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='none'">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path><polyline points="22,6 12,13 2,6"></polyline></svg>
+                                Enviar por Plataforma (${window.pendingMsgPatients.length})
+                            </button>
+                            <button onclick="window.pendingMsgPatients=[]; window.renderMsgListRows();" style="width:60px; background:rgba(255,255,255,0.1); border:none; color:white; border-radius:12px; cursor:pointer; font-size:22px; transition:transform 0.2s; font-weight:bold;" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='none'" title="Limpiar y Volver">⟲</button>
+                        </div>
+                    </div>`;
+
+                resultsDiv.innerHTML = `<div style="background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.3); color:#a7f3d0; padding:12px 18px; border-radius:10px; margin-bottom:15px; font-size:14px; text-align:center;">Se han seleccionado <strong>${window.pendingMsgPatients.length}</strong> pacientes aptos. Revise la lista y elimine los que no deban recibir el mensaje antes de presionar Enviar.</div>` + 
+                    window.pendingMsgPatients.map((p, idx) => {
+                        return `
+                        <div style="background:rgba(255,255,255,0.05); padding:10px 18px; border-radius:10px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; border: 1px solid rgba(255,255,255,0.03);">
+                            <div>
+                                <div style="font-size:15px; color:white; font-weight:600;">${p.name}</div>
+                                <div style="font-size:13px; color:rgba(255,255,255,0.4); font-family:monospace;">${p.telefono || 'Sin Número'}</div>
+                            </div>
+                            <button onclick="window.pendingMsgPatients.splice(${idx}, 1); window.renderMsgListRows();" style="background:rgba(239,68,68,0.1); color:#fca5a5; border:1px solid rgba(239,68,68,0.3); padding:8px 14px; border-radius:8px; cursor:pointer; font-size:13px; transition:all 0.2s; font-weight:600;" onmouseover="this.style.background='rgba(239,68,68,0.2)'; this.style.color='#fff';" onmouseout="this.style.background='rgba(239,68,68,0.1)'; this.style.color='#fca5a5';">
+                                ✕ Quitar
+                            </button>
+                        </div>`;
+                    }).join('');
+            };
+
+            window.processMassWhatsApp = () => {
+                if(!window.pendingMsgPatients || window.pendingMsgPatients.length === 0) return;
+                
+                const msgTemplate = document.getElementById('msg-text').value.trim();
+                if (!msgTemplate) {
+                    window.showElegantAlert('Error', '⚠️ El campo de mensaje está vacío. Escriba el mensaje que desea enviar antes de disparar el envío a toda la lista.', false);
+                    return;
+                }
+
+                const targetType = overlay.querySelector('input[name="msg-target"]:checked').value;
+                const count = window.pendingMsgPatients.length;
+                const names = window.pendingMsgPatients.map(p => p.name);
+
+                // Log to history
+                window._logSentMessage(msgTemplate, 'WhatsApp', targetType, count, names);
+
+                const resultsDiv = document.getElementById('msg-results');
+                const actionContainer = document.getElementById('action-buttons-container');
+                actionContainer.innerHTML = `<button id="btn-prep-msg" style="width:100%; background:linear-gradient(135deg, #8b5cf6, #6d28d9); color:white; border:none; padding:15px; border-radius:12px; font-weight:700; cursor:pointer; font-size:15px; box-shadow:0 4px 15px rgba(139,92,246,0.3); transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='none'">🔍 GENERAR LISTA DE ENVÍO</button>`;
+                document.getElementById('btn-prep-msg').onclick = window.prepMsgHandler;
+
+                resultsDiv.innerHTML = `
+                    <div style="text-align:center; padding:40px; background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.3); border-radius:16px;">
+                        <div style="font-size:60px; margin-bottom:15px;">✅</div>
+                        <h3 style="color:#34d399; margin:0 0 10px 0; font-size:22px;">Mensaje Enviado Exitosamente</h3>
+                        <p style="color:rgba(255,255,255,0.6); margin:0 0 5px 0; font-size:15px;">Se enviaron <strong style="color:white;">${count}</strong> mensajes por <strong style="color:#10b981;">WhatsApp</strong></p>
+                        <p style="color:rgba(255,255,255,0.3); font-size:13px; margin:0;">${new Date().toLocaleString('es-ES')}</p>
+                    </div>`;
+
+                window.pendingMsgPatients = [];
+            };
+
+            window.processMassDrSisdel = () => {
+                if(!window.pendingMsgPatients || window.pendingMsgPatients.length === 0) return;
+
+                const msgTemplate = document.getElementById('msg-text').value.trim();
+                if (!msgTemplate) {
+                    window.showElegantAlert('Error', '⚠️ El campo de mensaje está vacío. Escriba el aviso que desea emitir.', false);
+                    return;
+                }
+
+                const targetType = overlay.querySelector('input[name="msg-target"]:checked').value;
+                const count = window.pendingMsgPatients.length;
+                const names = window.pendingMsgPatients.map(p => p.name);
+
+                window.pendingMsgPatients.forEach(p => {
+                    const finalMsg = msgTemplate.replace(/\\[NOMBRE\\]/g, p.name);
+                    const sysAlertsKey = `dr_sisdel_alerts_${p.qsl}`;
+                    const alerts = JSON.parse(localStorage.getItem(sysAlertsKey) || '[]');
+                    
+                    const msgObj = {
+                        id: 'msg_' + Date.now() + Math.floor(Math.random() * 1000),
+                        timestamp: new Date().toISOString(),
+                        text: finalMsg,
+                        read: false
+                    };
+                    alerts.unshift(msgObj);
+                    localStorage.setItem(sysAlertsKey, JSON.stringify(alerts));
+
+                    // --- Nube Sync ---
+                    fetch(`/api/patient/${p.qsl}/alerts/messages`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ id: msgObj.id, mensaje: msgObj.text, leido: false })
+                    }).catch(e => console.error(e));
+                });
+
+                // Log to history
+                window._logSentMessage(msgTemplate, 'DR-SISDEL', targetType, count, names);
+
+                const resultsDiv = document.getElementById('msg-results');
+                const actionContainer = document.getElementById('action-buttons-container');
+                actionContainer.innerHTML = `<button id="btn-prep-msg" style="width:100%; background:linear-gradient(135deg, #8b5cf6, #6d28d9); color:white; border:none; padding:15px; border-radius:12px; font-weight:700; cursor:pointer; font-size:15px; box-shadow:0 4px 15px rgba(139,92,246,0.3); transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='none'">🔍 GENERAR LISTA DE ENVÍO</button>`;
+                document.getElementById('btn-prep-msg').onclick = window.prepMsgHandler;
+
+                resultsDiv.innerHTML = `
+                    <div style="text-align:center; padding:40px; background:rgba(59,130,246,0.06); border:1px solid rgba(59,130,246,0.3); border-radius:16px;">
+                        <div style="font-size:60px; margin-bottom:15px;">🔔</div>
+                        <h3 style="color:#60a5fa; margin:0 0 10px 0; font-size:22px;">Mensaje Enviado Exitosamente</h3>
+                        <p style="color:rgba(255,255,255,0.6); margin:0 0 5px 0; font-size:15px;">Se enviaron <strong style="color:white;">${count}</strong> avisos por <strong style="color:#3b82f6;">Plataforma DR-SISDEL</strong></p>
+                        <p style="color:rgba(255,255,255,0.3); font-size:13px; margin:0;">${new Date().toLocaleString('es-ES')}</p>
+                    </div>`;
+
+                window.pendingMsgPatients = [];
+            };
+
+            // === Utility: log sent message ===
+            window._logSentMessage = (text, channel, targetType, count, recipientNames) => {
+                const targetLabels = { all: 'Todos los Pacientes', days: 'Citas Próximas', individual: 'Individual' };
+                const log = JSON.parse(localStorage.getItem('dr_sisdel_msg_history') || '[]');
+                const histId = 'log_' + Date.now();
+                log.unshift({
+                    id: histId,
+                    text: text,
+                    channel: channel,
+                    targetGroup: targetLabels[targetType] || targetType,
+                    recipientCount: count,
+                    recipients: recipientNames.slice(0, 10),
+                    date: new Date().toLocaleDateString('es-ES', { day:'2-digit', month:'short', year:'numeric' }),
+                    time: new Date().toLocaleTimeString('es-ES', { hour:'2-digit', minute:'2-digit' }),
+                    timestamp: new Date().toISOString()
+                });
+                localStorage.setItem('dr_sisdel_msg_history', JSON.stringify(log));
+
+                // --- Nube Sync ---
+                const docId = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+                fetch('/api/messages/history', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        id: histId, doctor_id: docId, mensaje: text, canal: channel, 
+                        grupo_objetivo: targetLabels[targetType] || targetType, 
+                        cantidad_destinatarios: count, nombres_destinatarios: recipientNames
+                    })
+                }).catch(e => console.error(e));
+            };
+
+            // === Show history viewer ===
+            window.showMsgHistory = () => {
+                const log = JSON.parse(localStorage.getItem('dr_sisdel_msg_history') || '[]');
+                const histDiv = document.getElementById('msg-results');
+                if (!histDiv) return;
+
+                if (log.length === 0) {
+                    histDiv.innerHTML = '<div style="text-align:center; padding:40px; color:rgba(255,255,255,0.4); background:rgba(0,0,0,0.2); border-radius:12px;">No hay mensajes enviados aún.</div>';
+                    return;
+                }
+
+                histDiv.innerHTML = `
+                    <div style="background:rgba(139,92,246,0.08); border:1px solid rgba(139,92,246,0.3); color:#c4b5fd; padding:12px 18px; border-radius:10px; margin-bottom:15px; font-size:14px; text-align:center; font-weight:600;">📜 Historial de Mensajes Enviados (${log.length})</div>
+                    ${log.map(entry => `
+                        <div style="background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.06); border-left:3px solid ${entry.channel === 'WhatsApp' ? '#10b981' : '#3b82f6'}; border-radius:12px; padding:16px; margin-bottom:10px;">
+                            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px; flex-wrap:wrap; gap:6px;">
+                                <div style="display:flex; gap:8px; align-items:center;">
+                                    <span style="background:${entry.channel === 'WhatsApp' ? 'rgba(16,185,129,0.15)' : 'rgba(59,130,246,0.15)'}; color:${entry.channel === 'WhatsApp' ? '#34d399' : '#60a5fa'}; border:1px solid ${entry.channel === 'WhatsApp' ? 'rgba(16,185,129,0.3)' : 'rgba(59,130,246,0.3)'}; padding:3px 10px; border-radius:8px; font-size:11px; font-weight:700;">${entry.channel === 'WhatsApp' ? '💬' : '📧'} ${entry.channel}</span>
+                                    <span style="background:rgba(139,92,246,0.12); color:#a78bfa; border:1px solid rgba(139,92,246,0.25); padding:3px 10px; border-radius:8px; font-size:11px; font-weight:600;">${entry.targetGroup}</span>
+                                    <span style="color:rgba(255,255,255,0.4); font-size:12px;">${entry.recipientCount} destinatario${entry.recipientCount > 1 ? 's' : ''}</span>
+                                </div>
+                                <span style="color:rgba(255,255,255,0.35); font-size:12px; white-space:nowrap;">📅 ${entry.date} • ⏰ ${entry.time}</span>
+                            </div>
+                            <p style="margin:0; color:rgba(255,255,255,0.8); font-size:14px; line-height:1.5; background:rgba(0,0,0,0.15); padding:10px 14px; border-radius:8px; white-space:pre-wrap;">${entry.text}</p>
+                            ${entry.recipients && entry.recipients.length > 0 ? `<div style="margin-top:8px; font-size:11px; color:rgba(255,255,255,0.3);">Destinatarios: ${entry.recipients.join(', ')}${entry.recipientCount > 10 ? '...' : ''}</div>` : ''}
+                        </div>
+                    `).join('')}
+                `;
+            };
+
+            window.renderMsgListRows();
+        };
+
+        // Bind the handler to the initial statically rendered button
+        document.getElementById('btn-prep-msg').onclick = window.prepMsgHandler;
+    };
+
+    window.showPatientLastRx = (qsl) => {
+        const data = getPatientData(qsl);
+        const meds = data.meds || [];
+        const consults = data.consultations || [];
+        const lastCons = consults.length > 0 ? consults[consults.length - 1] : null;
+
+        if (meds.length === 0 && !lastCons) {
+            window.showElegantAlert('Expediente Vacío', 'Este paciente no tiene consultas ni recetas previas registradas.', false);
+            return;
+        }
+
+        const rxOverlay = document.createElement('div');
+        rxOverlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:999999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px);padding:20px;box-sizing:border-box;';
+
+        const medsHtml = meds.map(m => `
+            <div style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); border-radius:12px; padding:18px; margin-bottom:14px;">
+                <h4 style="color:#34d399; margin:0 0 8px 0; font-size:19px;">💊 ${m.name}</h4>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+                    <p style="margin:0; font-size:14px; color:rgba(255,255,255,0.8);"><strong>Dosis:</strong> ${m.dose}</p>
+                    <p style="margin:0; font-size:14px; color:rgba(255,255,255,0.8);"><strong>Frecuencia:</strong> Cada ${m.frequency}h</p>
+                    <p style="margin:0; font-size:14px; color:rgba(255,255,255,0.8);"><strong>Duración:</strong> ${m.days} días</p>
+                    <p style="margin:0; font-size:14px; color:rgba(255,255,255,0.8);"><strong>Inicio:</strong> <span style="color:#10b981;">${m.startTime}</span></p>
+                </div>
+                ${m.notes ? `<p style="margin:10px 0 0; font-size:14px; color:rgba(255,255,255,0.6); border-top:1px dashed rgba(255,255,255,0.1); padding-top:10px;"><em>Indicaciones: ${m.notes}</em></p>` : ''}
+            </div>
+        `).join('');
+
+        let consultHtml = '';
+        if (lastCons) {
+            consultHtml = `
+                <div style="background:rgba(0,0,0,0.2); border:1px solid rgba(255,255,255,0.05); border-radius:12px; padding:20px; margin-bottom:20px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
+                        <h4 style="color:#22d3ee; margin:0; font-size:16px; text-transform:uppercase; letter-spacing:1px; display:flex; align-items:center; gap:8px;">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                            Detalles de la Última Consulta
+                        </h4>
+                        <span style="font-size:13px; color:rgba(255,255,255,0.5); background:rgba(255,255,255,0.1); padding:4px 10px; border-radius:12px;">${lastCons.date}</span>
+                    </div>
+
+                    ${(lastCons.glucosa || lastCons.presion || lastCons.peso || lastCons.estatura) ? `
+                        <div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:15px;">
+                            ${lastCons.peso ? `<span style="background:rgba(59,130,246,0.15); color:#60a5fa; border:1px solid rgba(59,130,246,0.25); padding:4px 10px; border-radius:12px; font-size:12px;">⚖️ ${lastCons.peso}</span>` : ''}
+                            ${lastCons.estatura ? `<span style="background:rgba(59,130,246,0.15); color:#60a5fa; border:1px solid rgba(59,130,246,0.25); padding:4px 10px; border-radius:12px; font-size:12px;">📏 ${lastCons.estatura}</span>` : ''}
+                            ${lastCons.glucosa ? `<span style="background:rgba(34,211,238,0.15); color:#22d3ee; border:1px solid rgba(34,211,238,0.25); padding:4px 10px; border-radius:12px; font-size:12px;">🩸 Glucosa: ${lastCons.glucosa}</span>` : ''}
+                            ${lastCons.presion ? `<span style="background:rgba(248,113,113,0.15); color:#f87171; border:1px solid rgba(248,113,113,0.25); padding:4px 10px; border-radius:12px; font-size:12px;">❤️ Presión: ${lastCons.presion}</span>` : ''}
+                        </div>
+                    ` : ''}
+
+                    <div style="margin-bottom:12px;">
+                        <span style="display:block; font-size:12px; color:rgba(255,255,255,0.4); text-transform:uppercase; margin-bottom:4px;">Motivo:</span>
+                        <p style="margin:0; font-size:15px; color:white;">${lastCons.motivo || 'N/A'}</p>
+                    </div>
+                    ${lastCons.historia ? `
+                        <div style="margin-bottom:12px;">
+                            <span style="display:block; font-size:12px; color:rgba(255,255,255,0.4); text-transform:uppercase; margin-bottom:4px;">Historia:</span>
+                            <p style="margin:0; font-size:14px; color:rgba(255,255,255,0.8); white-space:pre-wrap;">${lastCons.historia}</p>
+                        </div>
+                    ` : ''}
+                    ${lastCons.notas ? `
+                        <div style="margin-bottom:12px;">
+                            <span style="display:block; font-size:12px; color:rgba(255,255,255,0.4); text-transform:uppercase; margin-bottom:4px;">Diagnóstico / Notas:</span>
+                            <p style="margin:0; font-size:14px; color:rgba(255,255,255,0.8); white-space:pre-wrap;">${lastCons.notas}</p>
+                        </div>
+                    ` : ''}
+                    ${lastCons.referencias ? `
+                        <div style="margin-bottom:4px;">
+                            <span style="display:block; font-size:12px; color:rgba(255,255,255,0.4); text-transform:uppercase; margin-bottom:4px;">Referencias:</span>
+                            <p style="margin:0; font-size:14px; color:rgba(255,255,255,0.8); white-space:pre-wrap;">${lastCons.referencias}</p>
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+        }
+
+        rxOverlay.innerHTML = `
+            <div class="widget-card animate-in" style="background: linear-gradient(145deg, #1e293b, #0f172a); border: 2px solid rgba(16, 185, 129, 0.4); border-radius: 20px; padding: 50px; width: 100%; max-width: 1270px; box-shadow: 0 20px 60px rgba(0,0,0,0.6); position: relative; max-height:92vh; display:flex; flex-direction:column;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom:15px; flex-shrink:0;">
+                    <h3 style="color:#10b981; font-size:26px; margin:0; display:flex; align-items:center; gap:10px;">📋 Expediente / Última Receta</h3>
+                    <button id="close-rx-btn" style="background:rgba(255,255,255,0.1); border:none; color:white; width:38px; height:38px; border-radius:10px; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:background 0.2s; font-size:18px;" onmouseenter="this.style.background='rgba(255,255,255,0.2)'" onmouseleave="this.style.background='rgba(255,255,255,0.1)'">✕</button>
+                </div>
+                <p style="color:rgba(255,255,255,0.6); margin-top:0; margin-bottom:15px; font-size:22px;">Paciente: <strong style="color:white; font-size:26px;">${data.nombre_completo || qsl}</strong></p>
+                <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:22px;">
+                    <div style="background:${data.glucoseEnabled ? 'rgba(16,185,129,0.1)' : 'rgba(255,255,255,0.03)'}; border:1px solid ${data.glucoseEnabled ? 'rgba(16,185,129,0.35)' : 'rgba(255,255,255,0.08)'}; padding:10px 18px; border-radius:14px; display:flex; align-items:center; gap:10px; ${data.glucoseEnabled ? 'border-left:4px solid #10b981;' : ''}">
+                        <span style="font-size:22px;">${data.glucoseEnabled ? '🟢' : '⚪'}</span>
+                        <div>
+                            <div style="font-size:14px; font-weight:700; color:${data.glucoseEnabled ? '#34d399' : 'rgba(255,255,255,0.3)'};">Monitoreo de Glucosa</div>
+                            <div style="font-size:12px; color:${data.glucoseEnabled ? '#a7f3d0' : 'rgba(255,255,255,0.2)'};">${data.glucoseEnabled ? 'Activado — Paciente reporta niveles periódicamente' : 'No activado en este paciente'}</div>
+                        </div>
+                    </div>
+                    <div style="background:${data.pressureEnabled ? 'rgba(239,68,68,0.08)' : 'rgba(255,255,255,0.03)'}; border:1px solid ${data.pressureEnabled ? 'rgba(239,68,68,0.3)' : 'rgba(255,255,255,0.08)'}; padding:10px 18px; border-radius:14px; display:flex; align-items:center; gap:10px; ${data.pressureEnabled ? 'border-left:4px solid #ef4444;' : ''}">
+                        <span style="font-size:22px;">${data.pressureEnabled ? '🔴' : '⚪'}</span>
+                        <div>
+                            <div style="font-size:14px; font-weight:700; color:${data.pressureEnabled ? '#f87171' : 'rgba(255,255,255,0.3)'};">Monitoreo de Presión Arterial</div>
+                            <div style="font-size:12px; color:${data.pressureEnabled ? '#fca5a5' : 'rgba(255,255,255,0.2)'};">${data.pressureEnabled ? 'Activado — Paciente reporta lecturas periódicamente' : 'No activado en este paciente'}</div>
+                        </div>
+                    </div>
+                </div>
+                <div style="overflow-y:auto; padding-right:10px;">
+                    ${consultHtml}
+                    ${meds.length > 0 ? `
+                        <h4 style="color:#10b981; font-size:16px; margin:0 0 15px 0; text-transform:uppercase; letter-spacing:1px; display:flex; align-items:center; gap:8px;">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.5 20.5l-6-6a4.5 4.5 0 0 1 6.5-6.5l6 6a4.5 4.5 0 0 1-6.5 6.5z"/><path d="M14 6l4 4"/></svg>
+                            Receta Asignada (${meds.length})
+                        </h4>
+                        ${medsHtml}
+                    ` : `
+                        <div style="padding:20px; text-align:center; background:rgba(255,255,255,0.02); border-radius:12px; border:1px dashed rgba(255,255,255,0.1); color:rgba(255,255,255,0.4); font-size:14px;">
+                            No hay medicamentos activos en la fórmula actual.
+                        </div>
+                    `}
+                </div>
+            </div>
+        `;
+        
+        rxOverlay.onclick = (e) => { if(e.target === rxOverlay) rxOverlay.remove(); };
+        document.body.appendChild(rxOverlay);
+        document.getElementById('close-rx-btn').onclick = () => rxOverlay.remove();
+    };
+
     // --- VISTAS DEL MÉDICO ---
 
-    function renderDoctorHome() {
+    window.renderDoctorHome = function(mode = 'register') {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
         const key = getDocPatientsKey();
         const patients = JSON.parse(localStorage.getItem(key) || '[]');
 
         contentArea.innerHTML = `
             <div class="widget-card animate-in" style="max-width: 1000px; margin: 0 auto; padding: 40px; border: 3px solid rgba(34, 211, 238, 0.45); border-radius: 24px;">
-                <h3 class="widget-title" style="color: var(--accent); border-bottom: 2px solid rgba(255,255,255,0.1); padding-bottom: 20px; font-size: 28px; display: flex; align-items: center;">
-                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-right: 15px;">
-                        <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/>
-                    </svg>
-                    Nuevo Expediente Clínico (Ficha Médica)
-                </h3>
+
+            <div id="view-registration" style="${mode === 'register' ? 'display: block;' : 'display: none;'}">
+                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid rgba(255,255,255,0.1); padding-bottom: 20px;">
+                    <h3 class="widget-title" style="color: #10b981; font-size: 28px; display: flex; align-items: center; border:none; padding:0; margin:0;">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-right: 15px;">
+                            <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/>
+                        </svg>
+                        Datos del Paciente
+                    </h3>
+                    <div style="display:flex; gap:10px;">
+                        <button id="btn-reg-back" class="status-badge" style="background: rgba(255,255,255,0.1); padding: 10px 15px; cursor: pointer; border: none; color: white;" onclick="window.renderDoctorHome('search')">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 5px;"><polyline points="15 18 9 12 15 6"></polyline></svg> <span id="btn-reg-back-text">Volver a Búsqueda</span>
+                        </button>
+                        <button class="status-badge" style="background: rgba(34,211,238,0.1); border: 1px solid rgba(34,211,238,0.3); padding: 10px 15px; cursor: pointer; color: #22d3ee;" onclick="loadSection('overview')">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 5px;"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg> Menú Principal
+                        </button>
+                    </div>
+                </div>
                 
                 <div id="patient-form" style="margin: 30px 0; background: rgba(0,0,0,0.2); border-radius: 15px; border: 1px solid rgba(255,255,255,0.05); padding: 30px;">
                     <!-- Sección 1: Datos Personales -->
@@ -231,7 +1436,6 @@ document.addEventListener('DOMContentLoaded', () => {
                             <select id="p-genero" style="width: 100%; background: rgba(0,0,0,0.3); color: white; border: 1px solid var(--card-border); padding: 12px; border-radius: 12px;">
                                 <option value="Masculino">Masculino</option>
                                 <option value="Femenino">Femenino</option>
-                                <option value="Otro">Otro</option>
                             </select>
                         </div>
                         <div class="input-group">
@@ -240,7 +1444,17 @@ document.addEventListener('DOMContentLoaded', () => {
                         </div>
                         <div class="input-group">
                             <label>Estado Civil</label>
-                            <input type="text" id="p-civil" placeholder="Soltero, Casado, etc.">
+                            <select id="p-civil" style="width: 100%; background: rgba(0,0,0,0.3); color: white; border: 1px solid var(--card-border); padding: 12px; border-radius: 12px;">
+                                <option value="Soltero">Soltero</option>
+                                <option value="Soltera">Soltera</option>
+                                <option value="Casado">Casado</option>
+                                <option value="Casada">Casada</option>
+                                <option value="Viudo">Viudo</option>
+                                <option value="Viuda">Viuda</option>
+                                <option value="Divorciado">Divorciado</option>
+                                <option value="Divorciada">Divorciada</option>
+                                <option value="Unión Libre">Unión Libre</option>
+                            </select>
                         </div>
                     </div>
 
@@ -289,10 +1503,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     <!-- Sección 3: Antecedentes Médicos -->
                     <h4 style="color: #22d3ee; margin-bottom: 20px; text-transform: uppercase; font-size: 14px; letter-spacing: 1px; margin-top: 40px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 20px;">3. Historia Clínica</h4>
-                    <div style="display: grid; grid-template-columns: 1fr 2fr; gap: 20px; margin-bottom: 25px;">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 25px;">
                         <div class="input-group">
                             <label>Tipo de Sangre</label>
                             <input type="text" id="p-sangre" placeholder="Ej: O+">
+                        </div>
+                        <div class="input-group">
+                            <label>Glucosa Basal (mg/dL)</label>
+                            <input type="number" id="p-glucosa" placeholder="Ej: 98">
                         </div>
                         <div class="input-group">
                             <label>Alergias (Med, Alimentos, etc.)</label>
@@ -336,29 +1554,114 @@ document.addEventListener('DOMContentLoaded', () => {
                     </button>
                 </div>
 
-                <h3 class="widget-title" style="font-size: 24px; padding-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.1); margin-top: 50px;">
-                    Expedientes Activos (<span id="patient-count">${patients.length}</span>)
-                </h3>
-                <div class="patient-list" style="margin-top: 20px;">
-                    ${patients.length > 0 ? patients.map(qsl => {
-            const name = localStorage.getItem(`patient_name_${qsl}`) || 'Paciente';
-            const data = getPatientData(qsl);
-            return `
-                            <div class="med-item patient-row" style="cursor: pointer; padding: 20px;" onclick="window.selectPatient('${qsl}')">
-                                <div class="med-info">
-                                    <h4 style="color: white; font-size: 20px;">${name}</h4>
-                                    <p style="color: var(--text-muted);">Código: <b style="color:var(--accent);">${qsl}</b> | ${data.illness || 'Sin diagnóstico'}</p>
+            </div> <!-- Close view-registration -->
+            
+            <div id="view-search" style="${mode === 'search' ? 'display: block;' : 'display: none;'} margin-top: -20px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid rgba(255,255,255,0.1); padding-bottom: 20px; margin-bottom: 30px;">
+                    <h3 class="widget-title" style="color: var(--accent); font-size: 28px; display: flex; align-items: center; border:none; padding:0; margin:0;">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-right: 15px;">
+                            <circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        Buscador de Pacientes (<span id="patient-count">${patients.length}</span>)
+                    </h3>
+                    <div style="display:none; gap:10px;">
+                        <button id="btn-goto-register" class="btn-primary" style="padding: 12px 24px; font-weight: bold; border-radius: 12px; background: linear-gradient(135deg, #10b981 0%, #059669 100%);" onclick="window.renderDoctorHome('register')">
+                            + Datos del Paciente
+                        </button>
+                        <button onclick="window.showPatientList()" style="padding: 12px 20px; font-weight: bold; border-radius: 12px; background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.35); color: #60a5fa; cursor:pointer; font-size:14px; display:inline-flex; align-items:center; gap:8px;">
+                            👥 Lista de Pacientes
+                        </button>
+                        <button class="status-badge" style="background: rgba(34,211,238,0.1); border: 1px solid rgba(34,211,238,0.3); padding: 10px 18px; cursor: pointer; color: #22d3ee; font-size:14px;" onclick="loadSection('overview')">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 5px;"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg> Menú Principal
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="input-group" style="margin-bottom: 20px;">
+                    <input type="text" id="patient-search" placeholder="Escriba nombre, DPI o teléfono..." onkeyup="window.filterPatients()" style="width: 100%; padding: 18px; font-size: 18px; border-radius: 12px; background: rgba(0,0,0,0.3); border: 1px solid var(--card-border); color: white;">
+                </div>
+
+                <div id="default-appointments-view">
+                ${(() => {
+                    const now = new Date();
+                    const today = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0');
+                    const todayStrES = now.toLocaleDateString('es-ES');
+                    
+                    const appts = window.getAppointments ? window.getAppointments() : [];
+                    
+                    const upcoming = appts.filter(a => {
+                        if (a.date !== today) return false;
+                        const pData = getPatientDataFallback(a.qsl);
+                        const hasConsultedToday = (pData.consultations || []).some(c => typeof c.date === 'string' && (c.date.includes(todayStrES) || c.date.startsWith(todayStrES)));
+                        const hasMedsToday = (pData.meds || []).some(m => m.id && new Date(parseInt(m.id)).toLocaleDateString('es-ES') === todayStrES);
+                        return !(hasConsultedToday || hasMedsToday);
+                    })
+                    .sort((a,b) => new Date(a.date + 'T' + a.time) - new Date(b.date + 'T' + b.time))
+                    .slice(0, 10);
+
+                    if(upcoming.length === 0) {
+                        return `<div style="text-align:center; padding: 40px; opacity: 0.5; font-size: 18px;">No hay citas agendadas próximas para el día de hoy. Utilice el buscador para encontrar un paciente.</div>`;
+                    }
+                    const items = upcoming.map(u => `
+                        <div class="med-item" style="cursor:pointer; padding:18px 24px; background:linear-gradient(145deg, rgba(16,185,129,0.08), rgba(16,185,129,0.02)); border-left: 5px solid #10b981; border-radius: 12px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 15px rgba(0,0,0,0.1); border-right: 1px solid rgba(16,185,129,0.1); border-top: 1px solid rgba(16,185,129,0.1); border-bottom: 1px solid rgba(16,185,129,0.1);" onclick="window.selectPatientAndGoToConsultation('${u.qsl}')">
+                            <div class="med-info">
+                                <h4 style="color:white; font-size:20px; font-weight: 600; margin-bottom: 6px;">${u.name}</h4>
+                                <p style="color:rgba(255,255,255,0.6); font-size:14px; margin: 0;">ID: <b style="color:#10b981">${u.qsl}</b></p>
+                            </div>
+                            <div style="text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 8px;">
+                                <div style="color: #10b981; font-size: 24px; font-weight: 700; background: rgba(16,185,129,0.1); padding: 8px 16px; border-radius: 8px; border: 1px solid rgba(16,185,129,0.2); display: inline-block;">
+                                    ⏰ ${u.time}
                                 </div>
-                                <div style="display: flex; gap: 10px;">
-                                    <span class="status-badge">Ver Detalle</span>
-                                    <button class="status-badge" style="background: rgba(239, 68, 68, 0.1); color: var(--error);" onclick="event.stopPropagation(); window.deletePatient('${qsl}')">Eliminar</button>
+                                <div>
+                                    <span class="status-badge" style="background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.3); font-size: 12px; padding: 4px 10px;">Cita de Hoy</span>
                                 </div>
                             </div>
-                        `;
-        }).join('') : '<div style="text-align:center; padding: 40px; opacity: 0.5;">No hay expedientes todavía.</div>'}
+                        </div>`).join('');
+                    return `<div style="margin-bottom:25px;">
+                        <h4 style="color:#10b981; font-size:15px; text-transform:uppercase; letter-spacing:1px; margin-bottom:16px; display:flex; align-items:center; gap:8px;">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            Próximas Citas para Hoy
+                        </h4>
+                        <div>${items}</div>
+                    </div>`;
+                })()}
                 </div>
-            </div>
+
+                <div id="search-results-view" style="display: none;"></div>
+
+                <div id="all-patients-data" style="display: none;">
+                    ${patients.map(qsl => {
+                        const name = localStorage.getItem(`patient_name_${qsl}`) || 'Paciente';
+                        const data = getPatientData(qsl);
+                        const phone = data.telefono || '';
+                        const id = data.id_identificacion || '';
+                        const searchStr = `${name} ${qsl} ${phone} ${id}`.toLowerCase().replace(/['"]/g, '');
+                        return `<div class="patient-row-data" data-search="${searchStr}" data-qsl="${qsl}" data-name="${name.replace(/['"]/g, '&quot;')}" data-illness="${(data.illness || 'Sin diagnóstico').replace(/['"]/g, '&quot;')}"></div>`;
+                    }).join('')}
+                </div>
+
+            </div> <!-- Close view-search -->
+            </div> <!-- Close widget-card -->
         `;
+
+        const fechaNacInput = document.getElementById('p-fecha-nac');
+        const edadInput = document.getElementById('p-edad');
+        if (fechaNacInput && edadInput) {
+            fechaNacInput.addEventListener('change', () => {
+                const birthDate = new Date(fechaNacInput.value);
+                if (!isNaN(birthDate)) {
+                    const today = new Date();
+                    let age = today.getFullYear() - birthDate.getFullYear();
+                    const m = today.getMonth() - birthDate.getMonth();
+                    if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+                        age--;
+                    }
+                    edadInput.value = age >= 0 ? age : '';
+                } else {
+                    edadInput.value = '';
+                }
+            });
+        }
 
         document.getElementById('btn-add-patient').onclick = () => {
             const nombre = document.getElementById('p-nombre').value.trim();
@@ -396,6 +1699,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 contacto_emergencia_tel: document.getElementById('p-emerg-tel').value,
                 seguro_medico: document.getElementById('p-seguro').value,
                 tipo_sangre: document.getElementById('p-sangre').value,
+                glucosa: document.getElementById('p-glucosa')?.value || '',
                 alergias: document.getElementById('p-alergias').value,
                 antecedentes_personales: document.getElementById('p-ant-pers').value,
                 antecedentes_quirurgicos: document.getElementById('p-ant-quir').value,
@@ -421,28 +1725,80 @@ document.addEventListener('DOMContentLoaded', () => {
                 localStorage.setItem(key, JSON.stringify(existingPatients));
             }
 
-            window.showElegantAlert('Expediente Creado', `Se ha registrado exitosamente a ${nombre}. Código de acceso: ${qsl}`);
-            renderDoctorHome();
+            const pendingDate = localStorage.getItem('pending_appt_date');
+            const pendingTime = localStorage.getItem('pending_appt_time');
+            if(pendingDate && pendingTime) {
+                try {
+                    window.saveAppointment({ qsl: qsl, name: nombre, date: pendingDate, time: pendingTime });
+                    localStorage.removeItem('pending_appt_date');
+                    localStorage.removeItem('pending_appt_time');
+                    window.showElegantAlert('Expediente y Cita Creados', `Se registró a ${nombre} y se agendó para el ${pendingDate} a las ${pendingTime}.`);
+                    window.selectPatientAndGoToConsultation(qsl);
+                } catch(e) {
+                    window.showElegantAlert('Expediente Creado', `Se ha registrado exitosamente a ${nombre}. Código de acceso: ${qsl}`);
+                    window.selectPatient(qsl);
+                }
+            } else {
+                window.showElegantAlert('Expediente Creado', `Se ha registrado exitosamente a ${nombre}. Código de acceso: ${qsl}`);
+                window.selectPatient(qsl);
+            }
         };
     }
 
     window.filterPatients = () => {
-        const query = document.getElementById('patient-search').value.toLowerCase();
-        const rows = document.querySelectorAll('.patient-row');
-        let visibleCount = 0;
-
-        rows.forEach(row => {
-            const searchData = row.getAttribute('data-search');
-            if (searchData.includes(query)) {
-                row.style.display = '';
-                visibleCount++;
-            } else {
-                row.style.display = 'none';
-            }
-        });
-
+        const searchInput = document.getElementById('patient-search');
+        if (!searchInput) return;
+        const query = searchInput.value.toLowerCase().trim();
+        const defaultView = document.getElementById('default-appointments-view');
+        const resultsView = document.getElementById('search-results-view');
+        const key = getDocPatientsKey();
+        const totalPatients = JSON.parse(localStorage.getItem(key) || '[]').length;
         const countSpan = document.getElementById('patient-count');
-        if (countSpan) countSpan.textContent = visibleCount;
+        
+        if (query.length === 0) {
+            if (defaultView) defaultView.style.display = 'block';
+            if (resultsView) resultsView.style.display = 'none';
+            if (countSpan) countSpan.textContent = totalPatients;
+            return;
+        }
+
+        if (defaultView) defaultView.style.display = 'none';
+        if (resultsView) {
+            resultsView.style.display = 'block';
+            const rows = document.querySelectorAll('#all-patients-data .patient-row-data');
+            let visibleCount = 0;
+            let html = '<h4 style="color:#60a5fa; font-size:15px; text-transform:uppercase; letter-spacing:1px; margin-bottom:16px;">🔍 Resultados de Búsqueda</h4>';
+            
+            rows.forEach(row => {
+                const searchData = row.getAttribute('data-search') || '';
+                if (searchData.includes(query)) {
+                    visibleCount++;
+                    const qsl = row.getAttribute('data-qsl');
+                    const name = row.getAttribute('data-name');
+                    const illness = row.getAttribute('data-illness');
+                    html += `
+                        <div class="med-item" style="cursor: pointer; padding: 20px; transition: all 0.2s; border: 1px solid rgba(255,255,255,0.05); margin-bottom: 15px;" onclick="window.selectPatientAndGoToConsultation('${qsl}')" onmouseover="this.style.background='rgba(59,130,246,0.05)'; this.style.borderColor='rgba(59,130,246,0.3)';" onmouseout="this.style.background='rgba(255,255,255,0.02)'; this.style.borderColor='rgba(255,255,255,0.05)';">
+                            <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                                <div class="med-info">
+                                    <h4 style="color: white; font-size: 20px; margin-bottom: 4px;">${name}</h4>
+                                    <p style="color: var(--text-muted); font-size: 14px; margin: 0;">Código: <b style="color:var(--accent);">${qsl}</b> | ${illness}</p>
+                                </div>
+                                <div style="display: flex; gap: 10px;">
+                                    <span class="status-badge" style="background: rgba(59,130,246,0.1); color: #60a5fa; border: 1px solid rgba(59,130,246,0.2);">Ver Expediente</span>
+                                    <button class="status-badge" style="background: rgba(239, 68, 68, 0.1); color: var(--error); border: 1px solid rgba(239, 68, 68, 0.2);" onclick="event.stopPropagation(); window.deletePatient('${qsl}')">Eliminar</button>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+            });
+
+            if (visibleCount === 0) {
+                html += `<div style="text-align:center; padding: 40px; opacity: 0.5; font-size: 16px;">No se encontraron pacientes para "${query}".</div>`;
+            }
+            resultsView.innerHTML = html;
+            if (countSpan) countSpan.textContent = visibleCount;
+        }
     };
 
     window.selectPatient = (qsl) => {
@@ -727,9 +2083,225 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    window.renderNewPrescription = () => {
+        const overlay = document.createElement('div');
+        overlay.id = 'prescription-overlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:999999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px);padding:20px;box-sizing:border-box;';
 
+        const patientName = localStorage.getItem('patient_name_' + selectedPatientQSL) || 'Paciente';
+        const data = getPatientData(selectedPatientQSL) || {};
 
-    window.deleteMed = (id) => {
+        overlay.innerHTML = `
+            <div class="widget-card animate-in" style="background: linear-gradient(145deg, #1e293b, #0f172a); border: 2px solid rgba(16, 185, 129, 0.4); border-radius: 24px; padding: 45px; width: 100%; max-width: 840px; box-shadow: 0 20px 60px rgba(0,0,0,0.6); position: relative;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:30px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom:20px;">
+                    <h3 style="color:#10b981; font-size:28px; margin:0; display:flex; align-items:center; gap:12px;">
+                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
+                        Nueva Receta - <span style="color:white; font-size:24px; opacity: 0.9;">${patientName}</span>
+                    </h3>
+                    <button onclick="document.getElementById('prescription-overlay').remove()" style="background:rgba(255,255,255,0.1); border:none; color:white; width:40px; height:40px; font-size:20px; border-radius:10px; cursor:pointer; display:flex; align-items:center; justify-content:center; transition: background 0.2s;" onmouseover="this.style.background='rgba(239,68,68,0.2)'" onmouseout="this.style.background='rgba(255,255,255,0.1)'">✕</button>
+                </div>
+                
+                <p style="color:rgba(255,255,255,0.7); font-size:16px; margin-bottom:30px;">Agregue los medicamentos para su fórmula. Se sincronizará automáticamente con su celular.</p>
+
+                <div style="background: rgba(16,185,129,0.05); border: 1px solid rgba(16,185,129,0.2); border-radius: 14px; padding: 24px; margin-bottom: 30px;">
+                    <div style="font-size:14px; color:#34d399; font-weight:700; text-transform:uppercase; letter-spacing:1px; margin-bottom:16px;">PACIENTE DEBERÁ INGRESAR:</div>
+                    <div style="display:flex; gap:40px;">
+                        <label style="display:flex; align-items:center; gap:10px; cursor:pointer;" title="Al activar, el paciente verá un formulario para ingresar su nivel de Glucosa con fecha y hora">
+                            <input type="checkbox" id="np-glucose-enable" style="width:22px; height:22px; accent-color:#10b981; cursor:pointer;">
+                            <span style="font-size:17px; color:white; font-weight:500;">🩸 Glucosa</span>
+                        </label>
+                        <label style="display:flex; align-items:center; gap:10px; cursor:pointer;" title="Al activar, el paciente verá un formulario para ingresar su Presión Arterial con fecha y hora">
+                            <input type="checkbox" id="np-pressure-enable" style="width:22px; height:22px; accent-color:#f87171; cursor:pointer;">
+                            <span style="font-size:17px; color:white; font-weight:500;">❤️ Presión Arterial</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div style="display: grid; grid-template-columns: 1fr; gap: 24px; margin-bottom: 24px;">
+                    <div class="input-group" style="margin-bottom:0;">
+                        <label style="font-size:15px; color:rgba(255,255,255,0.6); margin-bottom:10px; display:block; font-weight:600; letter-spacing:0.5px;">💊 MEDICAMENTO</label>
+                        <input type="text" id="np-name" placeholder="Ej: Amoxicilina 500mg" style="width:100%; border:1px solid rgba(16,185,129,0.4); background:rgba(0,0,0,0.3); color:white; padding:18px; font-size:18px; border-radius:12px; transition:border 0.2s;" onfocus="this.style.borderColor='#34d399'" onblur="this.style.borderColor='rgba(16,185,129,0.4)'">
+                    </div>
+                </div>
+
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px;">
+                    <div class="input-group" style="margin-bottom:0;">
+                        <label style="font-size:15px; color:rgba(255,255,255,0.6); margin-bottom:10px; display:block; font-weight:600; letter-spacing:0.5px;">📊 DOSIS</label>
+                        <input type="text" id="np-dose" placeholder="Ej: 1 tableta" style="width:100%; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.3); color:white; padding:18px; font-size:18px; border-radius:12px;">
+                    </div>
+                    <div class="input-group" style="margin-bottom:0;">
+                        <label style="font-size:15px; color:rgba(255,255,255,0.6); margin-bottom:10px; display:block; font-weight:600; letter-spacing:0.5px;">⏱️ FRECUENCIA (H)</label>
+                        <input type="number" id="np-freq" placeholder="Ej: 8" style="width:100%; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.3); color:white; padding:18px; font-size:18px; border-radius:12px;">
+                    </div>
+                </div>
+
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px;">
+                    <div class="input-group" style="margin-bottom:0;">
+                        <label style="font-size:15px; color:rgba(255,255,255,0.6); margin-bottom:10px; display:block; font-weight:600; letter-spacing:0.5px;">⏰ HORA DE INICIO</label>
+                        <div style="display:flex; gap:10px;">
+                            <select id="np-start-hour" style="flex:1; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.4); color:white; padding:18px; font-size:18px; border-radius:12px; cursor:pointer;-webkit-appearance: none;">
+                                ${Array.from({length:12}, (_,i) => i+1).map(h => `<option value="${String(h).padStart(2,'0')}" ${h===8?'selected':''}>${String(h).padStart(2,'0')}</option>`).join('')}
+                            </select>
+                            <span style="display:flex; align-items:center; color:white; font-size:24px; font-weight:bold;">:</span>
+                            <select id="np-start-min" style="flex:1; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.4); color:white; padding:18px; font-size:18px; border-radius:12px; cursor:pointer;-webkit-appearance: none;">
+                                ${['00','15','30','45'].map(m => `<option value="${m}">${m}</option>`).join('')}
+                            </select>
+                            <select id="np-start-ampm" style="flex:1; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.4); color:white; padding:18px; font-size:18px; border-radius:12px; cursor:pointer;-webkit-appearance: none;">
+                                <option value="AM" selected>AM</option>
+                                <option value="PM">PM</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="input-group" style="margin-bottom:0;">
+                        <label style="font-size:15px; color:rgba(255,255,255,0.6); margin-bottom:10px; display:block; font-weight:600; letter-spacing:0.5px;">📅 DÍAS TRATAMIENTO</label>
+                        <input type="number" id="np-days" placeholder="Ej: 7" style="width:100%; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.3); color:white; padding:18px; font-size:18px; border-radius:12px;">
+                    </div>
+                </div>
+
+                <div class="input-group" style="margin-bottom:30px;">
+                    <label style="font-size:15px; color:rgba(255,255,255,0.6); margin-bottom:10px; display:block; font-weight:600; letter-spacing:0.5px;">📝 INDICACIONES</label>
+                    <input type="text" id="np-notes" placeholder="Ej: Tomar con alimentos" style="width:100%; border:1px solid rgba(255,255,255,0.15); background:rgba(0,0,0,0.3); color:white; padding:18px; font-size:18px; border-radius:12px;">
+                </div>
+
+                <div id="np-meds-list" style="margin-bottom: 24px; max-height: 180px; overflow-y: auto; padding-right:10px;"></div>
+
+                <div id="np-feedback" style="color:#10b981; font-weight:600; font-size:15px; margin-bottom:15px; text-align:center; min-height:22px;"></div>
+
+                <div style="display:flex; gap:16px;">
+                    <button id="btn-np-add-another" style="flex:2; padding: 22px; font-size:18px; font-weight:700; border-radius:14px; background: rgba(16,185,129,0.1); border: 2px dashed rgba(16,185,129,0.5); color: #34d399; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='rgba(16,185,129,0.2)'" onmouseout="this.style.background='rgba(16,185,129,0.1)'">
+                        ➕ Agregar otra fila de Medicamento
+                    </button>
+                    <button id="btn-np-save" class="btn-primary" style="flex:1; padding: 22px; font-size:18px; font-weight:700; border-radius:14px; background: linear-gradient(135deg, #10b981 0%, #059669 100%); transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'">
+                        💾 Finalizar y Guardar
+                    </button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(overlay);
+
+        setTimeout(() => document.getElementById('np-name')?.focus(), 100);
+
+        const getMedData = () => {
+            return {
+                id: Date.now() + Math.floor(Math.random() * 1000),
+                name: overlay.querySelector('#np-name').value.trim(),
+                dose: overlay.querySelector('#np-dose').value.trim(),
+                frequency: overlay.querySelector('#np-freq').value,
+                startTime: `${overlay.querySelector('#np-start-hour').value}:${overlay.querySelector('#np-start-min').value} ${overlay.querySelector('#np-start-ampm').value}`,
+                days: overlay.querySelector('#np-days').value,
+                notes: overlay.querySelector('#np-notes').value.trim()
+            };
+        };
+
+        const clearMedData = () => {
+            overlay.querySelector('#np-name').value = '';
+            overlay.querySelector('#np-dose').value = '';
+            overlay.querySelector('#np-freq').value = '';
+            overlay.querySelector('#np-days').value = '';
+            overlay.querySelector('#np-notes').value = '';
+            setTimeout(() => overlay.querySelector('#np-name')?.focus(), 100);
+        };
+
+        const renderPreviewMeds = () => {
+            const currentData = getPatientData(selectedPatientQSL);
+            const currentMeds = currentData.meds || [];
+            const listContainer = overlay.querySelector('#np-meds-list');
+            if (currentMeds.length === 0) {
+                listContainer.innerHTML = '';
+                return;
+            }
+            listContainer.innerHTML = `
+                <div style="font-size:14px; color:#34d399; font-weight:700; text-transform:uppercase; letter-spacing:1px; margin-bottom:12px;">MEDICAMENTOS EN ESTA RECETA (${currentMeds.length}):</div>
+                ${currentMeds.map(m => `
+                    <div style="background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); border-radius:10px; padding:12px; margin-bottom:10px; display:flex; justify-content:space-between; align-items:center;">
+                        <div>
+                            <strong style="color:white; font-size:16px;">${m.name}</strong> - <span style="color:rgba(255,255,255,0.7); font-size:14px;">${m.dose} c/${m.frequency}h por ${m.days} días</span>
+                        </div>
+                        <button onclick="window.npDeleteMed(${m.id})" style="background:rgba(239,68,68,0.2); border:1px solid #ef4444; color:#ef4444; border-radius:6px; cursor:pointer; padding:4px 10px; font-size:12px; font-weight:bold; transition: background 0.2s;" onmouseenter="this.style.background='rgba(239,68,68,0.3)'" onmouseleave="this.style.background='rgba(239,68,68,0.2)'">Quitar</button>
+                    </div>
+                `).join('')}
+            `;
+        };
+        
+        window.npDeleteMed = (id) => {
+            const cData = getPatientData(selectedPatientQSL);
+            if(cData.meds) {
+                cData.meds = cData.meds.filter(x => x.id !== id);
+                savePatientData(selectedPatientQSL, cData);
+                renderPreviewMeds();
+            }
+        };
+
+        renderPreviewMeds();
+
+        let addedCount = 0;
+
+        overlay.querySelector('#btn-np-add-another').onclick = () => {
+            const med = getMedData();
+            if (!(med.name && med.dose && med.frequency)) {
+                window.showElegantAlert('Faltan Datos', 'Complete al menos Medicamento, Dosis y Frecuencia para agregarlo a la lista de indicaciones.', true);
+                return;
+            }
+
+            const data = getPatientData(selectedPatientQSL);
+            if(!data.meds) data.meds = [];
+            data.meds.push(med);
+            savePatientData(selectedPatientQSL, data);
+
+            addedCount++;
+            overlay.querySelector('#np-feedback').innerHTML = `✅ Se agregó <b>${med.name}</b>. Puede redactar el siguiente medicamento.`;
+            clearMedData();
+            renderPreviewMeds();
+        };
+
+        overlay.querySelector('#btn-np-save').onclick = () => {
+            const med = getMedData();
+            const hasMedData = med.name || med.dose || med.frequency;
+
+            if (hasMedData && !(med.name && med.dose && med.frequency)) {
+                window.showElegantAlert('Faltan Datos', 'El medicamento en curso está incompleto. Complételo o borre el texto para poder finalizar la receta.', true);
+                return;
+            }
+
+            const data = getPatientData(selectedPatientQSL);
+            data.glucoseEnabled = overlay.querySelector('#np-glucose-enable').checked;
+            data.pressureEnabled = overlay.querySelector('#np-pressure-enable').checked;
+
+            let msg = addedCount > 0 
+                ? `Se registraron ${addedCount} medicamentos y se actualizó la configuración con éxito en el celular del paciente.`
+                : 'La configuración fue sincronizada exitosamente con el celular del paciente.';
+
+            if (hasMedData) {
+                if(!data.meds) data.meds = [];
+                data.meds.push(med);
+                addedCount++;
+                msg = `Se registraron ${addedCount} medicamentos en total y la configuración fue actualizada correctamente.`;
+            }
+
+            if (hasMedData || addedCount > 0) {
+                window.unsavedConsultation = true;
+            }
+
+            savePatientData(selectedPatientQSL, data);
+            
+            overlay.remove();
+            window.showElegantAlert('Receta Finalizada', msg);
+            
+            // Reload whatever section the doctor is currently viewing to show the newly added medications
+            const activeNav = Array.from(document.querySelectorAll('.nav-links li.active'));
+            if (activeNav.length > 0) {
+                let section = activeNav[0].getAttribute('data-section');
+                if (section) loadSection(section);
+            } else {
+                loadSection('consultation');
+            }
+        };
+
+        overlay.onclick = (e) => {
+            if(e.target === overlay) overlay.remove();
+        };
+    };    window.deleteMed = (id) => {
         if (confirm('¿Eliminar este medicamento de la receta actual?')) {
             const data = getPatientData(selectedPatientQSL);
             data.meds = data.meds.filter(m => m.id !== id);
@@ -759,21 +2331,343 @@ document.addEventListener('DOMContentLoaded', () => {
         renderOverview(data);
     };
 
-    window.addQuickGlucose = () => {
+    window.addQuickGlucose = async () => {
         const input = document.getElementById('patient-glucose-quick');
         if (!input) return;
         let val = input.value.trim();
         if (!val) return;
         if (!val.toLowerCase().includes('mg/dl')) val += ' mg/dL';
-        const data = getPatientData(selectedPatientQSL);
+        const data = await fetchPatientDataAsync(selectedPatientQSL);
         if (!data.glucoseHistory) data.glucoseHistory = [];
         const now = new Date();
         const dateStr = now.toLocaleDateString('es-ES') + ' a las ' + now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
-        data.glucoseHistory.unshift({ value: val, date: dateStr });
-        if (data.glucoseHistory.length > 5) data.glucoseHistory = data.glucoseHistory.slice(0, 5);
-        savePatientData(selectedPatientQSL, data);
-        window.showElegantAlert('¡Guardado!', `Nivel de glucosa ${val} registrado.`);
+        data.glucoseHistory.unshift({ value: val, date: dateStr, ts: now.getTime() });
+        if (data.glucoseHistory.length > 200) data.glucoseHistory = data.glucoseHistory.slice(0, 200);
+        await savePatientData(selectedPatientQSL, data);
+        input.value = '';
+        window.showElegantAlert('¡Guardado!', `Glucosa ${val} registrada.`);
+        loadSection('reminders');
     };
+
+    window.addQuickPressure = async () => {
+        const input = document.getElementById('patient-pressure-quick');
+        if (!input) return;
+        let val = input.value.trim();
+        if (!val) return;
+        const data = await fetchPatientDataAsync(selectedPatientQSL);
+        if (!data.pressureHistory) data.pressureHistory = [];
+        const now = new Date();
+        const dateStr = now.toLocaleDateString('es-ES') + ' a las ' + now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+        data.pressureHistory.unshift({ value: val, date: dateStr, ts: now.getTime() });
+        if (data.pressureHistory.length > 200) data.pressureHistory = data.pressureHistory.slice(0, 200);
+        await savePatientData(selectedPatientQSL, data);
+        input.value = '';
+        window.showElegantAlert('¡Guardado!', `Presión ${val} mmHg registrada.`);
+        loadSection('reminders');
+    };
+
+    window.showVitalsReport = async (qsl) => {
+        const data = await fetchPatientDataAsync(qsl) || {};
+        const name = localStorage.getItem(`patient_name_${qsl}`) || qsl;
+        const glucoseHistory = data.glucoseHistory || [];
+        const pressureHistory = data.pressureHistory || [];
+
+        // Calcular "el período" por defecto (desde la última consulta/cita hasta hoy)
+        let defaultFrom = '';
+        if (data.consultations && data.consultations.length > 0) {
+            const lastCons = data.consultations[data.consultations.length - 1];
+            if (lastCons.date) {
+                // lastCons.date viene en formato de locale string (usualmente dd/mm/yyyy o mm/dd/yyyy)
+                const parts = lastCons.date.split('/');
+                if (parts.length === 3) {
+                    // Para HTML input type="date" necesitamos YYYY-MM-DD
+                    const py = parts[2].length === 4 ? parts[2] : parts[0];
+                    const pd = parts[2].length === 4 ? parts[0] : parts[1]; // asumiendo dd/mm/yyyy o mm/dd/yyyy
+                    const pm = parts[1]; 
+                    // Una forma más segura usando Date:
+                }
+            }
+        }
+        
+        // Simplemente usemos la fecha de la última consulta via TS si existe, o parsando
+        if (data.consultations && data.consultations.length > 0) {
+            const lastCons = data.consultations[data.consultations.length - 1];
+            if (lastCons.ts) {
+                const d = new Date(lastCons.ts);
+                defaultFrom = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+            } else if (lastCons.date) {
+                 // Fallback si no hay TS
+                 const parts = lastCons.date.split('/');
+                 if (parts.length === 3 && parts[2].length === 4) {
+                     defaultFrom = `${parts[2]}-${parts[1].padStart(2,'0')}-${parts[0].padStart(2,'0')}`;
+                 }
+            }
+        }
+
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:99999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px);overflow-y:auto;padding:20px;box-sizing:border-box;';
+
+        const render = (dateFrom, dateTo) => {
+            const from = dateFrom ? new Date(dateFrom + 'T00:00:00') : null;
+            const to = dateTo ? new Date(dateTo + 'T23:59:59') : null;
+
+            const filterByDate = (history) => history.filter(h => {
+                if (!h.ts) return true;
+                const d = new Date(h.ts);
+                if (from && d < from) return false;
+                if (to && d > to) return false;
+                return true;
+            });
+
+            const glcFiltered = filterByDate(glucoseHistory);
+            const prsFiltered = filterByDate(pressureHistory);
+
+            const glcRows = glcFiltered.length > 0
+                ? glcFiltered.map(h => `<tr style="border-bottom:1px solid rgba(34,211,238,0.1);">
+                        <td style="padding:14px 20px; color:#22d3ee; font-weight:600; font-size:18px;">${h.value}</td>
+                        <td style="padding:14px 20px; color:rgba(255,255,255,0.6); font-size:18px;">${h.date}</td>
+                    </tr>`).join('')
+                : `<tr><td colspan="2" style="padding:20px; color:rgba(255,255,255,0.4); text-align:center; font-size:18px;">Sin registros en este período</td></tr>`;
+
+            const prsRows = prsFiltered.length > 0
+                ? prsFiltered.map(h => `<tr style="border-bottom:1px solid rgba(239,68,68,0.1);">
+                        <td style="padding:14px 20px; color:#f87171; font-weight:600; font-size:18px;">${h.value}</td>
+                        <td style="padding:14px 20px; color:rgba(255,255,255,0.6); font-size:18px;">${h.date}</td>
+                    </tr>`).join('')
+                : `<tr><td colspan="2" style="padding:20px; color:rgba(255,255,255,0.4); text-align:center; font-size:18px;">Sin registros en este período</td></tr>`;
+
+            overlay.innerHTML = `
+                <div style="background:linear-gradient(145deg,#0f172a,#1e293b); border:1px solid ${data.glucoseEnabled || data.pressureEnabled ? '#10b981' : 'rgba(251,191,36,0.3)'}; border-radius:30px; padding:45px; max-width:1150px; width:100%; max-height:90vh; overflow-y:auto; box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:30px;">
+                        <div>
+                            <h3 style="color:#fbbf24; margin:0; font-size:28px;">📊 Reporte de Signos Vitales</h3>
+                            <p style="color:rgba(255,255,255,0.5); margin:6px 0 0; font-size:20px;">Paciente: <strong>${name}</strong></p>
+                            ${(data.glucoseEnabled || data.pressureEnabled) ? `<div style="margin-top:10px; display:inline-block; background:rgba(16,185,129,0.15); padding:6px 14px; border-radius:20px; border:1px solid rgba(16,185,129,0.3); font-size:16px; color:#34d399; font-weight:bold;">🟢 Monitoreo Activo</div>` : ''}
+                        </div>
+                        <button onclick="this.closest('[style*=fixed]').remove()" style="background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:white; padding:12px 24px; border-radius:12px; cursor:pointer; font-size:20px;">✕ Cerrar</button>
+                    </div>
+
+                    <!-- Filtro de Período -->
+                    <div style="display:flex; gap:18px; align-items:center; margin-bottom:35px; background:rgba(255,255,255,0.04); padding:20px; border-radius:16px; flex-wrap:wrap;">
+                        <label style="color:rgba(255,255,255,0.7); font-size:20px;">Desde:</label>
+                        <input type="date" id="rpt-from" value="${dateFrom || ''}" style="background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.15); color:white; padding:12px 18px; border-radius:10px; font-size:20px;">
+                        <label style="color:rgba(255,255,255,0.7); font-size:20px;">Hasta:</label>
+                        <input type="date" id="rpt-to" value="${dateTo || ''}" style="background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.15); color:white; padding:12px 18px; border-radius:10px; font-size:20px;">
+                        <button onclick="window._vitalsRptFilter()" style="background:linear-gradient(135deg,#f59e0b,#d97706); color:black; border:none; padding:12px 24px; border-radius:10px; font-weight:700; cursor:pointer; font-size:20px;">Filtrar</button>
+                        <button onclick="window._vitalsRptFilter('','');" style="background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:rgba(255,255,255,0.7); padding:12px 24px; border-radius:10px; cursor:pointer; font-size:20px;">Ver Todo</button>
+                    </div>
+
+                    <!-- Tablas en 2 columnas -->
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:25px;">
+                        <!-- Glucosa -->
+                        <div>
+                            <h4 style="color:#22d3ee; margin:0 0 15px; font-size:22px; display:flex; align-items:center; gap:8px;">🩸 Glucosa (mg/dL) <span style="background:rgba(34,211,238,0.15); border-radius:24px; padding:4px 14px; font-size:16px;">${glcFiltered.length} lecturas</span></h4>
+                            <table style="width:100%; border-collapse:collapse; background:rgba(0,0,0,0.2); border-radius:12px; overflow:hidden;">
+                                <thead><tr style="background:rgba(34,211,238,0.08);">
+                                    <th style="padding:14px 20px; color:rgba(255,255,255,0.6); font-size:16px; text-align:left; text-transform:uppercase;">Valor</th>
+                                    <th style="padding:14px 20px; color:rgba(255,255,255,0.6); font-size:16px; text-align:left; text-transform:uppercase;">Fecha y Hora</th>
+                                </tr></thead>
+                                <tbody>${glcRows}</tbody>
+                            </table>
+                        </div>
+                        <!-- Presión -->
+                        <div>
+                            <h4 style="color:#f87171; margin:0 0 15px; font-size:22px; display:flex; align-items:center; gap:8px;">❤️ Presión (mmHg) <span style="background:rgba(239,68,68,0.15); border-radius:24px; padding:4px 14px; font-size:16px;">${prsFiltered.length} lecturas</span></h4>
+                            <table style="width:100%; border-collapse:collapse; background:rgba(0,0,0,0.2); border-radius:12px; overflow:hidden;">
+                                <thead><tr style="background:rgba(239,68,68,0.08);">
+                                    <th style="padding:14px 20px; color:rgba(255,255,255,0.6); font-size:16px; text-align:left; text-transform:uppercase;">Valor</th>
+                                    <th style="padding:14px 20px; color:rgba(255,255,255,0.6); font-size:16px; text-align:left; text-transform:uppercase;">Fecha y Hora</th>
+                                </tr></thead>
+                                <tbody>${prsRows}</tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>`;
+            overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+        };
+
+        window._vitalsRptFilter = (from, to) => {
+            const f = from !== undefined ? from : document.getElementById('rpt-from')?.value || '';
+            const t = to !== undefined ? to : document.getElementById('rpt-to')?.value || '';
+            render(f, t);
+        };
+
+        render(defaultFrom, '');
+        document.body.appendChild(overlay);
+    };
+
+
+    window.bookAppointmentForPatient = function(qsl) {
+        const patientName = localStorage.getItem(`patient_name_${qsl}`) || qsl;
+        const todayReal = new Date();
+        const todayStr  = todayReal.toISOString().split('T')[0];
+
+        // State
+        let selectedDate = todayStr;
+        let selectedTime = '';
+        let calYear  = todayReal.getFullYear();
+        let calMonth = todayReal.getMonth(); // 0-based
+
+        const monthNames = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+        const dayNames   = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
+
+        // Time slots 07:00–19:00 every 30 min
+        const slots = [];
+        for (let h = 7; h <= 19; h++) {
+            slots.push(`${String(h).padStart(2,'0')}:00`);
+            if (h < 19) slots.push(`${String(h).padStart(2,'0')}:30`);
+        }
+
+        const overlay = document.createElement('div');
+        overlay.id = 'book-appt-overlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.88);z-index:99999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(8px);padding:20px;box-sizing:border-box;overflow-y:auto;';
+
+        const renderModal = () => {
+            const allAppts   = window.getAppointments ? window.getAppointments() : [];
+            const dayAppts   = allAppts.filter(a => a.date === selectedDate);
+            const takenTimes = new Set(dayAppts.map(a => a.time));
+
+            // ---- Mini Calendar ----
+            const firstDay    = new Date(calYear, calMonth, 1).getDay(); // 0=Sun
+            const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
+            const prevDays    = new Date(calYear, calMonth, 0).getDate();
+
+            let calCells = '';
+            // day headers
+            calCells += dayNames.map(d => `<div style="text-align:center;color:rgba(255,255,255,0.4);font-size:11px;font-weight:700;padding:4px 0;">${d}</div>`).join('');
+            // prev month fillers
+            for (let i = firstDay - 1; i >= 0; i--) {
+                calCells += `<div style="text-align:center;padding:6px 4px;color:rgba(255,255,255,0.15);font-size:13px;">${prevDays - i}</div>`;
+            }
+            // current month days
+            for (let d = 1; d <= daysInMonth; d++) {
+                const ds = `${calYear}-${String(calMonth+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+                const isToday   = ds === todayStr;
+                const isSel     = ds === selectedDate;
+                const isPast    = ds < todayStr;
+                const hasCita   = allAppts.some(a => a.date === ds);
+                let bg = 'transparent', color = isPast ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.8)', border = 'none', cursor = isPast ? 'default' : 'pointer', fw = '400';
+                if (isSel)    { bg = '#10b981'; color = 'white'; fw = '700'; border = 'none'; }
+                else if (isToday && !isSel) { border = '1px solid #10b981'; color = '#34d399'; }
+                calCells += `<div onclick="${isPast ? '' : `window._bookPickDay('${ds}')`}"
+                    style="position:relative;text-align:center;padding:7px 3px;border-radius:8px;background:${bg};color:${color};font-size:13px;font-weight:${fw};border:${border};cursor:${cursor};transition:all 0.15s;"
+                    ${!isPast && !isSel ? 'onmouseover="this.style.background=\'rgba(16,185,129,0.15)\'" onmouseout="this.style.background=\'transparent\'"' : ''}>
+                    ${d}
+                    ${hasCita && !isSel ? '<div style="width:5px;height:5px;background:#f59e0b;border-radius:50%;position:absolute;bottom:2px;left:50%;transform:translateX(-50%);"></div>' : ''}
+                </div>`;
+            }
+            // trailing fillers
+            const total = firstDay + daysInMonth;
+            const rem   = total % 7 === 0 ? 0 : 7 - (total % 7);
+            for (let i = 1; i <= rem; i++) {
+                calCells += `<div style="text-align:center;padding:6px 4px;color:rgba(255,255,255,0.15);font-size:13px;">${i}</div>`;
+            }
+
+            // ---- Time slots ----
+            const slotBtns = slots.map(t => {
+                const taken = takenTimes.has(t);
+                const sel   = t === selectedTime;
+                let bg, border, color, cursor;
+                if (taken)    { bg='rgba(239,68,68,0.15)'; border='rgba(239,68,68,0.3)'; color='#f87171'; cursor='not-allowed'; }
+                else if (sel) { bg='rgba(16,185,129,0.35)'; border='#10b981'; color='#a7f3d0'; cursor='pointer'; }
+                else          { bg='rgba(255,255,255,0.04)'; border='rgba(255,255,255,0.1)'; color='rgba(255,255,255,0.7)'; cursor='pointer'; }
+                return `<button onclick="${taken ? '' : `window._bookSelectTime('${t}')`}"
+                    style="background:${bg};border:1px solid ${border};color:${color};border-radius:8px;padding:8px 10px;font-size:12px;font-weight:600;cursor:${cursor};transition:all 0.15s;min-width:68px;">
+                    ${t}${taken ? '<br><span style="font-size:9px;opacity:0.7;">Ocupado</span>' : ''}
+                </button>`;
+            }).join('');
+
+            const selLabel = selectedDate
+                ? new Date(selectedDate+'T12:00:00').toLocaleDateString('es-ES',{weekday:'long',day:'2-digit',month:'long',year:'numeric'})
+                : '';
+
+            const motivoVal = document.getElementById('book-appt-motivo')?.value || '';
+
+            overlay.innerHTML = `
+                <div style="background:linear-gradient(145deg,#0f172a,#1a2540);border:1px solid rgba(16,185,129,0.35);border-radius:22px;padding:28px;max-width:620px;width:100%;max-height:94vh;overflow-y:auto;box-shadow:0 30px 80px rgba(0,0,0,0.6);">
+
+                    <!-- Header -->
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;">
+                        <div>
+                            <h3 style="color:#10b981;margin:0;font-size:20px;">📅 Nueva Cita</h3>
+                            <p style="color:rgba(255,255,255,0.4);margin:4px 0 0;font-size:12px;">Agendando para el expediente activo</p>
+                        </div>
+                        <button onclick="document.getElementById('book-appt-overlay').remove()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:white;padding:8px 16px;border-radius:10px;cursor:pointer;font-size:14px;">✕</button>
+                    </div>
+
+                    <!-- Paciente -->
+                    <div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);border-radius:12px;padding:12px 16px;margin-bottom:20px;display:flex;align-items:center;gap:12px;">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                        <div>
+                            <div style="color:#34d399;font-weight:700;font-size:14px;">${patientName}</div>
+                            <div style="color:rgba(255,255,255,0.35);font-size:11px;">QSL: ${qsl}</div>
+                        </div>
+                    </div>
+
+                    <!-- Mini Calendar -->
+                    <div style="margin-bottom:20px;">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+                            <button onclick="window._bookPrevMonth()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.1);color:white;width:34px;height:34px;border-radius:8px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;">‹</button>
+                            <span style="color:white;font-size:15px;font-weight:700;text-transform:uppercase;letter-spacing:1px;">${monthNames[calMonth]} ${calYear}</span>
+                            <button onclick="window._bookNextMonth()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.1);color:white;width:34px;height:34px;border-radius:8px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;">›</button>
+                        </div>
+                        <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px;">
+                            ${calCells}
+                        </div>
+                        ${selLabel ? `<div style="margin-top:10px;color:#34d399;font-size:12px;font-weight:600;text-align:center;">📆 ${selLabel}</div>` : ''}
+                    </div>
+
+                    <!-- Horarios -->
+                    <div style="margin-bottom:20px;">
+                        <label style="color:rgba(255,255,255,0.6);font-size:12px;font-weight:700;display:block;margin-bottom:10px;text-transform:uppercase;letter-spacing:1px;">🕐 Hora — seleccione un horario</label>
+                        <div style="display:flex;flex-wrap:wrap;gap:7px;">
+                            ${slotBtns}
+                        </div>
+                        ${selectedTime
+                            ? `<div style="margin-top:10px;color:#34d399;font-size:13px;font-weight:700;">✅ ${selectedTime}</div>`
+                            : '<div style="margin-top:8px;color:rgba(255,255,255,0.3);font-size:12px;">Toque un horario verde para seleccionarlo</div>'}
+                    </div>
+
+                    <!-- Motivo -->
+                    <div style="margin-bottom:22px;">
+                        <label style="color:rgba(255,255,255,0.6);font-size:12px;font-weight:700;display:block;margin-bottom:8px;text-transform:uppercase;letter-spacing:1px;">📝 Motivo / Nota (opcional)</label>
+                        <textarea id="book-appt-motivo" placeholder="Control mensual, seguimiento, primera consulta..." style="width:100%;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.12);color:white;padding:10px 14px;border-radius:10px;font-size:14px;height:65px;resize:none;box-sizing:border-box;">${motivoVal}</textarea>
+                    </div>
+
+                    <!-- Confirm -->
+                    <button onclick="window._bookConfirm('${qsl}')"
+                        style="width:100%;background:linear-gradient(135deg,#10b981,#059669);border:none;color:white;padding:15px;border-radius:12px;font-size:16px;font-weight:800;cursor:pointer;letter-spacing:0.5px;box-shadow:0 4px 20px rgba(16,185,129,0.3);">
+                        ✅ Confirmar Cita
+                    </button>
+                    <p style="text-align:center;color:rgba(255,255,255,0.25);font-size:11px;margin-top:10px;">La cita quedará registrada en la Agenda del sistema</p>
+                </div>`;
+
+            overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+        };
+
+        window._bookPrevMonth  = () => { calMonth--; if (calMonth < 0) { calMonth = 11; calYear--; } renderModal(); };
+        window._bookNextMonth  = () => { calMonth++; if (calMonth > 11) { calMonth = 0; calYear++; } renderModal(); };
+        window._bookPickDay    = (d) => { selectedDate = d; selectedTime = ''; renderModal(); };
+        window._bookSelectTime = (t) => { selectedTime = t; renderModal(); };
+        window._bookConfirm    = (q) => {
+            if (!selectedDate || !selectedTime) {
+                window.showElegantAlert('Atención', 'Por favor seleccione fecha y hora para la cita.', true);
+                return;
+            }
+            const motivo = document.getElementById('book-appt-motivo')?.value.trim() || '';
+            const name   = localStorage.getItem(`patient_name_${q}`) || q;
+            if (window.saveAppointment) {
+                window.saveAppointment({ qsl: q, name, date: selectedDate, time: selectedTime, motivo });
+            }
+            overlay.remove();
+            window.showElegantAlert('¡Cita Agendada!',
+                `${name} — ${new Date(selectedDate+'T12:00:00').toLocaleDateString('es-ES',{weekday:'long',day:'2-digit',month:'long'})} a las ${selectedTime}.`);
+        };
+
+        renderModal();
+        document.body.appendChild(overlay);
+    };
+
 
     window.toggleAlerts = async (qsl, enabled) => {
         try {
@@ -785,7 +2679,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const result = await resp.json();
             if (result.success) {
                 localStorage.setItem(`active_qsl_${qsl}`, enabled ? 'true' : 'false');
-                const data = await getPatientData(qsl);
+                const data = await fetchPatientDataAsync(qsl);
                 renderOverview(data);
                 if (enabled) {
                     window.showElegantAlert('Servicio Activado', `¡El paciente con código ${qsl} ya recibirá sus alertas en su dispositivo!`);
@@ -818,6 +2712,9 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     function renderReminders(data) {
+        data = data || {};
+        data.meds = data.meds || [];
+        
         const isPaciente = userRole === 'paciente';
         const pName = localStorage.getItem(`patient_name_${selectedPatientQSL}`) || localStorage.getItem('user_real_name') || selectedPatientQSL;
         const isActivated = localStorage.getItem(`active_qsl_${selectedPatientQSL}`) === 'true';
@@ -867,6 +2764,26 @@ document.addEventListener('DOMContentLoaded', () => {
                             </div>
                         </div>
                     ` : ''}
+
+                    ${isPaciente && data.pressureEnabled ? `
+                        <div style="background: rgba(0, 0, 0, 0.2); border: 1px dashed rgba(255, 255, 255, 0.1); border-radius: 20px; padding: 15px; margin-bottom: 25px; display: flex; flex-direction: column; gap: 10px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <label style="font-size: 13px; color: rgba(255,255,255,0.7); text-transform: uppercase; font-weight: 600; letter-spacing: 1px; display: flex; align-items: center; gap: 6px;">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+                                    Presión Arterial
+                                </label>
+                            </div>
+                            <div style="display: flex; gap: 8px;">
+                                <input type="text" id="patient-pressure-quick" placeholder="Ej: 120/80" style="flex: 1; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 10px 15px; color: white; font-size: 16px;">
+                                <button class="btn-primary" style="padding: 0 20px; border-radius: 12px; font-size: 14px; background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.3);" onclick="window.addQuickPressure()">Registrar</button>
+                            </div>
+                            <div style="font-size: 12px; color: rgba(255,255,255,0.5); text-align: left; max-height: 80px; overflow-y: auto;">
+                                ${(data.pressureHistory && data.pressureHistory.length > 0) ?
+                        data.pressureHistory.map((hist, i) => `<div style="padding-bottom: 4px; ${i === 0 ? 'border-bottom: 1px dotted rgba(255,255,255,0.1); margin-bottom: 4px;' : ''}">${i === 0 ? 'Último' : 'Anterior'}: <strong style="color:#f87171; font-size: 13px;">${hist.value}</strong> <span style="font-size:10px; opacity:0.8;">(${hist.date})</span></div>`).join('')
+                        : 'Sin registros de presión'}
+                            </div>
+                        </div>
+                    ` : ''}
                     
                     <div style="background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 24px; padding: 25px 20px; box-shadow: inset 0 2px 10px rgba(0,0,0,0.2);">
                         <div style="display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 25px;">
@@ -878,7 +2795,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             <div style="height: 1px; flex: 1; background: linear-gradient(-90deg, transparent, rgba(255,255,255,0.1));"></div>
                         </div>
                         
-                        <div class="dashboard-grid" style="display: block;">
+                        <div style="display: flex; flex-direction: column; gap: 0;">
             `;
         } else {
             html += `
@@ -910,7 +2827,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!aDue && bDue) return 1;
                 return _calculateNextDoseMs(a.startTime, a.frequency) - _calculateNextDoseMs(b.startTime, b.frequency);
             });
-            medsToDisplay = medsToDisplay.slice(0, 2);
+            // Show all medications (no limit)
         }
 
         html += `
@@ -922,31 +2839,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (isPaciente) {
                 return `
-                    <div style="background: ${isDue ? 'rgba(34, 211, 238, 0.1)' : 'rgba(255,255,255,0.06)'}; border: 1px solid ${isDue ? 'rgba(34, 211, 238, 0.4)' : 'rgba(255,255,255,0.15)'}; border-radius: 20px; padding: 20px; margin-bottom: 15px; text-align: left; transition: all 0.3s ease; ${isDue ? 'box-shadow: 0 4px 25px rgba(34, 211, 238, 0.2); animation: pulse 2s infinite;' : 'box-shadow: 0 4px 15px rgba(0,0,0,0.1);'}" id="med-card-${m.id}">
-                        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: ${isDue ? '15px' : '0'}; gap: 10px;">
-                            <div style="flex: 1; min-width: 0;">
-                                <h4 style="color: #fff; font-size: 20px; font-weight: 700; margin-bottom: 6px; letter-spacing: 0.5px; word-break: break-word; text-transform: uppercase;">${m.name}</h4>
-                                <p style="color: rgba(255,255,255,0.85); font-size: 16px; margin-bottom: 8px; font-weight: 500;">Dosis: <span style="font-weight: 400;">${m.dose}</span></p>
-                                <div style="background: rgba(0,0,0,0.3); border-radius: 12px; padding: 10px; margin-top: 5px; border: 1px solid rgba(255,255,255,0.05);">
-                                    <p style="color: var(--text-muted); font-size: 14px; display: flex; align-items: flex-start; gap: 6px; line-height: 1.5; margin: 0;">
-                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" style="opacity:0.9; flex-shrink: 0; margin-top: 3px;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                                        <span style="flex: 1; word-wrap: break-word;">${schedule}</span>
-                                    </p>
-                                </div>
-                            </div>
-                            <div style="text-align: right; flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 5px;">
-                                <span style="font-size: 12px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Siguiente</span>
-                                <div style="background: ${isDue ? 'var(--accent)' : 'rgba(255,255,255,0.1)'}; color: ${isDue ? '#000' : '#fff'}; padding: 8px 14px; border-radius: 12px; font-size: 16px; font-weight: 700; display: inline-block; white-space: nowrap; border: 1px solid ${isDue ? 'var(--accent)' : 'rgba(255,255,255,0.2)'};">
-                                    ${nextDose}
-                                </div>
+                    <div style="background: ${isDue ? 'rgba(34, 211, 238, 0.1)' : 'rgba(255,255,255,0.06)'}; border: 1px solid ${isDue ? 'rgba(34, 211, 238, 0.4)' : 'rgba(255,255,255,0.15)'}; border-radius: 16px; padding: 16px; margin-bottom: 12px; text-align: left; overflow: hidden; width: 100%; min-width: 0; box-sizing: border-box; ${isDue ? 'box-shadow: 0 4px 20px rgba(34, 211, 238, 0.2); animation: pulse 2s infinite;' : ''}" id="med-card-${m.id}">
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; gap: 8px;">
+                            <h4 style="color: #fff; font-size: 16px; font-weight: 700; margin: 0; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: normal; line-height: 1.3;">${m.name}</h4>
+                            <div style="background: ${isDue ? 'var(--accent)' : 'rgba(255,255,255,0.1)'}; color: ${isDue ? '#000' : '#fff'}; padding: 5px 10px; border-radius: 8px; font-size: 12px; font-weight: 700; white-space: nowrap; flex-shrink: 0;">
+                                ${nextDose}
                             </div>
                         </div>
+                        <p style="color: rgba(255,255,255,0.7); font-size: 14px; margin: 0 0 8px 0; word-break: break-word;">Dosis: ${m.dose}</p>
+                        <div style="background: rgba(0,0,0,0.3); border-radius: 10px; padding: 8px 10px; border: 1px solid rgba(255,255,255,0.05); overflow: hidden; width: 100%; box-sizing: border-box;">
+                            <p style="color: var(--text-muted); font-size: 12px; margin: 0; line-height: 1.5; word-break: break-all; overflow-wrap: break-word; white-space: normal;">
+                                🕐 ${schedule}
+                            </p>
+                        </div>
                         ${isDue ? `
-                            <div style="border-top: 1px dashed rgba(255,255,255,0.2); padding-top: 15px; margin-top: 15px;">
-                                <p style="color: var(--accent); font-size: 16px; text-align: center; margin-bottom: 12px; font-weight: 600;">🔔 ¡Hora de tomar su dosis!</p>
-                                <button class="btn-primary" style="width: 100%; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: #fff; border:none; padding:16px; border-radius:14px; font-weight:700; font-size:16px; display:flex; justify-content:center; align-items:center; gap:8px; box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4);" onclick="window.markTaken(${m.id})">
-                                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                                    CONFIRMAR TOMA
+                            <div style="border-top: 1px dashed rgba(255,255,255,0.15); padding-top: 12px; margin-top: 12px; text-align: center;">
+                                <p style="color: var(--accent); font-size: 14px; margin-bottom: 10px; font-weight: 600;">🔔 ¡Hora de tomar su dosis!</p>
+                                <button class="btn-primary" style="width: 100%; box-sizing: border-box; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: #fff; border:none; padding: 14px; border-radius: 12px; font-weight: 700; font-size: 15px; display: flex; justify-content: center; align-items: center; gap: 8px;" onclick="window.markTaken(${m.id})">
+                                    ✓ CONFIRMAR TOMA
                                 </button>
                             </div>
                         ` : ''}
@@ -978,12 +2888,13 @@ document.addEventListener('DOMContentLoaded', () => {
                             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
                         </div>
                         <h4 style="color: rgba(255,255,255,0.9); font-size: 16px; margin-bottom: 8px; font-weight: 600;">Sin medicamentos pendientes</h4>
-                        <p style="color: rgba(255,255,255,0.5); font-size: 14px; line-height: 1.5; max-width: 250px;">Ha completado sus tomas o no tiene recetas activas por ahora.</p>
+                        <p style="color: rgba(255,255,255,0.5); font-size: 14px; line-height: 1.5; max-width: 250px;">${!isActivated && isPaciente ? 'Su médico aún no ha habilitado las alertas para su perfil.' : 'Ha completado sus tomas o no tiene recetas activas por ahora.'}</p>
                     </div>
                 ` : ''}
                 
                 ${isPaciente ? `
-                    </div> <!-- Cierra el cuadro interior -->
+                        </div> <!-- Cierra flex de items de medicamentos -->
+                    </div> <!-- Cierra RECETARIO -->
                 </div> <!-- Cierra la tarjeta glass-card principal -->
                 
                 <div style="margin: 30px auto 0; width: 100%; max-width: 500px; padding: 0 10px; box-sizing: border-box;">
@@ -993,7 +2904,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     </button>
                 </div>
                 ` : ''}
-                ${!isPaciente ? `</div>` : ''} <!-- Cierra la tarjeta glass-card si NO paciente (alerta activas layout) -->
+                ${!isPaciente ? `</div></div>` : ''} <!-- Cierra dashboard-grid y widget-card -->
             <div id="applause-container" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:9999; align-items:center; justify-content:center; background: rgba(0,0,0,0.6); backdrop-filter: blur(8px);">
                 <div style="font-size: 120px; animation: bounce 1s infinite; filter: drop-shadow(0 0 20px rgba(255,255,255,0.5));">👏🎉👏</div>
             </div>
@@ -1103,8 +3014,16 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!startTime || !freq) return false;
         try {
             const now = new Date();
-            const [h, m] = startTime.split(':');
-            let next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), parseInt(h), parseInt(m));
+            let [hStr, rest] = startTime.split(':');
+            let h = parseInt(hStr);
+            let m = 0;
+            if (rest) {
+                const mStr = rest.replace(/[^0-9]/g, '');
+                m = parseInt(mStr) || 0;
+                if (rest.toUpperCase().includes('PM') && h !== 12) h += 12;
+                if (rest.toUpperCase().includes('AM') && h === 12) h = 0;
+            }
+            let next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m);
             const freqMs = parseInt(freq) * 3600000;
 
             // If the start time is in the future today, it's not due yet
@@ -1171,6 +3090,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 </div>
                 ${isDoc ? `
                     <button class="btn-primary" style="width: 100%; margin-bottom: 20px; background: #fbbf24; color: #000; font-weight: 800;" onclick="window.updateDocProfile()">ACTUALIZAR CREDENCIALES</button>
+                    
+                    <hr style="border:0; border-top: 1px solid var(--card-border); margin: 20px 0;">
+                    
+                    <h4 style="color:#10b981; margin-bottom:15px; font-size:18px;">Notificaciones de Cola Automatizadas</h4>
+                    <p style="color:rgba(255,255,255,0.7);font-size:14px;margin-bottom:15px;line-height:1.4;">El sistema alertará a los pacientes automáticamente sobre cuántos turnos les faltan ("Faltan 5 pacientes...", "Falta 1 paciente..."). Elija por dónde recibirán estas alertas.</p>
+                    <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:20px; background:rgba(0,0,0,0.2); padding:15px; border-radius:12px; border:1px solid rgba(255,255,255,0.05);">
+                        <label style="display:flex; align-items:center; gap:10px; cursor:pointer;" onclick="localStorage.setItem('notification_preference','whatsapp')">
+                            <input type="radio" name="notif_pref" value="whatsapp" ${localStorage.getItem('notification_preference') === 'whatsapp' ? 'checked' : ''} style="width:18px;height:18px;accent-color:#10b981;">
+                            <span style="font-size:16px; color:white;">WhatsApp (API Meta)</span>
+                        </label>
+                        <label style="display:flex; align-items:center; gap:10px; cursor:pointer;" onclick="localStorage.setItem('notification_preference','sisdel')">
+                            <input type="radio" name="notif_pref" value="sisdel" ${(!localStorage.getItem('notification_preference') || localStorage.getItem('notification_preference') === 'sisdel') ? 'checked' : ''} style="width:18px;height:18px;accent-color:#10b981;">
+                            <span style="font-size:16px; color:white;">App DR-SISDEL</span>
+                        </label>
+                    </div>
                 ` : ''}
                 <hr style="border:0; border-top: 1px solid var(--card-border); margin: 20px 0;">
                 <button class="btn-primary" style="width: 100%; background: var(--error);" onclick="localStorage.removeItem('user_qsl_code'); window.location.href='index.html';">CERRAR SESIÓN</button>
@@ -1238,48 +3172,298 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!data.consultations) data.consultations = [];
         const isMed = userRole === 'medico';
 
+        const appointments = window.getAppointments ? window.getAppointments() : [];
+        const localD = new Date();
+        const todayStr = localD.getFullYear() + '-' + String(localD.getMonth() + 1).padStart(2, '0') + '-' + String(localD.getDate()).padStart(2, '0');
+        const todayStrES = localD.toLocaleDateString('es-ES');
+        const nowTimeStr = localD.toTimeString().slice(0, 5);
+        
+        const nextAppt = appointments
+            .filter(a => {
+                if (a.date !== todayStr || a.time <= nowTimeStr || a.qsl === selectedPatientQSL) return false;
+                const pData = getPatientDataFallback(a.qsl);
+                const hasConsultedToday = (pData.consultations || []).some(c => typeof c.date === 'string' && (c.date.includes(todayStrES) || c.date.startsWith(todayStrES)));
+                const hasMedsToday = (pData.meds || []).some(m => m.id && new Date(parseInt(m.id)).toLocaleDateString('es-ES') === todayStrES);
+                return !(hasConsultedToday || hasMedsToday);
+            })
+            .sort((a,b) => (a.time > b.time ? 1 : -1))[0];
+
+        let countdownHtml = '';
+        if (nextAppt) {
+            countdownHtml = `
+                <span id="next-appt-timer-container" style="font-size: 13px; font-weight: 700; background: linear-gradient(135deg, #f59e0b, #d97706); border: 1px solid rgba(245,158,11,0.5); color: #0f172a; border-radius: 6px; padding: 4px 10px; margin-left:4px; display:inline-flex; align-items:center; gap:6px; box-shadow: 0 4px 12px rgba(245,158,11,0.3); animation: pulse 2s infinite;">
+                    ⏱️ Siguiente paciente en <span id="next-appt-mins">--</span> min
+                </span>
+            `;
+            
+            // Iniciar el cronómetro en el background una vez renderizado
+            setTimeout(() => {
+                const updateTimer = () => {
+                    const timerEl = document.getElementById('next-appt-mins');
+                    if (!timerEl) return;
+                    
+                    const now = new Date();
+                    const [apptH, apptM] = nextAppt.time.split(':').map(Number);
+                    const apptDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), apptH, apptM, 0);
+                    
+                    const diffMs = apptDate - now;
+                    if (diffMs <= 0) {
+                        const container = document.getElementById('next-appt-timer-container');
+                        if(container) {
+                            container.innerHTML = '🚨 ¡Es hora del siguiente paciente!';
+                            container.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
+                            container.style.color = 'white';
+                            container.style.animation = 'none';
+                        }
+                        return;
+                    }
+                    
+                    const diffMins = Math.ceil(diffMs / 60000);
+                    timerEl.textContent = diffMins;
+                    
+                    setTimeout(updateTimer, 10000); 
+                };
+                updateTimer();
+            }, 100);
+        }
+
         let html = `
             <div class="dashboard-grid">
                 <div class="widget-card animate-in" style="grid-column: span 2; padding: 40px; border: 3px solid rgba(16, 185, 129, 0.4); border-radius: 24px;">
-                    <h3 class="widget-title" style="font-size: 26px; color: #10b981; border-bottom: 2px solid rgba(16, 185, 129, 0.1); padding-bottom: 15px; margin-bottom: 25px; display: flex; justify-content: space-between;">
-                        <span>Gestión de Consultas Médicas</span>
-                        <span style="font-size: 16px; opacity: 0.7;">QSL: ${selectedPatientQSL}</span>
-                    </h3>
-                    
-                    ${isMed ? `
-                    <div style="background: rgba(0,0,0,0.2); padding: 25px; border-radius: 15px; margin-bottom: 30px; border: 1px solid rgba(255,255,255,0.05);">
-                        <h4 style="color: #10b981; margin-bottom: 20px; font-size: 18px;">Nueva Consulta</h4>
-                        <div class="input-group" style="margin-bottom: 20px;">
-                            <label>Motivo de Consulta / Síntomas</label>
-                            <input type="text" id="c-moivo" placeholder="Describa el motivo principal...">
+                    <div style="border-bottom: 2px solid rgba(16, 185, 129, 0.1); padding-bottom: 15px; margin-bottom: 25px;">
+                        <h3 class="widget-title" style="font-size: 26px; color: #10b981; display: flex; justify-content: space-between; align-items: center; border: none; padding: 0; margin-bottom: 15px;">
+                            <span style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                                ${localStorage.getItem('patient_name_' + selectedPatientQSL) || 'Paciente'}
+                                <span style="font-size: 14px; opacity: 0.6; font-weight: normal; border: 1px solid rgba(255,255,255,0.2); border-radius: 6px; padding: 2px 8px;">QSL: ${selectedPatientQSL}</span>
+                                <button onclick="window.bookAppointmentForPatient('${selectedPatientQSL}')" style="font-size: 13px; font-weight: 600; background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.3); color: #34d399; border-radius: 6px; padding: 5px 12px; cursor:pointer; transition: all 0.2s; display:inline-flex; align-items:center; gap:6px;" onmouseover="this.style.background='rgba(16,185,129,0.28)'" onmouseout="this.style.background='rgba(16,185,129,0.15)'">
+                                    📅 ${new Date().toLocaleDateString('es-ES', {weekday:'short', day:'2-digit', month:'short', year:'numeric'})} &nbsp;➕ Agendar Cita
+                                </button>
+                                ${countdownHtml}
+                            </span>
+                            <div style="display:flex; align-items:center; gap:10px;">
+                                <button onclick="window.renderDoctorHome('search')" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: white; padding: 8px 14px; border-radius: 10px; cursor: pointer; font-size: 13px;">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle; margin-right:4px;"><polyline points="15 18 9 12 15 6"></polyline></svg> Búsqueda
+                                </button>
+                                <button onclick="loadSection('overview')" style="background: rgba(34,211,238,0.1); border: 1px solid rgba(34,211,238,0.3); color: #22d3ee; padding: 8px 14px; border-radius: 10px; cursor: pointer; font-size: 13px;">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle; margin-right:4px;"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg> Menú Principal
+                                </button>
+                            </div>
+                        </h3>
+                        <div style="display:flex; gap: 10px;">
+                            <button onclick="window.renderNewPrescription ? window.renderNewPrescription() : loadSection('overview')" style="flex:1; background: rgba(16,185,129,0.2); border: 1px solid rgba(16,185,129,0.4); color: #a7f3d0; padding: 12px; border-radius: 12px; font-weight: bold; cursor: pointer; display:flex; align-items:center; justify-content:center; gap:8px;">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg> Nueva Receta
+                            </button>
+                            <button onclick="window.showPatientGeneralData('${selectedPatientQSL}')" style="flex:1; background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.3); color: #60a5fa; padding: 12px; border-radius: 12px; font-weight: bold; cursor: pointer; display:flex; align-items:center; justify-content:center; gap:8px;">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg> Datos Generales
+                            </button>
+                            <button onclick="document.getElementById('historial-scroll-target').scrollIntoView({behavior: 'smooth'})" style="flex:1; background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.3); color: #34d399; padding: 12px; border-radius: 12px; font-weight: bold; cursor: pointer; display:flex; align-items:center; justify-content:center; gap:8px;">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg> Consultas Anteriores
+                            </button>
+                            <button onclick="window.renderLaboratories()" style="flex:1; background: rgba(168,85,247,0.15); border: 1px solid rgba(168,85,247,0.3); color: #c084fc; padding: 12px; border-radius: 12px; font-weight: bold; cursor: pointer; display:flex; align-items:center; justify-content:center; gap:8px;">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 2v7.31"></path><path d="M14 9.3V1.99"></path><path d="M8.5 2h7"></path><path d="M14 9.3a6.5 6.5 0 1 1-4 0"></path><line x1="5.52" y1="16h12.96"></line></svg> Laboratorios
+                            </button>
+                            <button onclick="window.showVitalsReport('${selectedPatientQSL}')" style="flex:1; background: ${data.glucoseEnabled || data.pressureEnabled ? 'rgba(16,185,129,0.15)' : 'rgba(251,191,36,0.12)'}; border: 1px solid ${data.glucoseEnabled || data.pressureEnabled ? 'rgba(16,185,129,0.4)' : 'rgba(251,191,36,0.3)'}; color: ${data.glucoseEnabled || data.pressureEnabled ? '#34d399' : '#fbbf24'}; padding: 12px; border-radius: 12px; font-weight: bold; cursor: pointer; display:flex; align-items:center; justify-content:center; gap:8px;">
+                                📊 Reporte M. Perfil ${data.glucoseEnabled || data.pressureEnabled ? '🟢' : ''}
+                            </button>
                         </div>
-                        <div class="input-group" style="margin-bottom: 20px;">
-                            <label>Notas Clínicas / Evolución</label>
-                            <textarea id="c-notas" style="height: 100px; width: 100%;" placeholder="Examen físico, hallazgos, diagnóstico..."></textarea>
+                        <div style="display:flex; gap:10px; margin-top:12px; flex-wrap:wrap;">
+                            <span style="background:${data.glucoseEnabled ? 'rgba(16,185,129,0.15)' : 'rgba(255,255,255,0.04)'}; color:${data.glucoseEnabled ? '#34d399' : 'rgba(255,255,255,0.3)'}; border:1px solid ${data.glucoseEnabled ? 'rgba(16,185,129,0.3)' : 'rgba(255,255,255,0.1)'}; padding:6px 14px; border-radius:20px; font-size:13px; font-weight:600; display:flex; align-items:center; gap:6px;">
+                                ${data.glucoseEnabled ? '🟢' : '⚪'} Control Glucosa: ${data.glucoseEnabled ? 'ACTIVO' : 'Inactivo'}
+                            </span>
+                            <span style="background:${data.pressureEnabled ? 'rgba(239,68,68,0.12)' : 'rgba(255,255,255,0.04)'}; color:${data.pressureEnabled ? '#f87171' : 'rgba(255,255,255,0.3)'}; border:1px solid ${data.pressureEnabled ? 'rgba(239,68,68,0.3)' : 'rgba(255,255,255,0.1)'}; padding:6px 14px; border-radius:20px; font-size:13px; font-weight:600; display:flex; align-items:center; gap:6px;">
+                                ${data.pressureEnabled ? '🔴' : '⚪'} Control Presión: ${data.pressureEnabled ? 'ACTIVO' : 'Inactivo'}
+                            </span>
                         </div>
-                        <div class="input-group" style="margin-bottom: 20px;">
-                            <label>Referencias / Anexos / Exámenes Extras</label>
-                            <textarea id="c-referencias" style="height: 70px; width: 100%;" placeholder="Laboratorios solicitados, referencias a especialistas..."></textarea>
-                        </div>
-                        <button class="btn-primary" style="width: 100%; background: #10b981; padding: 15px;" onclick="window.saveConsultation()">
-                            GUARDAR CONSULTA
-                        </button>
                     </div>
-                    ` : '<div style="text-align: center; color: var(--text-muted); margin-bottom: 30px; font-style: italic;">Solo su médico tratante puede editar las consultas.</div>'}
+                    
+                    ${isMed ? (() => {
+                        const isFirstVisit = data.consultations.length === 0;
+                        const patientData = getPatientData(selectedPatientQSL) || {};
+                        const pData = patientData;
+                        const prefillAnt = v => v ? ` value="${v.replace(/"/g, '&quot;')}"` : '';
 
-                    <h3 class="widget-title" style="font-size: 20px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 10px; margin-bottom: 20px;">
+                        
+                        const antSection = `
+                        <!-- ANTECEDENTES: Solo en primera visita -->
+                        <div id="ant-section" style="background: rgba(59,130,246,0.06); border: 1px solid rgba(59,130,246,0.2); border-left: 4px solid #3b82f6; border-radius: 14px; padding: 22px; margin-bottom: 16px;">
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:18px;">
+                                <div style="display:flex; align-items:center; gap:10px;">
+                                    <span style="background:#3b82f6; color:white; font-size:11px; font-weight:800; width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center;">2</span>
+                                    <h5 style="color:#60a5fa; font-size:13px; text-transform:uppercase; letter-spacing:1.5px; margin:0; font-weight:700;">Antecedentes del Paciente</h5>
+                                </div>
+                                <span style="background:rgba(59,130,246,0.12); color:#60a5fa; font-size:11px; padding:3px 10px; border-radius:20px; border:1px solid rgba(59,130,246,0.25);">Se guardarán en el perfil</span>
+                            </div>
+                            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:14px; margin-bottom:14px;">
+                                <div class="input-group" style="margin-bottom:0;">
+                                    <label>Antecedentes Personales Patológicos</label>
+                                    <textarea id="c-ant-personales" style="height:75px; width:100%;" placeholder="Diabetes, HTA, cardiopatía...">${pData.antPersonales || ''}</textarea>
+                                </div>
+                                <div class="input-group" style="margin-bottom:0;">
+                                    <label>Antecedentes Quirúrgicos</label>
+                                    <textarea id="c-ant-quirurgicos" style="height:75px; width:100%;" placeholder="Apendicectomía 2015, cesárea...">${pData.antQuirurgicos || ''}</textarea>
+                                </div>
+                            </div>
+                            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:14px; margin-bottom:14px;">
+                                <div class="input-group" style="margin-bottom:0;">
+                                    <label>Antecedentes Familiares</label>
+                                    <textarea id="c-ant-familiares" style="height:75px; width:100%;" placeholder="Padre: DM2, Madre: HTA...">${pData.antFamiliares || ''}</textarea>
+                                </div>
+                                <div class="input-group" style="margin-bottom:0;">
+                                    <label>⚠️ Alergias</label>
+                                    <input type="text" id="c-alergias" placeholder="Penicilina, mariscos, NKDA..."${prefillAnt(pData.alergias)}>
+                                </div>
+                            </div>
+                            <div class="input-group" style="margin-bottom:0;">
+                                <label>💊 Medicamentos Actuales</label>
+                                <input type="text" id="c-medicamentos" placeholder="Metformina 850mg c/12h..."${prefillAnt(pData.medicamentos)}>
+                            </div>
+                        </div>`;
+                        
+                        return `
+                    <div style="background: linear-gradient(135deg, rgba(16,185,129,0.03) 0%, rgba(0,0,0,0.25) 100%); padding: 30px; border-radius: 20px; margin-bottom: 30px; border: 1px solid rgba(16,185,129,0.2); box-shadow: 0 4px 24px rgba(0,0,0,0.3);">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:25px; padding-bottom:18px; border-bottom: 1px solid rgba(255,255,255,0.07);">
+                            <div style="display:flex; align-items:center; gap:12px;">
+                                <div style="width:42px; height:42px; border-radius:50%; background:linear-gradient(135deg,#10b981,#059669); display:flex; align-items:center; justify-content:center; font-size:20px;">🩺</div>
+                                <div>
+                                    <h4 style="color: #10b981; font-size: 19px; font-weight:700; margin:0; letter-spacing:0.5px;">${isFirstVisit ? 'Primera Consulta' : 'Consulta de Seguimiento'}</h4>
+                                    <p style="color:rgba(255,255,255,0.4); font-size:12px; margin:2px 0 0;">${isFirstVisit ? 'Ingrese los datos completos del paciente' : 'Registre la evolución de la visita actual'}</p>
+                                </div>
+                            </div>
+                            ${isFirstVisit ? '' : `<span style="background:rgba(16,185,129,0.12); color:#34d399; font-size:13px; font-weight:600; padding:6px 14px; border-radius:20px; border:1px solid rgba(16,185,129,0.25);">Consulta #${data.consultations.length + 1}</span>`}
+                        </div>
+
+                        <!-- MOTIVO Y EVOLUCIÓN (siempre visible) -->
+                        <div style="background: rgba(16,185,129,0.06); border: 1px solid rgba(16,185,129,0.2); border-left: 4px solid #10b981; border-radius: 14px; padding: 22px; margin-bottom: 16px;">
+                            <div style="display:flex; align-items:center; gap:10px; margin-bottom:18px;">
+                                <span style="background:#10b981; color:black; font-size:11px; font-weight:800; width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center;">1</span>
+                                <h5 style="color:#34d399; font-size:13px; text-transform:uppercase; letter-spacing:1.5px; margin:0; font-weight:700;">Motivo de la Visita</h5>
+                            </div>
+                            <div class="input-group" style="margin-bottom: 14px;">
+                                <label>Motivo de Consulta (¿Qué lo trae hoy?)</label>
+                                <input type="text" id="c-motivo" placeholder="Ej: Dolor de cabeza, control de diabetes, fiebre de 3 días...">
+                            </div>
+                            <div class="input-group" style="margin-bottom:0;">
+                                <label>Historia de la Enfermedad Actual (Inicio, duración, evolución)</label>
+                                <textarea id="c-historia" style="height: 90px; width: 100%;" placeholder="Ej: Paciente refiere inicio hace 5 días con fiebre de 38°C..."></textarea>
+                            </div>
+                        </div>
+
+                        ${isFirstVisit ? antSection : `
+                        <!-- ANTECEDENTES RESUMEN (solo lectura para seguimiento) -->
+                        ${(pData.antPersonales || pData.alergias || pData.medicamentos) ? `
+                        <div style="background: rgba(59,130,246,0.04); border: 1px solid rgba(59,130,246,0.12); border-radius: 12px; padding: 15px; margin-bottom: 18px;">
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                                <h5 style="color:#60a5fa; font-size:12px; text-transform:uppercase; letter-spacing:1px; margin:0;">📋 Antecedentes del Paciente</h5>
+                                <button onclick="window.showPatientGeneralData('${selectedPatientQSL}')" style="background:none; border:1px solid rgba(59,130,246,0.3); color:#60a5fa; padding:4px 10px; border-radius:6px; cursor:pointer; font-size:11px;">Editar</button>
+                            </div>
+                            <div style="display:flex; flex-wrap:wrap; gap:10px; font-size:12px;">
+                                ${pData.alergias ? `<span style="background:rgba(239,68,68,0.1); color:#f87171; padding:4px 10px; border-radius:6px;">⚠️ Alergias: ${pData.alergias}</span>` : ''}
+                                ${pData.medicamentos ? `<span style="background:rgba(251,191,36,0.1); color:#fbbf24; padding:4px 10px; border-radius:6px;">💊 ${pData.medicamentos}</span>` : ''}
+                                ${pData.antPersonales ? `<span style="background:rgba(59,130,246,0.1); color:#60a5fa; padding:4px 10px; border-radius:6px;">${pData.antPersonales}</span>` : ''}
+                            </div>
+                        </div>` : `<div style="margin-bottom:18px; padding:12px; background:rgba(255,255,255,0.02); border-radius:10px; font-size:12px; color:rgba(255,255,255,0.4); text-align:center;">Sin antecedentes registrados. <button onclick="window.showPatientGeneralData('${selectedPatientQSL}')" style="background:none; border:none; color:#60a5fa; cursor:pointer; text-decoration:underline; font-size:12px;">Agregar desde Datos Generales</button></div>`}
+                        `}
+
+                        <!-- SIGNOS VITALES (siempre visible) -->
+                        <div style="background: rgba(251,191,36,0.06); border: 1px solid rgba(251,191,36,0.2); border-left: 4px solid #f59e0b; border-radius: 14px; padding: 22px; margin-bottom: 16px;">
+                            <div style="display:flex; align-items:center; gap:10px; margin-bottom:18px;">
+                                <span style="background:#f59e0b; color:black; font-size:11px; font-weight:800; width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center;">${isFirstVisit ? '3' : '2'}</span>
+                                <h5 style="color:#fbbf24; font-size:13px; text-transform:uppercase; letter-spacing:1.5px; margin:0; font-weight:700;">Signos Vitales</h5>
+                            </div>
+                            <div style="display:grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap:14px;">
+                                <div class="input-group" style="margin-bottom:0;">
+                                    <label>🩸 Glucosa (mg/dL)</label>
+                                    <input type="number" id="c-glucosa" placeholder="Ej: 98">
+                                </div>
+                                <div class="input-group" style="margin-bottom:0;">
+                                    <label>❤️ Presión Arterial (mmHg)</label>
+                                    <input type="text" id="c-presion" placeholder="Ej: 120/80">
+                                </div>
+                                <div class="input-group" style="margin-bottom:0;">
+                                    <label>⚖️ Peso (lbs)</label>
+                                    <input type="number" id="c-peso" placeholder="Ej: 160">
+                                </div>
+                                <div class="input-group" style="margin-bottom:0;">
+                                    <label>📏 Estatura (cm)</label>
+                                    <input type="number" id="c-estatura" placeholder="Ej: 165">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- TOGGLES DE REPORTE PACIENTE -->
+                        <div style="margin-top:12px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.07); border-radius: 12px; padding: 14px 18px; display:flex; gap:30px; flex-wrap:wrap;">
+                            <div style="display:flex; align-items:center; gap:10px; font-size:13px; color:rgba(255,255,255,0.7);">
+                                <span>🩸 Paciente reportará glucosa:</span>
+                                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="radio" id="glc-yes" name="glc-report" value="yes" ${patientData.glucoseEnabled ? 'checked' : ''}> <span style="color:#22d3ee">Sí</span></label>
+                                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="radio" id="glc-no" name="glc-report" value="no" ${!patientData.glucoseEnabled ? 'checked' : ''}> <span style="color:rgba(255,255,255,0.5)">No</span></label>
+                            </div>
+                            <div style="display:flex; align-items:center; gap:10px; font-size:13px; color:rgba(255,255,255,0.7);">
+                                <span>❤️ Paciente reportará presión:</span>
+                                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="radio" id="prs-yes" name="prs-report" value="yes" ${patientData.pressureEnabled ? 'checked' : ''}> <span style="color:#f87171">Sí</span></label>
+                                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="radio" id="prs-no" name="prs-report" value="no" ${!patientData.pressureEnabled ? 'checked' : ''}> <span style="color:rgba(255,255,255,0.5)">No</span></label>
+                            </div>
+                        </div>
+
+
+                        <div style="background: rgba(168,85,247,0.06); border: 1px solid rgba(168,85,247,0.2); border-left: 4px solid #a855f7; border-radius: 14px; padding: 22px; margin-bottom: 16px;">
+                            <div style="display:flex; align-items:center; gap:10px; margin-bottom:18px;">
+                                <span style="background:#a855f7; color:white; font-size:11px; font-weight:800; width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center;">${isFirstVisit ? '4' : '3'}</span>
+                                <h5 style="color:#c084fc; font-size:13px; text-transform:uppercase; letter-spacing:1.5px; margin:0; font-weight:700;">Examen Físico y Notas Clínicas</h5>
+                            </div>
+                            <div class="input-group" style="margin-bottom:0;">
+                                <label>Hallazgos, Diagnóstico, Plan de Tratamiento</label>
+                                <textarea id="c-notas" style="height: 200px; width: 100%;" placeholder="Examen físico: Paciente consciente, orientado. PA 120/80. Abdomen blando, depresible...&#10;Diagnóstico: Gastritis crónica.&#10;Tratamiento: Omeprazol 20mg c/12h x 4 semanas. Dieta blanda..."></textarea>
+                            </div>
+                        </div>
+
+                        <!-- REFERENCIAS (siempre visible) -->
+                        <div style="background: rgba(239,68,68,0.05); border: 1px solid rgba(239,68,68,0.15); border-left: 4px solid #ef4444; border-radius: 14px; padding: 22px; margin-bottom: 20px;">
+                            <div style="display:flex; align-items:center; gap:10px; margin-bottom:18px;">
+                                <span style="background:#ef4444; color:white; font-size:11px; font-weight:800; width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center;">${isFirstVisit ? '5' : '4'}</span>
+                                <h5 style="color:#f87171; font-size:13px; text-transform:uppercase; letter-spacing:1.5px; margin:0; font-weight:700;">Referencias y Observaciones</h5>
+                            </div>
+                            <div class="input-group" style="margin-bottom:0;">
+                                <label>Laboratorios solicitados, referencias a especialistas, observaciones</label>
+                                <textarea id="c-referencias" style="height: 90px; width: 100%;" placeholder="Solicitar BHC, QS, EGO. Referencia a cardiología. Control en 4 semanas..."></textarea>
+                            </div>
+                        </div>
+
+                        <button class="btn-primary" style="width: 100%; background: linear-gradient(135deg, #10b981 0%, #059669 100%); padding: 18px; font-size:16px; font-weight:700; border-radius:14px; letter-spacing:0.5px; box-shadow: 0 4px 15px rgba(16,185,129,0.3);" onclick="window.saveConsultation()">
+                            ✔ GUARDAR CONSULTA MÉDICA
+                        </button>
+                    </div>`;
+                    })() : '<div style="text-align: center; color: var(--text-muted); margin-bottom: 30px; font-style: italic;">Solo su médico tratante puede editar las consultas.</div>'}
+
+                    <h3 id="historial-scroll-target" class="widget-title" style="font-size: 20px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 10px; margin-bottom: 20px; padding-top: 30px;">
                         Historial de Consultas (${data.consultations.length})
                     </h3>
                     <div class="consultation-list">
+
                         ${data.consultations.length > 0 ? data.consultations.slice().sort((a,b)=>b.id-a.id).map(c => `
-                            <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); padding: 20px; border-radius: 15px; margin-bottom: 15px; position:relative;">
-                                <div style="display: flex; justify-content: space-between; margin-bottom: 10px; align-items:flex-start;">
-                                    <strong style="color: #10b981; font-size: 18px;">Consulta: ${c.date}</strong>
+                            <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); padding: 22px; border-radius: 15px; margin-bottom: 20px; position:relative;">
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 15px; align-items:flex-start;">
+                                    <strong style="color: #10b981; font-size: 18px;">📅 Consulta: ${c.date}</strong>
                                     ${isMed ? `<button class="status-badge" style="background: rgba(239, 68, 68, 0.1); color: var(--error); border: none;" onclick="window.deleteConsultation(${c.id})">Borrar</button>` : ''}
                                 </div>
-                                <p style="margin-bottom: 8px; font-size:16px;"><strong>Motivo:</strong> ${c.motivo}</p>
-                                <p style="margin-bottom: 8px; color: rgba(255,255,255,0.85); font-size:15px; line-height:1.4;"><strong>Notas:</strong><br/>${c.notas.replace(/\n/g, '<br>')}</p>
-                                ${c.referencias ? `<p style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.1); color: #fbbf24; font-size:14px;"><strong>Referencias/Estudios:</strong><br/>${c.referencias.replace(/\n/g, '<br>')}</p>` : ''}
+                                <p style="margin-bottom: 8px; font-size:16px;"><strong style="color:#34d399;">Motivo:</strong> ${c.motivo}</p>
+                                ${c.historia ? `<p style="margin-bottom: 8px; color: rgba(255,255,255,0.85); font-size:14px;"><strong>Historia:</strong> ${c.historia}</p>` : ''}
+                                ${c.antPersonales || c.antQuirurgicos || c.antFamiliares ? `
+                                <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px; margin:10px 0; padding:12px; background:rgba(59,130,246,0.05); border-radius:8px;">
+                                    ${c.antPersonales ? `<div><strong style="color:#60a5fa; font-size:12px;">Antec. Personales</strong><p style="font-size:13px; margin-top:3px;">${c.antPersonales}</p></div>` : ''}
+                                    ${c.antQuirurgicos ? `<div><strong style="color:#60a5fa; font-size:12px;">Cirugías</strong><p style="font-size:13px; margin-top:3px;">${c.antQuirurgicos}</p></div>` : ''}
+                                    ${c.antFamiliares ? `<div><strong style="color:#60a5fa; font-size:12px;">Familiares</strong><p style="font-size:13px; margin-top:3px;">${c.antFamiliares}</p></div>` : ''}
+                                </div>` : ''}
+                                ${c.alergias ? `<p style="margin-bottom:6px; font-size:13px;"><strong style="color:#f87171;">⚠️ Alergias:</strong> ${c.alergias}</p>` : ''}
+                                ${c.medicamentos ? `<p style="margin-bottom:8px; font-size:13px;"><strong style="color:#fbbf24;">💊 Medicamentos:</strong> ${c.medicamentos}</p>` : ''}
+                                ${(c.glucosa || c.presion || c.peso) ? `
+                                <div style="display:flex; gap:15px; margin:10px 0; padding:10px; background:rgba(251,191,36,0.05); border-radius:8px;">
+                                    ${c.glucosa ? `<span style="background:rgba(251,191,36,0.1); padding:6px 12px; border-radius:8px; color:#fbbf24; font-size:13px;">Glucosa: <strong>${c.glucosa} mg/dL</strong></span>` : ''}
+                                    ${c.presion ? `<span style="background:rgba(239,68,68,0.1); padding:6px 12px; border-radius:8px; color:#f87171; font-size:13px;">PA: <strong>${c.presion} mmHg</strong></span>` : ''}
+                                    ${c.peso ? `<span style="background:rgba(16,185,129,0.1); padding:6px 12px; border-radius:8px; color:#34d399; font-size:13px;">Peso: <strong>${c.peso} kg</strong></span>` : ''}
+                                </div>` : ''}
+                                ${c.notas ? `<p style="margin-bottom: 8px; color: rgba(255,255,255,0.9); font-size:14px; line-height:1.5; padding-top:8px; border-top:1px dashed rgba(255,255,255,0.08);"><strong>Notas Clínicas:</strong><br/>${c.notas.replace(/\n/g, '<br>')}</p>` : ''}
+                                ${c.referencias ? `<p style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.1); color: #fbbf24; font-size:13px;"><strong>Referencias/Estudios:</strong><br/>${c.referencias.replace(/\n/g, '<br>')}</p>` : ''}
                             </div>
                         `).join('') : '<p style="text-align:center; opacity:0.5; padding: 20px;">No hay consultas registradas todavía.</p>'}
                     </div>
@@ -1294,29 +3478,63 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     window.saveConsultation = () => {
-        const motivo = document.getElementById('c-moivo').value.trim();
-        const notas = document.getElementById('c-notas').value.trim();
-        const referencias = document.getElementById('c-referencias').value.trim();
-        if (!motivo || !notas) {
-            window.showElegantAlert('Faltan Datos', 'El motivo y las notas clínicas son obligatorios.', true);
+        const motivo = document.getElementById('c-motivo')?.value.trim() || '';
+        const historia = document.getElementById('c-historia')?.value.trim() || '';
+        const notas = document.getElementById('c-notas')?.value.trim() || '';
+        const referencias = document.getElementById('c-referencias')?.value.trim() || '';
+        const glucosa = document.getElementById('c-glucosa')?.value.trim() || '';
+        const presion = document.getElementById('c-presion')?.value.trim() || '';
+        const peso = document.getElementById('c-peso')?.value.trim() || '';
+        const estatura = document.getElementById('c-estatura')?.value.trim() || '';
+
+        // These only exist on first visit (antecedentes section present)
+        const antPersonalesEl = document.getElementById('c-ant-personales');
+        const antQuirurgicosEl = document.getElementById('c-ant-quirurgicos');
+        const antFamiliaresEl = document.getElementById('c-ant-familiares');
+        const alergiasEl = document.getElementById('c-alergias');
+        const medicamentosEl = document.getElementById('c-medicamentos');
+
+        if (!motivo) {
+            window.showElegantAlert('Faltan Datos', 'El motivo de consulta es obligatorio.', true);
             return;
         }
 
+        window.unsavedConsultation = false;
         const data = getPatientData(selectedPatientQSL);
         if(!data.consultations) data.consultations = [];
         const now = new Date();
+
+        // Persist antecedentes to patient profile if captured (first visit form)
+        if(antPersonalesEl) data.antecedentes_personales = antPersonalesEl.value.trim();
+        if(antQuirurgicosEl) data.antecedentes_quirurgicos = antQuirurgicosEl.value.trim();
+        if(antFamiliaresEl) data.antecedentes_familiares = antFamiliaresEl.value.trim();
+        if(alergiasEl) data.alergias = alergiasEl.value.trim();
+        if(medicamentosEl) data.medicamentos_actuales = medicamentosEl.value.trim();
+
+        // Persist vitals reporting toggles
+        const glcYes = document.getElementById('glc-yes');
+        const prsYes = document.getElementById('prs-yes');
+        if(glcYes) data.glucoseEnabled = glcYes.checked;
+        if(prsYes) data.pressureEnabled = prsYes.checked;
+
         data.consultations.push({
             id: now.getTime(),
             date: now.toLocaleDateString('es-ES') + ' a las ' + now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }),
             motivo,
+            historia,
             notas,
-            referencias
+            referencias,
+            glucosa,
+            presion,
+            peso,
+            estatura
         });
         
         savePatientData(selectedPatientQSL, data);
-        window.showElegantAlert('Consulta Guardada', 'La consulta y la evolución han sido registradas en el historial.');
+        window.showElegantAlert('Consulta Guardada', 'La consulta médica ha sido registrada en el historial del paciente.');
         renderConsultation(data);
     };
+
 
     window.deleteConsultation = (id) => {
         if (confirm('¿Eliminar esta consulta del historial? Esta acción no se puede deshacer.')) {
@@ -1404,24 +3622,14 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(updateDate, 1000);
 
     // --- MÓDULO PROGRAMADOR ---
-    const countryData = {
-        "GT": { name: "Guatemala", currency: "GTQ", timezone: "America/Guatemala", dateLocale: "es-GT", taxIdName: "NIT" },
-        "ES": { name: "España", currency: "EUR", timezone: "Europe/Madrid", dateLocale: "es-ES", taxIdName: "NIF/CIF" },
-        "US": { name: "Estados Unidos", currency: "USD", timezone: "America/New_York", dateLocale: "en-US", taxIdName: "Tax ID" },
-        "MX": { name: "México", currency: "MXN", timezone: "America/Mexico_City", dateLocale: "es-MX", taxIdName: "RFC" },
-        "CO": { name: "Colombia", currency: "COP", timezone: "America/Bogota", dateLocale: "es-CO", taxIdName: "NIT" },
-        "AR": { name: "Argentina", currency: "ARS", timezone: "America/Argentina/Buenos_Aires", dateLocale: "es-AR", taxIdName: "CUIT" },
-        "CL": { name: "Chile", currency: "CLP", timezone: "America/Santiago", dateLocale: "es-CL", taxIdName: "RUT" }
-    };
-
     async function renderProgrammer() {
-        let medicos = [];
+        let centros = [];
         try {
-            const resp = await fetch('/api/medicos');
+            const resp = await fetch('/api/centros');
             const result = await resp.json();
-            medicos = result.medicos || [];
+            centros = result.centros || [];
         } catch (e) {
-            medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            centros = JSON.parse(localStorage.getItem('tabla_centros') || '[]');
         }
         
         contentArea.innerHTML = `
@@ -1429,7 +3637,206 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div style="display: grid; grid-template-columns: 1fr 400px; gap: 30px;">
                     <div class="widget-card" style="border: 3px solid #fbbf24; box-shadow: 0 0 20px rgba(251, 191, 36, 0.1);">
                         <h3 class="widget-title" style="color: #fbbf24; border-bottom: 2px solid rgba(251, 191, 36, 0.2); padding-bottom: 20px;">
-                            Lista de Médicos Registrados
+                            Centros Médicos Registrados
+                        </h3>
+                        <div class="doctor-list" style="margin-top: 30px; display: grid; gap: 20px;">
+                            ${centros.length > 0 ? centros.map(centro => `
+                                <div class="med-item" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); padding: 20px; border-radius: 16px;">
+                                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                                        <div>
+                                            <h4 style="font-size: 20px; color: white; margin-bottom: 5px;">${centro.nombre}</h4>
+                                            <p style="color: var(--accent); font-weight: 600; font-size: 14px;">Límite de Médicos: ${centro.max_medicos}</p>
+                                        </div>
+                                        <div style="text-align: right;">
+                                            <div style="background: #fbbf24; color: #000; padding: 10px 15px; border-radius: 10px; font-weight: 800; font-size: 18px; margin-bottom: 10px; display: inline-block; letter-spacing: 2px; font-family: monospace;">
+                                                 Código Admin: ${centro.admin_code}
+                                            </div>
+                                            <br>
+                                            <button class="status-badge" style="background: rgba(239, 68, 68, 0.1); color: var(--error); border: 1px solid rgba(239, 68, 68, 0.2); cursor: pointer;" onclick="window.deleteCentro('${centro.id_centro}')">ELIMINAR CENTRO</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            `).join('') : '<div style="text-align:center; padding: 40px; border: 2px dashed rgba(255,255,255,0.05); border-radius: 20px; color: var(--text-muted);">No hay centros médicos registrados todavía.</div>'}
+                        </div>
+                    </div>
+
+                    <div class="widget-card" style="border: 2px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2);">
+                        <h3 class="widget-title" style="font-size: 22px; color: #fbbf24;">Registrar Nuevo Centro Médico</h3>
+                        <div class="input-group" style="margin-bottom: 12px;">
+                            <label>Nombre del Centro Médico</label>
+                            <input type="text" id="centro-new-nombre" placeholder="Ej. Clínicas Alfa">
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 12px;">
+                            <div class="input-group">
+                                <label>Límite de Médicos a Crear</label>
+                                <input type="number" id="centro-new-limite" placeholder="Ej. 5">
+                            </div>
+                            <div class="input-group">
+                                <label>País</label>
+                                <select id="centro-new-country" onchange="window.centroUpdateDefaults()" style="width: 100%; background: rgba(0,0,0,0.4); border: 1px solid var(--card-border); padding: 12px; border-radius: 12px; color: white;">
+                                    ${Object.keys(countryData).map(code => `<option value="${code}">${countryData[code].name}</option>`).join('')}
+                                </select>
+                            </div>
+                        </div>
+                        <div class="input-group" style="margin-bottom: 12px;">
+                            <label id="centro-nit-label">NIT / Id Fiscal</label>
+                            <input type="text" id="centro-new-nit" placeholder="Identificador">
+                        </div>
+                        <h4 style="font-size: 16px; color: #fbbf24; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 15px; margin-top: 5px;">Datos del Administrador General</h4>
+                        <div class="input-group" style="margin-bottom: 12px;">
+                            <label>Nombre Completo</label>
+                            <input type="text" id="centro-admin-nombre" placeholder="Ej. Juan Pérez">
+                        </div>
+                        <div class="input-group" style="margin-bottom: 12px;">
+                            <label>Número de Identificación ID (Llave primaria)</label>
+                            <input type="text" id="centro-admin-id" placeholder="Clave Primaria">
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 12px;">
+                            <div class="input-group">
+                                <label>Teléfono</label>
+                                <input type="text" id="centro-admin-telefono" placeholder="+502 ...">
+                            </div>
+                            <div class="input-group">
+                                <label>Correo</label>
+                                <input type="email" id="centro-admin-correo" placeholder="admin@ejemplo.com">
+                            </div>
+                        </div>
+                        
+                        <button class="btn-primary" style="width: 100%; background: #fbbf24; color: #000; font-weight: 800; padding: 22px; font-size: 18px; margin-top: 25px;" onclick="window.saveNewCentro()">
+                            CREAR CENTRO MEDICO
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+        setTimeout(() => {
+            if (window.centroUpdateDefaults) window.centroUpdateDefaults();
+        }, 50);
+    }
+
+    const countryData = {
+        "AR": { name: "Argentina", currency: "ARS", timezone: "America/Argentina/Buenos_Aires", dateLocale: "es-AR", taxIdName: "CUIT", phonePrefix: "+54" },
+        "BO": { name: "Bolivia", currency: "BOB", timezone: "America/La_Paz", dateLocale: "es-BO", taxIdName: "NIT", phonePrefix: "+591" },
+        "BR": { name: "Brasil", currency: "BRL", timezone: "America/Sao_Paulo", dateLocale: "pt-BR", taxIdName: "CNPJ/CPF", phonePrefix: "+55" },
+        "CA": { name: "Canadá", currency: "CAD", timezone: "America/Toronto", dateLocale: "en-CA", taxIdName: "SIN/BN", phonePrefix: "+1" },
+        "CL": { name: "Chile", currency: "CLP", timezone: "America/Santiago", dateLocale: "es-CL", taxIdName: "RUT", phonePrefix: "+56" },
+        "CO": { name: "Colombia", currency: "COP", timezone: "America/Bogota", dateLocale: "es-CO", taxIdName: "NIT", phonePrefix: "+57" },
+        "CR": { name: "Costa Rica", currency: "CRC", timezone: "America/Costa_Rica", dateLocale: "es-CR", taxIdName: "Cédula", phonePrefix: "+506" },
+        "CU": { name: "Cuba", currency: "CUP", timezone: "America/Havana", dateLocale: "es-CU", taxIdName: "NIT", phonePrefix: "+53" },
+        "DO": { name: "República Dominicana", currency: "DOP", timezone: "America/Santo_Domingo", dateLocale: "es-DO", taxIdName: "RNC", phonePrefix: "+1-809" },
+        "EC": { name: "Ecuador", currency: "USD", timezone: "America/Guayaquil", dateLocale: "es-EC", taxIdName: "RUC", phonePrefix: "+593" },
+        "US": { name: "Estados Unidos", currency: "USD", timezone: "America/New_York", dateLocale: "en-US", taxIdName: "Tax ID", phonePrefix: "+1" },
+        "SV": { name: "El Salvador", currency: "USD", timezone: "America/El_Salvador", dateLocale: "es-SV", taxIdName: "NIT", phonePrefix: "+503" },
+        "ES": { name: "España", currency: "EUR", timezone: "Europe/Madrid", dateLocale: "es-ES", taxIdName: "NIF/CIF", phonePrefix: "+34" },
+        "GT": { name: "Guatemala", currency: "GTQ", timezone: "America/Guatemala", dateLocale: "es-GT", taxIdName: "NIT", phonePrefix: "+502" },
+        "HN": { name: "Honduras", currency: "HNL", timezone: "America/Tegucigalpa", dateLocale: "es-HN", taxIdName: "RTN", phonePrefix: "+504" },
+        "MX": { name: "México", currency: "MXN", timezone: "America/Mexico_City", dateLocale: "es-MX", taxIdName: "RFC", phonePrefix: "+52" },
+        "NI": { name: "Nicaragua", currency: "NIO", timezone: "America/Managua", dateLocale: "es-NI", taxIdName: "RUC", phonePrefix: "+505" },
+        "PA": { name: "Panamá", currency: "PAB", timezone: "America/Panama", dateLocale: "es-PA", taxIdName: "RUC", phonePrefix: "+507" },
+        "PY": { name: "Paraguay", currency: "PYG", timezone: "America/Asuncion", dateLocale: "es-PY", taxIdName: "RUC", phonePrefix: "+595" },
+        "PE": { name: "Perú", currency: "PEN", timezone: "America/Lima", dateLocale: "es-PE", taxIdName: "RUC", phonePrefix: "+51" },
+        "PR": { name: "Puerto Rico", currency: "USD", timezone: "America/Puerto_Rico", dateLocale: "es-PR", taxIdName: "SSN", phonePrefix: "+1-787" },
+        "UY": { name: "Uruguay", currency: "UYU", timezone: "America/Montevideo", dateLocale: "es-UY", taxIdName: "RUT", phonePrefix: "+598" },
+        "VE": { name: "Venezuela", currency: "VES", timezone: "America/Caracas", dateLocale: "es-VE", taxIdName: "RIF", phonePrefix: "+58" }
+    };
+
+    window.centroUpdateDefaults = () => {
+        const ccode = document.getElementById('centro-new-country');
+        if (!ccode) return;
+        const cdata = countryData[ccode.value];
+        if (cdata) {
+            const nitLabel = document.getElementById('centro-nit-label');
+            if (nitLabel) nitLabel.textContent = cdata.taxIdName + ' del Centro Médico';
+            
+            const phoneInput = document.getElementById('centro-admin-telefono');
+            if (phoneInput && !phoneInput.value.includes('+')) {
+                phoneInput.value = cdata.phonePrefix + ' ';
+            }
+        }
+    };
+
+    window.saveNewCentro = async () => {
+        const nombre = document.getElementById('centro-new-nombre').value.trim();
+        const max_medicos = parseInt(document.getElementById('centro-new-limite').value.trim() || '0');
+        
+        const adminNombre = document.getElementById('centro-admin-nombre').value.trim();
+        const adminId = document.getElementById('centro-admin-id').value.trim();
+        const adminTelefono = document.getElementById('centro-admin-telefono').value.trim();
+        const adminCorreo = document.getElementById('centro-admin-correo').value.trim();
+        const pais = document.getElementById('centro-new-country').value;
+        const nitCentro = document.getElementById('centro-new-nit').value.trim();
+        
+        if (!nombre || max_medicos <= 0 || !adminNombre || !adminId) {
+            window.showElegantAlert('Datos Incompletos', 'Se requiere el Nombre del Centro, Límite de médicos, Nombre del Administrador y su ID.', true);
+            return;
+        }
+
+        const dataPais = countryData[pais];
+        const admin_code = Math.floor(100000 + Math.random() * 900000).toString();
+        const id_centro = 'CEN-' + Date.now();
+        const nuevoCentro = { 
+            id_centro, nombre, admin_code, max_medicos, 
+            admin_nombre: adminNombre, admin_id: adminId, 
+            admin_telefono: adminTelefono, admin_correo: adminCorreo,
+            pais: pais, nit: nitCentro,
+            moneda: dataPais.currency, timezone: dataPais.timezone, dateLocale: dataPais.dateLocale
+        };
+        
+        try {
+            const resp = await fetch(`/api/centro/${id_centro}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(nuevoCentro)
+            });
+            await resp.json();
+        } catch (e) {
+            console.log('Using offline failover for saving centro');
+        }
+
+        let centrosLocales = JSON.parse(localStorage.getItem('tabla_centros') || '[]');
+        centrosLocales.push(nuevoCentro);
+        localStorage.setItem('tabla_centros', JSON.stringify(centrosLocales));
+
+        window.showElegantAlert('Centro Registrado', `Se ha generado el Centro ${nombre} para el administrador ${adminNombre}. El código de acceso del sistema es: ${admin_code}`);
+        renderProgrammer();
+    };
+
+    window.deleteCentro = async (id) => {
+        if (confirm('¿Seguro que desea eliminar este centro médico? Se perderá acceso.')) {
+            try {
+                await fetch(`/api/centro/${id}`, { method: 'DELETE' });
+            } catch (e) {}
+
+            let centrosLocales = JSON.parse(localStorage.getItem('tabla_centros') || '[]');
+            centrosLocales = centrosLocales.filter(c => c.id_centro !== id);
+            localStorage.setItem('tabla_centros', JSON.stringify(centrosLocales));
+            renderProgrammer();
+            window.showElegantAlert('Eliminado', 'El centro médico ha sido removido localmente.');
+        }
+    };
+
+    // --- MÓDULO ADMINISTRADOR GENERAL ---
+    async function renderAdminGeneral() {
+        const id_centro = localStorage.getItem('id_centro');
+        const nombre_centro = localStorage.getItem('nombre_centro');
+        const max_medicos = parseInt(localStorage.getItem('max_medicos') || '0');
+
+        let medicos = [];
+        try {
+            const resp = await fetch('/api/medicos');
+            const result = await resp.json();
+            medicos = (result.medicos || []).filter(m => m.id_centro === id_centro);
+        } catch (e) {
+            const allMedicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            medicos = allMedicos.filter(m => m.id_centro === id_centro);
+        }
+        
+        contentArea.innerHTML = `
+            <div class="programmer-dashboard animate-in">
+                <div style="display: grid; grid-template-columns: 1fr 400px; gap: 30px;">
+                    <div class="widget-card" style="border: 3px solid #60a5fa; box-shadow: 0 0 20px rgba(96, 165, 250, 0.1);">
+                        <h3 class="widget-title" style="color: #60a5fa; border-bottom: 2px solid rgba(96, 165, 250, 0.2); padding-bottom: 20px;">
+                            Médicos de ${nombre_centro} (${medicos.length}/${max_medicos})
                         </h3>
                         <div class="doctor-list" style="margin-top: 30px; display: grid; gap: 20px;">
                             ${medicos.length > 0 ? medicos.map(doc => `
@@ -1444,11 +3851,11 @@ document.addEventListener('DOMContentLoaded', () => {
                                             </p>
                                         </div>
                                         <div style="text-align: right;">
-                                            <div style="background: #fbbf24; color: #000; padding: 10px 15px; border-radius: 10px; font-weight: 800; font-size: 18px; margin-bottom: 10px; display: inline-block; letter-spacing: 2px; font-family: monospace;">
-                                                 ${doc.password_hash ? atob(doc.password_hash) : '---'}
+                                            <div style="background: #60a5fa; color: #000; padding: 10px 15px; border-radius: 10px; font-weight: 800; font-size: 18px; margin-bottom: 10px; display: inline-block; letter-spacing: 2px; font-family: monospace;">
+                                                 Acceso: ${doc.password_hash ? atob(doc.password_hash) : '---'}
                                             </div>
                                             <br>
-                                            <button class="status-badge" style="background: rgba(239, 68, 68, 0.1); color: var(--error); border: 1px solid rgba(239, 68, 68, 0.2); cursor: pointer;" onclick="window.deleteDoctor('${doc.id_medico}')">ELIMINAR</button>
+                                            <button class="status-badge" style="background: rgba(239, 68, 68, 0.1); color: var(--error); border: 1px solid rgba(239, 68, 68, 0.2); cursor: pointer;" onclick="window.deleteDoctorByAdmin('${doc.id_medico}')">ELIMINAR</button>
                                         </div>
                                     </div>
                                 </div>
@@ -1457,7 +3864,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
 
                     <div class="widget-card" style="border: 2px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2);">
-                        <h3 class="widget-title" style="font-size: 22px; color: #fbbf24;">Registrar Nuevo Médico</h3>
+                        <h3 class="widget-title" style="font-size: 22px; color: #60a5fa;">Registrar Nuevo Médico</h3>
                         <div class="input-group" style="margin-bottom: 12px;">
                             <label>Nombre Completo</label>
                             <input type="text" id="doc-new-name" placeholder="Ej. Dr. Roberto Gómez">
@@ -1479,7 +3886,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             </div>
                             <div class="input-group" style="margin-bottom: 12px;">
                                 <label>País</label>
-                                <select id="doc-new-country" onchange="window.updateDocNewDefaults()" style="width: 100%; background: rgba(0,0,0,0.4); border: 1px solid var(--card-border); padding: 12px; border-radius: 12px; color: white;">
+                                <select id="doc-new-country" onchange="window.adminUpdateDocNewDefaults()" style="width: 100%; background: rgba(0,0,0,0.4); border: 1px solid var(--card-border); padding: 12px; border-radius: 12px; color: white;">
                                     ${Object.keys(countryData).map(code => `<option value="${code}">${countryData[code].name}</option>`).join('')}
                                 </select>
                             </div>
@@ -1497,25 +3904,44 @@ document.addEventListener('DOMContentLoaded', () => {
                             <input type="text" id="doc-new-currency" readonly style="opacity: 0.6; background: rgba(255,255,255,0.05);">
                         </div>
                         
-                        <button class="btn-primary" style="width: 100%; background: #fbbf24; color: #000; font-weight: 800; padding: 22px; font-size: 18px;" onclick="window.saveNewDoctor()">
+                        <button class="btn-primary" style="width: 100%; background: #60a5fa; color: #000; font-weight: 800; padding: 22px; font-size: 18px;" onclick="window.saveNewDoctorByAdmin()">
                             GENERAR ACCESO Y REGISTRAR
                         </button>
                     </div>
                 </div>
             </div>
         `;
-        window.updateDocNewDefaults();
+        window.adminUpdateDocNewDefaults();
     }
 
-    window.updateDocNewDefaults = () => {
+    window.adminUpdateDocNewDefaults = () => {
         const countryCode = document.getElementById('doc-new-country').value;
         const data = countryData[countryCode];
-        if (data) {
+        if (data && document.getElementById('doc-new-currency')) {
             document.getElementById('doc-new-currency').value = data.currency;
         }
     };
 
-    window.saveNewDoctor = async () => {
+    window.saveNewDoctorByAdmin = async () => {
+        const id_centro = localStorage.getItem('id_centro');
+        const nombre_centro = localStorage.getItem('nombre_centro');
+        const max_medicos = parseInt(localStorage.getItem('max_medicos') || '0');
+
+        let medicos_actuales = [];
+        try {
+            const resp = await fetch('/api/medicos');
+            const result = await resp.json();
+            medicos_actuales = (result.medicos || []).filter(m => m.id_centro === id_centro);
+        } catch (e) {
+            const allMedicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            medicos_actuales = allMedicos.filter(m => m.id_centro === id_centro);
+        }
+
+        if (medicos_actuales.length >= max_medicos) {
+            window.showElegantAlert('Límite Alcanzado', 'USTED YA ACTIVO LA CANTIDAD DE MEDICOS QUE USARAN ESTE SISTEMA, SI DESEA AMPLIAR FAVOR COMUNQUESE CON SISDEL INTERNACIONAL: WWW.SISDEL.NET, WHATSAPP: (502)4309-3379', true);
+            return;
+        }
+
         const nombre = document.getElementById('doc-new-name').value.trim();
         const dpi = document.getElementById('doc-new-dpi').value.trim();
         const nit = document.getElementById('doc-new-nit').value.trim();
@@ -1530,14 +3956,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const data = countryData[pais];
-        const randomCode = Math.floor(100000 + Math.random() * 900000).toString();
         
+        const firstLetter = nombre_centro.charAt(0).toUpperCase();
+        const randomLetters = String.fromCharCode(65 + Math.floor(Math.random() * 26)) + String.fromCharCode(65 + Math.floor(Math.random() * 26));
+        const randomNumbers = Math.floor(100 + Math.random() * 900).toString();
+        const accessCode = firstLetter + randomLetters + randomNumbers;
+
         const newDoc = {
             id_medico: dpi,
+            id_centro: id_centro,
             nombre_completo: nombre,
             especialidad: 'Medicina General',
             usuario: nombre.replace(/\s+/g, '').toUpperCase(),
-            password_hash: btoa(randomCode),
+            password_hash: btoa(accessCode),
             nit, edad: age, pais,
             pais_nombre: data.name,
             telefono: phone, correo: email,
@@ -1552,48 +3983,647 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(newDoc)
             });
-            const result = await resp.json();
-            if (result.success) {
-                let medicosList = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
-                medicosList.push(newDoc);
-                localStorage.setItem('tabla_medicos', JSON.stringify(medicosList));
-                
-                if (medicosList.length === 1) {
-                    localStorage.setItem('active_company', JSON.stringify(newDoc));
-                }
-
-                window.showElegantAlert('Médico Registrado', `Se ha generado el acceso para ${nombre}. El código de entrada es: ${randomCode}`);
-                renderProgrammer();
-            }
+            await resp.json();
         } catch (e) {
-            window.showElegantAlert('Error', 'No se pudo guardar el médico en el servidor.', true);
+            console.log('Fallover offline para medico admin general');
         }
+
+        let medicosList = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+        medicosList.push(newDoc);
+        localStorage.setItem('tabla_medicos', JSON.stringify(medicosList));
+        
+        if (medicosList.length === 1) {
+            localStorage.setItem('active_company', JSON.stringify(newDoc));
+        }
+
+        window.showElegantAlert('Médico Registrado', `Se ha generado el acceso para ${nombre}. El código de entrada es: ${accessCode}`);
+        renderAdminGeneral();
     };
 
-    window.deleteDoctor = async (id) => {
-        if (id === 'MED-MASTER') {
-            window.showElegantAlert('Acción denegada', 'No se puede eliminar la cuenta maestra.', true);
-            return;
-        }
+    window.deleteDoctorByAdmin = async (id) => {
         if (confirm('¿Seguro que desea eliminar este médico? Perderá acceso al sistema.')) {
             try {
-                const resp = await fetch(`/api/medico/${id}`, { method: 'DELETE' });
-                const result = await resp.json();
-                if (result.success) {
-                    let medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
-                    medicos = medicos.filter(m => m.id_medico !== id);
-                    localStorage.setItem('tabla_medicos', JSON.stringify(medicos));
-                    renderProgrammer();
-                    window.showElegantAlert('Eliminado', 'El médico ha sido removido del sistema.');
-                }
-            } catch (e) {
-                window.showElegantAlert('Error', 'No se pudo eliminar el médico del servidor.', true);
-            }
+                await fetch(`/api/medico/${id}`, { method: 'DELETE' });
+            } catch (e) {}
+
+            let medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            medicos = medicos.filter(m => m.id_medico !== id);
+            localStorage.setItem('tabla_medicos', JSON.stringify(medicos));
+            renderAdminGeneral();
+            window.showElegantAlert('Eliminado', 'El médico ha sido removido del sistema localmente.');
         }
     };
 
+    // --- INICIALIZACIÓN ---
+
+    // --- INICIALIZACIÓN ---
 
     // --- INICIALIZACIÓN ---
     updateUserDisplay();
     updateDate();
+
+    window.showPatientChoiceModal = () => {
+        const overlay = document.createElement('div');
+        overlay.style.position = 'fixed';
+        overlay.style.top = '0';
+        overlay.style.left = '0';
+        overlay.style.width = '100%';
+        overlay.style.height = '100%';
+        overlay.style.background = 'rgba(0,0,0,0.8)';
+        overlay.style.display = 'flex';
+        overlay.style.alignItems = 'center';
+        overlay.style.justifyContent = 'center';
+        overlay.style.zIndex = '99999';
+        overlay.style.backdropFilter = 'blur(5px)';
+        overlay.style.opacity = '0';
+        overlay.style.transition = 'opacity 0.3s ease';
+
+        const card = document.createElement('div');
+        card.className = 'widget-card animate-in';
+        card.style.background = '#0f172a';
+        card.style.padding = '40px';
+        card.style.borderRadius = '24px';
+        card.style.border = '2px solid rgba(16, 185, 129, 0.4)';
+        card.style.textAlign = 'center';
+        card.style.maxWidth = '450px';
+        card.style.transform = 'scale(0.9)';
+        card.style.transition = 'transform 0.3s ease';
+
+        card.innerHTML = `
+            <div style="width: 60px; height: 60px; background: rgba(59, 130, 246, 0.1); border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 20px;">
+                <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2">
+                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                </svg>
+            </div>
+            <h3 style="color: white; font-size: 24px; margin-bottom: 15px;">Selección de Paciente</h3>
+            <p style="color: rgba(255,255,255,0.7); margin-bottom: 30px; font-size: 16px; line-height: 1.5;">Para iniciar una consulta médica, seleccione qué tipo de paciente va a atender.</p>
+            
+            <button id="btn-nuevo" style="width: 100%; border-radius: 12px; padding: 18px; font-size: 16px; font-weight: bold; cursor: pointer; margin-bottom: 15px; background: rgba(59, 130, 246, 0.15); border: 2px solid #3b82f6; color: #60a5fa; transition: all 0.2s;">
+                Es un Paciente Nuevo
+                <div style="font-size: 12px; font-weight: normal; opacity: 0.8; margin-top: 5px;">Llenar Formulario Inicial</div>
+            </button>
+            
+            <button id="btn-buscar" style="width: 100%; border-radius: 12px; padding: 18px; font-size: 16px; font-weight: bold; cursor: pointer; margin-bottom: 25px; background: rgba(16, 185, 129, 0.15); border: 2px solid #10b981; color: #34d399; transition: all 0.2s;">
+                Ya es Segunda Visita (Existente)
+                <div style="font-size: 12px; font-weight: normal; opacity: 0.8; margin-top: 5px;">Buscar por Nombre o Identificación</div>
+            </button>
+            
+            <button id="btn-cancel" style="background: none; border: none; font-size: 14px; text-decoration: underline; color: rgba(255,255,255,0.5); cursor: pointer;">Cancelar / Volver</button>
+        `;
+
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
+
+        setTimeout(() => {
+            overlay.style.opacity = '1';
+            card.style.transform = 'scale(1)';
+        }, 10);
+
+        const close = () => {
+            overlay.style.opacity = '0';
+            card.style.transform = 'scale(0.9)';
+            setTimeout(() => document.body.removeChild(overlay), 300);
+        };
+
+        const addHover = (id, hoverBg) => {
+            const el = document.getElementById(id);
+            const origBg = el.style.background;
+            el.onmouseenter = () => el.style.background = hoverBg;
+            el.onmouseleave = () => el.style.background = origBg;
+        };
+        addHover('btn-nuevo', 'rgba(59, 130, 246, 0.3)');
+        addHover('btn-buscar', 'rgba(16, 185, 129, 0.3)');
+        document.getElementById('btn-cancel').onmouseenter = (e) => e.target.style.color = 'white';
+        document.getElementById('btn-cancel').onmouseleave = (e) => e.target.style.color = 'rgba(255,255,255,0.5)';
+
+        document.getElementById('btn-nuevo').onclick = () => {
+            close();
+            window.renderDoctorHome('register');
+        };
+        
+        document.getElementById('btn-buscar').onclick = () => {
+            close();
+            window.renderDoctorHome('search');
+            setTimeout(() => {
+                const searchBox = document.getElementById('patient-search');
+                if(searchBox) searchBox.focus();
+            }, 300);
+        };
+
+        document.getElementById('btn-cancel').onclick = close;
+    };
+
+    window.showPatientGeneralData = function(qsl) {
+        window.renderDoctorHome('register');
+        const data = localStorage.getItem('patient_data_' + qsl);
+        if(data) {
+            const p = JSON.parse(data);
+            const name = localStorage.getItem('patient_name_' + qsl) || '';
+            document.getElementById('p-nombre').value = name;
+            
+            const mapIfExist = (id, val) => { const el = document.getElementById(id); if(el) el.value = val || ''; };
+
+            // Datos de filiación
+            mapIfExist('p-fecha-nac', p.fecha_nacimiento);
+            mapIfExist('p-edad', p.edad);
+            mapIfExist('p-gender', p.genero);
+            mapIfExist('p-id', p.id_identificacion);
+            mapIfExist('p-civil', p.estado_civil);
+            mapIfExist('p-ocupacion', p.ocupacion);
+            mapIfExist('p-direccion', p.direccion);
+            mapIfExist('p-telefono', p.telefono);
+            mapIfExist('p-email', p.email);
+            mapIfExist('p-emerg-nombre', p.contacto_emergencia || p.contacto_emergencia_nombre);
+            mapIfExist('p-emerg-rel', p.relacion_emergencia || p.contacto_emergencia_relacion);
+            mapIfExist('p-emerg-tel', p.telefono_emergencia || p.contacto_emergencia_tel);
+            mapIfExist('p-seguro', p.seguro_medico);
+            mapIfExist('p-motivo', p.illness);
+
+            // Historia clínica — soporta ambas nomenclaturas (registro y consulta)
+            mapIfExist('p-sangre', p.tipo_sangre);
+            mapIfExist('p-glucosa', p.glucosa);
+            mapIfExist('p-alergias', p.alergias);
+            mapIfExist('p-ant-pers', p.antecedentes_personales || p.antPersonales);
+            mapIfExist('p-ant-quir', p.antecedentes_quirurgicos || p.antQuirurgicos);
+            mapIfExist('p-ant-fam', p.antecedentes_familiares || p.antFamiliares);
+            mapIfExist('p-meds-act', p.medicamentos_actuales || p.medicamentos);
+            mapIfExist('p-habitos', p.habitos);
+
+            const btn = document.getElementById('btn-add-patient');
+            if(btn) {
+                btn.textContent = 'ACTUALIZAR EXPEDIENTE';
+                btn.style.background = 'linear-gradient(135deg, #3b82f6, #2563eb)';
+                btn.onclick = () => window.selectPatientAndGoToConsultation(qsl);
+            }
+            
+            const title = document.querySelector('#view-registration h3.widget-title');
+            if(title) {
+                title.innerHTML = '<span style="color:#60a5fa;">📋 Datos Generales: ' + name + '</span>';
+            }
+            
+            const backBtnText = document.getElementById('btn-reg-back-text');
+            if(backBtnText) backBtnText.textContent = 'Volver a Consulta';
+            
+            const backBtn = document.getElementById('btn-reg-back');
+            if(backBtn) backBtn.onclick = () => window.selectPatientAndGoToConsultation(qsl);
+        }
+    };
+
+
+    
+    window.renderGlobalLabUploader = function() {
+        const patients = window.patients || [];
+        // Generate options
+        const opts = patients.map(qsl => {
+            const name = localStorage.getItem('patient_name_' + qsl) || 'Desconocido';
+            return `<option value="${qsl}">${name} (${qsl})</option>`;
+        }).join('');
+
+        contentArea.innerHTML = `
+            <div class="widget-card animate-in" style="max-width: 600px; margin: 0 auto; padding: 40px; border: 3px solid rgba(168,85,247, 0.4); border-radius: 24px;">
+                <h3 class="widget-title" style="color: #c084fc; font-size: 26px; display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid rgba(168,85,247,0.1); padding-bottom: 20px; margin-bottom: 30px;">
+                    <span>🧪 Subida Rápida de Laboratorios</span>
+                    <button class="status-badge" style="background: rgba(255,255,255,0.1); padding: 10px 15px; cursor: pointer; border: none; color: white;" onclick="window.renderScheduler()">
+                        Cancelar
+                    </button>
+                </h3>
+                
+                <div style="background: rgba(168,85,247,0.05); padding: 25px; border-radius: 15px; border: 1px dashed rgba(168,85,247,0.3);">
+                    <div style="margin-bottom:15px;">
+                        <label style="color:rgba(255,255,255,0.7); font-size:12px; margin-bottom:5px; display:block;">Seleccionar Paciente *</label>
+                        <select id="glob-lab-qsl" style="width:100%; padding:10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.1); color:white; border-radius:8px;">
+                            <option value="">-- Elija un Paciente --</option>
+                            ${opts}
+                        </select>
+                    </div>
+                    <div style="display:grid; grid-template-columns: 1fr 2fr; gap:15px; margin-bottom:15px;">
+                        <div>
+                            <label style="color:rgba(255,255,255,0.7); font-size:12px; margin-bottom:5px; display:block;">Fecha *</label>
+                            <input type="date" id="glob-lab-date" style="width:100%; padding:10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.1); color:white; border-radius:8px;">
+                        </div>
+                        <div>
+                            <label style="color:rgba(255,255,255,0.7); font-size:12px; margin-bottom:5px; display:block;">Tipo de Examen *</label>
+                            <input type="text" id="glob-lab-title" placeholder="Ej: Hematología Completa" style="width:100%; padding:10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.1); color:white; border-radius:8px;">
+                        </div>
+                    </div>
+                    <div style="margin-bottom:15px;">
+                        <label style="color:rgba(255,255,255,0.7); font-size:12px; margin-bottom:5px; display:block;">Cargar Imagen (Opcional)</label>
+                        <input type="file" id="glob-lab-file" accept="image/*" style="width:100%; padding:10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.1); color:white; border-radius:8px;">
+                    </div>
+                    <label style="color:rgba(255,255,255,0.7); font-size:12px; margin-bottom:5px; display:block;">Observaciones</label>
+                    <textarea id="glob-lab-notes" rows="2" style="width:100%; padding:10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.1); color:white; border-radius:8px; margin-bottom:15px;"></textarea>
+                    
+                    <button onclick="window.saveGlobalLaboratory()" style="width:100%; padding:12px; background:#c084fc; color:black; font-weight:bold; border-radius:10px; border:none; cursor:pointer;">GUARDAR Y ASIGNAR A PACIENTE</button>
+                </div>
+            </div>
+        `;
+    };
+
+    window.saveGlobalLaboratory = function() {
+        const qsl = document.getElementById('glob-lab-qsl').value;
+        const date = document.getElementById('glob-lab-date').value;
+        const title = document.getElementById('glob-lab-title').value.trim();
+        const notes = document.getElementById('glob-lab-notes').value.trim();
+        const fileInput = document.getElementById('glob-lab-file');
+
+        if(!qsl || !date || !title) {
+            window.showElegantAlert('Error', 'Debe seleccionar paciente, ingresar fecha y tipo de examen.');
+            return;
+        }
+
+        const proceedSave = (base64) => {
+            const key = 'patient_labs_' + qsl;
+            const labs = JSON.parse(localStorage.getItem(key) || '[]');
+            labs.push({ id: Date.now().toString(), date: date, title: title, notes: notes, imageBase64: base64 || null });
+            localStorage.setItem(key, JSON.stringify(labs));
+            
+            window.showElegantAlert('Asignación Completada', 'El laboratorio se subió a la ficha del paciente correctamente.');
+            window.renderScheduler();
+        };
+
+        if(fileInput.files && fileInput.files[0]) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                proceedSave(e.target.result);
+            };
+            reader.readAsDataURL(fileInput.files[0]);
+        } else {
+            proceedSave(null);
+        }
+    };
+
+    window.renderLaboratories = function() {
+        if(!selectedPatientQSL) return;
+        const key = 'patient_labs_' + selectedPatientQSL;
+        const labs = JSON.parse(localStorage.getItem(key) || '[]');
+        
+        let labsHtml = '';
+        if(labs.length === 0) {
+            labsHtml = '<div style="text-align:center; opacity:0.5; margin-top:20px;">No hay laboratorios registrados.</div>';
+        } else {
+            labs.sort((a,b) => new Date(b.date) - new Date(a.date)).forEach(l => {
+                const imgHtml = l.imageBase64 ? `<div style="margin-top:15px; border-radius:8px; overflow:hidden;"><img src="${l.imageBase64}" style="max-width:100%; display:block; border:1px solid rgba(255,255,255,0.1); border-radius:8px;"/></div>` : '';
+                labsHtml += `
+                    <div style="background: rgba(0,0,0,0.3); border-left: 4px solid #c084fc; padding: 20px; border-radius: 12px; margin-bottom: 15px; position:relative;">
+                        <strong style="color:#c084fc; font-size:18px;">${l.date} - ${l.title}</strong>
+                        <button onclick="window.deleteLaboratory('${l.id}')" style="position:absolute; top:15px; right:15px; background:rgba(239, 68, 68, 0.1); color: #ef4444; border:none; padding:5px 10px; border-radius:8px; cursor:pointer;">Borrar</button>
+                        <p style="color:rgba(255,255,255,0.8); margin-top:10px; font-size:14px;">${l.notes}</p>
+                        ${imgHtml}
+                    </div>
+                `;
+            });
+        }
+
+        const name = localStorage.getItem('patient_name_' + selectedPatientQSL) || '';
+
+        contentArea.innerHTML = `
+            <div class="widget-card animate-in" style="max-width: 800px; margin: 0 auto; padding: 40px; border: 3px solid rgba(168,85,247, 0.4); border-radius: 24px;">
+                <h3 class="widget-title" style="color: #c084fc; font-size: 28px; display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid rgba(168,85,247,0.1); padding-bottom: 20px; margin-bottom: 30px;">
+                    <span>🧪 Control de Laboratorios</span>
+                    <button class="status-badge" style="background: rgba(255,255,255,0.1); padding: 10px 15px; cursor: pointer; border: none; color: white;" onclick="window.selectPatientAndGoToConsultation('${selectedPatientQSL}')">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 5px;"><polyline points="15 18 9 12 15 6"></polyline></svg> Volver a Consulta
+                    </button>
+                </h3>
+                
+                <h4 style="color:white; margin-bottom:20px;">Paciente: <span style="color:#c084fc;">${name}</span></h4>
+
+                <div style="background: rgba(168,85,247,0.05); padding: 25px; border-radius: 15px; margin-bottom: 30px; border: 1px dashed rgba(168,85,247,0.3);">
+                    <h4 style="color: #c084fc; margin-bottom: 15px;">Adjuntar Nuevo Laboratorio</h4>
+                    <div style="display:grid; grid-template-columns: 1fr 2fr; gap:15px; margin-bottom:15px;">
+                        <div>
+                            <label style="color:rgba(255,255,255,0.7); font-size:12px; margin-bottom:5px; display:block;">Fecha del Examen</label>
+                            <input type="date" id="lab-date" style="width:100%; padding:10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.1); color:white; border-radius:8px;">
+                        </div>
+                        <div>
+                            <label style="color:rgba(255,255,255,0.7); font-size:12px; margin-bottom:5px; display:block;">Tipo de Examen</label>
+                            <input type="text" id="lab-title" placeholder="Ej: Hematología Completa" style="width:100%; padding:10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.1); color:white; border-radius:8px;">
+                        </div>
+                    </div>
+                    
+                    <div style="margin-bottom:15px;">
+                        <label style="color:rgba(255,255,255,0.7); font-size:12px; margin-bottom:5px; display:block;">Subir Archivo / Foto del Laboratorio (Opcional)</label>
+                        <input type="file" id="lab-file" accept="image/*" style="width:100%; padding:10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.1); color:white; border-radius:8px;">
+                    </div>
+
+                    <label style="color:rgba(255,255,255,0.7); font-size:12px; margin-bottom:5px; display:block;">Resultados / Observaciones</label>
+                    <textarea id="lab-notes" rows="2" placeholder="Valores destacables..." style="width:100%; padding:10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.1); color:white; border-radius:8px; margin-bottom:15px;"></textarea>
+                    
+                    <button onclick="window.saveLaboratory()" style="width:100%; padding:12px; background:#c084fc; color:black; font-weight:bold; border-radius:10px; border:none; cursor:pointer;">GUARDAR LABORATORIO Y FOTO</button>
+                </div>
+
+                <h4 style="color:white; margin-bottom:15px;">Tus Laboratorios Subidos</h4>
+                <div id="lab-list">
+                    ${labsHtml}
+                </div>
+            </div>
+        `;
+    };
+
+    window.saveLaboratory = function() {
+        const date = document.getElementById('lab-date').value;
+        const title = document.getElementById('lab-title').value.trim();
+        const notes = document.getElementById('lab-notes').value.trim();
+        const fileInput = document.getElementById('lab-file');
+
+        if(!date || !title) {
+            window.showElegantAlert('Error', 'Debe ingresar al menos la fecha y el tipo de examen.');
+            return;
+        }
+
+        const proceedSave = (base64) => {
+            const key = 'patient_labs_' + selectedPatientQSL;
+            const labs = JSON.parse(localStorage.getItem(key) || '[]');
+            labs.push({ id: Date.now().toString(), date: date, title: title, notes: notes, imageBase64: base64 || null });
+            localStorage.setItem(key, JSON.stringify(labs));
+            
+            window.showElegantAlert('Laboratorio Guardado', 'El examen y su imagen se asociaron al paciente exitosamente.');
+            window.renderLaboratories();
+        };
+
+        if(fileInput.files && fileInput.files[0]) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                proceedSave(e.target.result);
+            };
+            reader.readAsDataURL(fileInput.files[0]);
+        } else {
+            proceedSave(null);
+        }
+    };
+
+
+    window.showAppointmentPreview = function(qsl, dateStr, timeStr) {
+        const name = localStorage.getItem('patient_name_' + qsl) || 'Desconocido';
+        const data = getPatientData(qsl) || {};
+        const tel = data.telefono || 'No registrado';
+
+        const mainOverlay = document.createElement('div');
+        mainOverlay.id = 'appointment-preview-modal';
+        mainOverlay.style.position = 'fixed';
+        mainOverlay.style.top = '0';
+        mainOverlay.style.left = '0';
+        mainOverlay.style.width = '100%';
+        mainOverlay.style.height = '100%';
+        mainOverlay.style.background = 'rgba(0,0,0,0.85)';
+        mainOverlay.style.display = 'flex';
+        mainOverlay.style.alignItems = 'center';
+        mainOverlay.style.justifyContent = 'center';
+        mainOverlay.style.zIndex = '99999';
+        mainOverlay.style.backdropFilter = 'blur(5px)';
+
+        mainOverlay.innerHTML = `
+            <div class="widget-card animate-in" style="background: #0f172a; padding: 40px; border-radius: 24px; border: 2px solid rgba(16, 185, 129, 0.4); text-align: center; max-width: 450px; width:100%; position:relative;">
+                <div style="width: 60px; height: 60px; border-radius: 30px; background: rgba(16, 185, 129, 0.2); display: flex; align-items: center; justify-content: center; margin: 0 auto 20px auto; color: #10b981;">
+                    <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                </div>
+                
+                <h3 style="color: white; font-size: 24px; margin-bottom: 5px;">${name}</h3>
+                <p style="color: rgba(255,255,255,0.7); margin-bottom: 25px; font-size: 16px;">📞 Tel: ${tel}</p>
+                
+                <div style="margin-bottom: 30px; padding: 15px; background: rgba(255,255,255,0.05); border-radius: 12px; font-size: 14px;">
+                    <strong style="color:#10b981;">Cita Reservada:</strong><br>
+                    ${dateStr} a las ${timeStr}
+                </div>
+                
+                <button onclick="document.body.removeChild(document.getElementById('appointment-preview-modal')); window.openContextualLabUploader('${qsl}')" style="width: 100%; border-radius: 12px; padding: 16px; font-size: 15px; font-weight: bold; cursor: pointer; margin-bottom: 15px; background: rgba(168, 85, 247, 0.15); border: 2px solid #a855f7; color: #c084fc; transition: all 0.2s;">
+                    🧪 Subir Laboratorios
+                </button>
+                
+                <button onclick="document.body.removeChild(document.getElementById('appointment-preview-modal'))" style="margin-top:10px; background: none; border: none; font-size: 14px; text-decoration: underline; color: rgba(255,255,255,0.5); cursor: pointer;">Cerrar</button>
+            </div>
+        `;
+        document.body.appendChild(mainOverlay);
+    };
+
+    
+
+
+    window.openContextualLabUploader = function(qsl) {
+        const name = localStorage.getItem('patient_name_' + qsl) || '';
+        const today = new Date().toISOString().split('T')[0];
+        
+        const key = 'patient_labs_' + qsl;
+        const labs = JSON.parse(localStorage.getItem(key) || '[]');
+
+        let labsHtml = '';
+        if(labs.length === 0) {
+            labsHtml = '<div style="text-align:center; opacity:0.5; padding:20px;">No hay laboratorios subidos aún.</div>';
+        } else {
+            labs.sort((a,b) => new Date(b.date) - new Date(a.date)).forEach(l => {
+                let fileHtml = '';
+                if(l.imageBase64) {
+                    if(l.isPdf || l.imageBase64.includes('application/pdf')) {
+                        fileHtml = `<div style="margin-top:12px;"><embed src="${l.imageBase64}" width="100%" height="400px" type="application/pdf"></div>`;
+                    } else {
+                        fileHtml = `<div style="margin-top:12px;"><img src="${l.imageBase64}" style="max-width:100%; border-radius:8px; border:1px solid rgba(255,255,255,0.1);"/></div>`;
+                    }
+                }
+                labsHtml += `
+                    <div style="background:rgba(0,0,0,0.3); border-left:4px solid #c084fc; padding:18px; border-radius:12px; margin-bottom:18px; position:relative;">
+                        <strong style="color:#c084fc; font-size:16px;">${l.date}${l.title ? ' — ' + l.title : ''}</strong>
+                        <button onclick="window.deleteContextualLab('${qsl}','${l.id}')" style="position:absolute; top:12px; right:12px; background:rgba(239,68,68,0.1); color:#ef4444; border:none; padding:4px 10px; border-radius:8px; cursor:pointer; font-size:12px;">Borrar</button>
+                        ${l.notes ? `<p style="color:rgba(255,255,255,0.7); margin-top:8px; font-size:13px;">${l.notes}</p>` : ''}
+                        ${fileHtml}
+                    </div>`;
+            });
+        }
+
+        contentArea.innerHTML = `
+            <div class="widget-card animate-in" style="max-width: 700px; margin: 0 auto; padding: 40px; border: 3px solid rgba(168,85,247, 0.4); border-radius: 24px;">
+                <h3 class="widget-title" style="color: #c084fc; font-size: 24px; display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid rgba(168,85,247,0.1); padding-bottom: 20px; margin-bottom: 30px;">
+                    <span>🧪 Laboratorios: ${name}</span>
+                    <button class="status-badge" style="background: rgba(255,255,255,0.1); padding: 10px 15px; cursor: pointer; border: none; color: white;" onclick="window.renderScheduler()">
+                        Volver al Calendario
+                    </button>
+                </h3>
+                
+                <div style="background: rgba(168,85,247,0.05); padding: 25px; border-radius: 15px; border: 1px dashed rgba(168,85,247,0.3); margin-bottom: 30px;">
+                    <h4 style="color:#c084fc; margin-bottom:15px;">Subir Nuevo Resultado</h4>
+                    <input type="date" id="quick-lab-date" value="${today}" style="width:100%; padding:10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.1); color:white; border-radius:8px; margin-bottom: 15px;">
+                    <input type="file" id="quick-lab-file" accept="image/*,application/pdf" style="width:100%; padding:15px; background:rgba(0,0,0,0.5); border:2px dashed #c084fc; color:white; border-radius:12px; margin-bottom:20px; cursor:pointer;">
+                    <button onclick="window.saveQuickContextualLab('${qsl}')" style="width:100%; padding:14px; background:#c084fc; color:black; font-weight:bold; font-size: 15px; border-radius:12px; border:none; cursor:pointer;">
+                        GUARDAR RESULTADO
+                    </button>
+                </div>
+
+                <h4 style="color:white; margin-bottom:15px; font-size:16px;">Resultados Previos (más recientes primero)</h4>
+                <div id="ctx-lab-list">
+                    ${labsHtml}
+                </div>
+            </div>
+        `;
+    };
+
+    window.saveQuickContextualLab = function(qsl) {
+        const date = document.getElementById('quick-lab-date').value;
+        const fileInput = document.getElementById('quick-lab-file');
+        
+        if(!fileInput.files || !fileInput.files[0]) {
+            window.showElegantAlert('Error', 'Debe adjuntar al menos una imagen o PDF.');
+            return;
+        }
+
+        const file = fileInput.files[0];
+        const isPdf = file.type === 'application/pdf';
+
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const key = 'patient_labs_' + qsl;
+            const labs = JSON.parse(localStorage.getItem(key) || '[]');
+            
+            labs.push({ 
+                id: Date.now().toString(), 
+                date: date, 
+                title: 'Resultado de Laboratorio', 
+                notes: '', 
+                imageBase64: e.target.result,
+                isPdf: isPdf
+            });
+            
+            localStorage.setItem(key, JSON.stringify(labs));
+            // Refresh the same view to show the new lab
+            window.openContextualLabUploader(qsl);
+        };
+        reader.readAsDataURL(file);
+    };
+
+    window.deleteContextualLab = function(qsl, id) {
+        const key = 'patient_labs_' + qsl;
+        let labs = JSON.parse(localStorage.getItem(key) || '[]');
+        labs = labs.filter(l => l.id !== id);
+        localStorage.setItem(key, JSON.stringify(labs));
+        window.openContextualLabUploader(qsl);
+    };
+
+    // Override renderLaboratories to correctly display PDFs and sort by date descending (already sorting properly)
+    // We must rebuild renderLaboratories just to ensure the PDF rendering block is included when a file is isPdf.
+    const originalRenderLaboratories = window.renderLaboratories;
+    window.renderLaboratories = function() {
+        if(!selectedPatientQSL) return;
+        const key = 'patient_labs_' + selectedPatientQSL;
+        const labs = JSON.parse(localStorage.getItem(key) || '[]');
+        
+        let labsHtml = '';
+        if(labs.length === 0) {
+            labsHtml = '<div style="text-align:center; opacity:0.5; margin-top:20px;">No hay laboratorios registrados.</div>';
+        } else {
+            labs.sort((a,b) => new Date(b.date) - new Date(a.date)).forEach(l => {
+                let fileRenderHtml = '';
+                if(l.imageBase64) {
+                    if(l.isPdf || l.imageBase64.includes('application/pdf')) {
+                        fileRenderHtml = `
+                            <div style="margin-top:15px; border-radius:8px; overflow:hidden;">
+                                <embed src="${l.imageBase64}" width="100%" height="500px" type="application/pdf">
+                            </div>
+                        `;
+                    } else {
+                        fileRenderHtml = `
+                            <div style="margin-top:15px; border-radius:8px; overflow:hidden;">
+                                <img src="${l.imageBase64}" style="max-width:100%; display:block; border:1px solid rgba(255,255,255,0.1); border-radius:8px;"/>
+                            </div>
+                        `;
+                    }
+                }
+                
+                const notesHtml = l.notes ? `<p style="color:rgba(255,255,255,0.8); margin-top:10px; font-size:14px;">${l.notes}</p>` : '';
+
+                labsHtml += `
+                    <div style="background: rgba(0,0,0,0.3); border-left: 4px solid #c084fc; padding: 20px; border-radius: 12px; margin-bottom: 25px; position:relative;">
+                        <strong style="color:#c084fc; font-size:18px;">${l.date} ${l.title ? '- ' + l.title : ''}</strong>
+                        <button onclick="window.deleteLaboratory('${l.id}')" style="position:absolute; top:15px; right:15px; background:rgba(239, 68, 68, 0.1); color: #ef4444; border:none; padding:5px 10px; border-radius:8px; cursor:pointer;">Borrar</button>
+                        ${notesHtml}
+                        ${fileRenderHtml}
+                    </div>
+                `;
+            });
+        }
+
+        const name = localStorage.getItem('patient_name_' + selectedPatientQSL) || '';
+
+        contentArea.innerHTML = `
+            <div class="widget-card animate-in" style="max-width: 800px; margin: 0 auto; padding: 40px; border: 3px solid rgba(168,85,247, 0.4); border-radius: 24px;">
+                <h3 class="widget-title" style="color: #c084fc; font-size: 28px; display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid rgba(168,85,247,0.1); padding-bottom: 20px; margin-bottom: 30px;">
+                    <span>🧪 Control de Laboratorios</span>
+                    <button class="status-badge" style="background: rgba(255,255,255,0.1); padding: 10px 15px; cursor: pointer; border: none; color: white;" onclick="window.selectPatientAndGoToConsultation('${selectedPatientQSL}')">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 5px;"><polyline points="15 18 9 12 15 6"></polyline></svg> Volver a Consulta
+                    </button>
+                </h3>
+                
+                <h4 style="color:white; margin-bottom:20px;">Paciente: <span style="color:#c084fc;">${name}</span></h4>
+
+                <div style="background: rgba(168,85,247,0.05); padding: 25px; border-radius: 15px; margin-bottom: 30px; border: 1px dashed rgba(168,85,247,0.3);">
+                    <h4 style="color: #c084fc; margin-bottom: 15px;">Adjuntar Nuevo Laboratorio</h4>
+                    <div style="display:grid; grid-template-columns: 1fr 2fr; gap:15px; margin-bottom:15px;">
+                        <div>
+                            <label style="color:rgba(255,255,255,0.7); font-size:12px; margin-bottom:5px; display:block;">Fecha del Examen</label>
+                            <input type="date" id="lab-date" value="${new Date().toISOString().split('T')[0]}" style="width:100%; padding:10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.1); color:white; border-radius:8px;">
+                        </div>
+                        <div>
+                            <label style="color:rgba(255,255,255,0.7); font-size:12px; margin-bottom:5px; display:block;">Tipo de Examen (Opcional)</label>
+                            <input type="text" id="lab-title" placeholder="Ej: Hematología Completa" style="width:100%; padding:10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.1); color:white; border-radius:8px;">
+                        </div>
+                    </div>
+                    
+                    <div style="margin-bottom:15px;">
+                        <label style="color:rgba(255,255,255,0.7); font-size:12px; margin-bottom:5px; display:block;">Subir Archivo / Foto del Laboratorio (Obligatorio/Opcional)</label>
+                        <input type="file" id="lab-file" accept="image/*,application/pdf" style="width:100%; padding:10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.1); color:white; border-radius:8px;">
+                    </div>
+
+                    <label style="color:rgba(255,255,255,0.7); font-size:12px; margin-bottom:5px; display:block;">Resultados / Observaciones</label>
+                    <textarea id="lab-notes" rows="2" placeholder="Notas breves..." style="width:100%; padding:10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.1); color:white; border-radius:8px; margin-bottom:15px;"></textarea>
+                    
+                    <button onclick="window.saveLaboratory()" style="width:100%; padding:12px; background:#c084fc; color:black; font-weight:bold; border-radius:10px; border:none; cursor:pointer;">GUARDAR LABORATORIO Y ARCHIVO</button>
+                </div>
+
+                <h4 style="color:white; margin-bottom:15px;">Laboratorios Subidos</h4>
+                <div id="lab-list">
+                    ${labsHtml}
+                </div>
+            </div>
+        `;
+    };
+
+    // Override saveLaboratory for the full view to support PDF
+    const oldSaveLab = window.saveLaboratory;
+    window.saveLaboratory = function() {
+        const date = document.getElementById('lab-date').value;
+        const title = document.getElementById('lab-title').value.trim() || 'Laboratorio Adjunto';
+        const notes = document.getElementById('lab-notes').value.trim();
+        const fileInput = document.getElementById('lab-file');
+
+        if(!date) {
+            window.showElegantAlert('Error', 'Debe ingresar al menos la fecha del examen.');
+            return;
+        }
+
+        const proceedSave = (base64, isPdf) => {
+            const key = 'patient_labs_' + selectedPatientQSL;
+            const labs = JSON.parse(localStorage.getItem(key) || '[]');
+            labs.push({ 
+                id: Date.now().toString(), 
+                date: date, 
+                title: title, 
+                notes: notes, 
+                imageBase64: base64 || null,
+                isPdf: isPdf || false
+            });
+            localStorage.setItem(key, JSON.stringify(labs));
+            
+            window.showElegantAlert('Laboratorio Guardado', 'El examen y su imagen se asociaron al paciente exitosamente.');
+            window.renderLaboratories();
+        };
+
+        if(fileInput.files && fileInput.files[0]) {
+            const file = fileInput.files[0];
+            const isPdf = file.type === 'application/pdf';
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                proceedSave(e.target.result, isPdf);
+            };
+            reader.readAsDataURL(file);
+        } else {
+            proceedSave(null, false);
+        }
+    };
+
 });
