@@ -6718,7 +6718,7 @@ function renderSection(name, data) {
     // Defaults para recordatorios — se mezclan con lo guardado en cloud/local
     const SISDEL_REMINDER_DEFAULTS = {
         enabled: true,
-        leadHours: [24, 2, 0.5],      // tiempos de aviso antes de la cita
+        leadHours: [12, 2, 1],        // tiempos de aviso antes de la cita (horas)
         channel: 'sisdel',            // 'sisdel' | 'whatsapp' | 'ambos'
         followUpUnattended: true,     // notificar al doctor si la cita pasó sin atender
         sound: true,                  // sonido al recibir alerta en el navegador
@@ -6802,13 +6802,12 @@ function renderSection(name, data) {
         const cfg = _getReminderConfig();
         const checked = (b) => b ? 'checked' : '';
         const leadOptions = [
-            { h: 48, label: '2 días antes' },
-            { h: 24, label: '24 horas antes' },
             { h: 12, label: '12 horas antes' },
+            { h: 8,  label: '8 horas antes' },
+            { h: 6,  label: '6 horas antes' },
+            { h: 3,  label: '3 horas antes' },
             { h: 2,  label: '2 horas antes' },
-            { h: 1,  label: '1 hora antes' },
-            { h: 0.5, label: '30 minutos antes' },
-            { h: 0.25, label: '15 minutos antes' }
+            { h: 1,  label: '1 hora antes' }
         ];
         const leadHtml = leadOptions.map(o => `
             <label class="reminder-chip" style="display:flex;align-items:center;gap:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:10px 14px;cursor:pointer;font-size:13px;color:white;">
@@ -6916,7 +6915,7 @@ function renderSection(name, data) {
             const channelEl = document.querySelector('input[name=rem-channel]:checked');
             const cfg = {
                 enabled: !!document.getElementById('rem-enabled')?.checked,
-                leadHours: leadHours.length ? leadHours : [24, 2],
+                leadHours: leadHours.length ? leadHours : [12, 2, 1],
                 channel: channelEl ? channelEl.value : 'sisdel',
                 followUpUnattended: !!document.getElementById('rem-followup')?.checked,
                 sound: !!document.getElementById('rem-sound')?.checked,
