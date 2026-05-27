@@ -589,29 +589,86 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
     
+    // Sync seguro de citas: hace MERGE cloud + local (no pierde citas locales
+    // que aún no se hayan subido) y actualiza localStorage. Devuelve número
+    // de citas tras el merge para mostrar feedback.
     window.syncAppointmentsFromCloud = async function() {
-        const doctor_id = localStorage.getItem('current_doctor_id');
-        if (!doctor_id) return;
+        const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+        const key = window.getAppointmentsKey ? window.getAppointmentsKey() : 'appointments_data';
         try {
-            const res = await fetch(`/api/appointments?doctor_id=${doctor_id}`);
+            const res = await fetch(`/api/appointments?doctor_id=${encodeURIComponent(doctor_id)}`, { cache: 'no-store' });
+            if (!res.ok) return null;
             const data = await res.json();
-            if (data.success && data.appointments) {
-                const appts = data.appointments.map(a => ({
-                    qsl: a.qsl_code,
-                    name: a.paciente_nombre,
-                    date: a.fecha.split('T')[0],
-                    time: a.hora,
-                    motivo: a.motivo || ''
-                }));
-                localStorage.setItem(window.getAppointmentsKey(), JSON.stringify(appts));
+            if (!data.success) return null;
+            const cloud = (data.appointments || []).map(a => ({
+                qsl: a.qsl_code,
+                name: a.paciente_nombre,
+                date: a.fecha ? String(a.fecha).slice(0, 10) : '',
+                time: a.hora,
+                motivo: a.motivo || ''
+            }));
+            const local = JSON.parse(localStorage.getItem(key) || '[]');
+            const keyOf = a => `${a.qsl}|${a.date}|${a.time}`;
+            const cloudKeys = new Set(cloud.map(keyOf));
+            const merged = [...cloud];
+            local.forEach(a => { if (!cloudKeys.has(keyOf(a))) merged.push(a); });
+            merged.sort((a, b) => new Date(a.date + 'T' + (a.time || '00:00')) - new Date(b.date + 'T' + (b.time || '00:00')));
+            localStorage.setItem(key, JSON.stringify(merged));
+            return merged.length;
+        } catch (e) { console.error('syncAppointmentsFromCloud:', e); return null; }
+    };
+
+    // Forzar sync completo: backfill local→cloud + pull cloud→local.
+    // Garantiza que la agenda muestra todo lo programado sin importar
+    // dónde se haya creado originalmente.
+    window.forceFullAppointmentSync = async function() {
+        try {
+            // Subir locales pendientes
+            const key = window.getAppointmentsKey ? window.getAppointmentsKey() : 'appointments_data';
+            const local = JSON.parse(localStorage.getItem(key) || '[]');
+            const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+            // Trae lo que está en cloud para no duplicar
+            let cloudKeys = new Set();
+            try {
+                const r = await fetch(`/api/appointments?doctor_id=${encodeURIComponent(doctor_id)}`, { cache: 'no-store' });
+                if (r.ok) {
+                    const j = await r.json();
+                    (j.appointments || []).forEach(a => {
+                        const d = a.fecha ? String(a.fecha).slice(0, 10) : '';
+                        cloudKeys.add(`${a.qsl_code}|${d}|${a.hora}`);
+                    });
+                }
+            } catch (e) {}
+            for (const a of local) {
+                if (cloudKeys.has(`${a.qsl}|${a.date}|${a.time}`)) continue;
+                try {
+                    await fetch('/api/appointments', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            doctor_id,
+                            qsl_code: a.qsl,
+                            paciente_nombre: a.name,
+                            fecha: a.date,
+                            hora: a.time,
+                            motivo: a.motivo || ''
+                        })
+                    });
+                } catch (e) {}
             }
-        } catch (e) { console.error('Initial Cloud sync failed', e); }
+            // Pull final con merge
+            return await window.syncAppointmentsFromCloud();
+        } catch (e) { console.error('forceFullAppointmentSync:', e); return null; }
     };
 
     // Called when clicking "Agendar Consultas"
-    window.renderScheduler = function() {
+    window.renderScheduler = async function() {
+        // Cloud-first: sube locales pendientes y baja del cloud antes de pintar
+        if (window.forceFullAppointmentSync) {
+            try { await window.forceFullAppointmentSync(); } catch (e) {}
+        }
         const appointments = window.getAppointments();
-        
+
         let year = currentCalDate.getFullYear();
         let month = currentCalDate.getMonth();
         
@@ -686,6 +743,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
                         <div style="display:flex;gap:10px;align-items:center;">
                             <button class="calendar-nav-btn" title="Hoy" onclick="window.currentCalDate = new Date(); window.renderScheduler();" style="width: auto; padding: 0 15px; font-weight:bold; font-size:14px;">HOY</button>
+                            <button id="btn-force-sync" title="Sube las citas locales pendientes a la nube y trae las que falten" onclick="window.handleForceSyncClick()" style="background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.4);color:#34d399;padding:0 15px;height:38px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px;">🔄 Sincronizar</button>
                             <button onclick="window.showPatientList()" style="background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.35);color:#60a5fa;padding:0 15px;height:38px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px;">👥 Lista de Pacientes</button>
                         </div>
                     <div class="calendar-grid" style="margin-bottom: 10px;">
@@ -1015,7 +1073,43 @@ document.addEventListener('DOMContentLoaded', () => {
         window.processQueueNotifications();
     };
 
-    window.renderDayDetail = function(dateStr) {
+    // Handler del botón "🔄 Sincronizar" — fuerza upload+download y re-renderiza
+    window.handleForceSyncClick = async function() {
+        const btn = document.getElementById('btn-force-sync');
+        const original = btn ? btn.innerHTML : null;
+        if (btn) {
+            btn.innerHTML = '⏳ Sincronizando...';
+            btn.disabled = true;
+            btn.style.opacity = '0.7';
+        }
+        try {
+            const count = await window.forceFullAppointmentSync();
+            // Re-render con datos frescos
+            if (typeof window.renderScheduler === 'function') {
+                await window.renderScheduler();
+            }
+            const msg = (count === null || count === undefined)
+                ? 'No se pudo conectar a la nube. Reintentar.'
+                : `Sincronización completa. ${count} cita${count === 1 ? '' : 's'} en la agenda.`;
+            if (typeof window.showElegantAlert === 'function') {
+                window.showElegantAlert('Sincronización', msg);
+            } else {
+                console.log('[DR-SISDEL]', msg);
+            }
+        } catch (e) {
+            console.error('handleForceSyncClick:', e);
+        } finally {
+            // El botón se recrea con renderScheduler — no es necesario restaurar
+            const after = document.getElementById('btn-force-sync');
+            if (after && original) { after.innerHTML = original; after.disabled = false; after.style.opacity = ''; }
+        }
+    };
+
+    window.renderDayDetail = async function(dateStr) {
+        // Cloud-first: garantiza que las citas del día están al día con la nube
+        if (window.forceFullAppointmentSync) {
+            try { await window.forceFullAppointmentSync(); } catch (e) {}
+        }
         const appointments = window.getAppointments();
         const dayAppts = appointments.filter(a => a.date === dateStr);
         
