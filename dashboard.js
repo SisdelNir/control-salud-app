@@ -1740,44 +1740,114 @@ function renderSection(name, data) {
             return active;
         }
 
-        // Trae citas del cloud al abrir (refuerza el polling) y re-renderiza
-        const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
-        fetch(`/api/appointments?doctor_id=${encodeURIComponent(doctor_id)}`)
-            .then(r => r.json())
-            .then(result => {
-                if (result.appointments && result.appointments.length > 0) {
-                    const cloud = result.appointments.map(a => ({
-                        qsl: a.qsl_code, name: a.paciente_nombre,
-                        date: a.fecha ? a.fecha.slice(0,10) : '', time: a.hora, motivo: a.motivo
-                    }));
-                    const key2 = window.getAppointmentsKey ? window.getAppointmentsKey() : 'appointments_data';
-                    const local = JSON.parse(localStorage.getItem(key2) || '[]');
-                    const merged = [...local];
-                    cloud.forEach(c => {
-                        if (!merged.find(m => m.qsl === c.qsl && m.date === c.date && m.time === c.time)) merged.push(c);
-                    });
-                    localStorage.setItem(key2, JSON.stringify(merged));
-                    if (document.getElementById('patient-list-overlay')) renderList(document.getElementById('pl-search')?.value?.toLowerCase() || '');
-                }
-            }).catch(() => {});
+        // ===================================================================
+        // 🩺 LISTA DE PACIENTES — Estado y carga desde el SERVIDOR (autoritativo)
+        // ===================================================================
+        // Antes: dependía de localStorage + sync opportunístico que fallaba
+        // de varias formas silenciosas (timeout sin avisar, doctor_id mismatch,
+        // string-compare de fechas, etc.). Resultado: "0 hoy + mañana" cuando
+        // sí había citas.
+        // Ahora: la fuente de verdad es /api/lista-pacientes/horizonte (calcula
+        // la ventana hoy+mañana con timezone MX y devuelve datos enriquecidos).
+        // Hay 3 estados visibles: loading / ok / error-con-fallback-a-local.
+        // ===================================================================
 
-        // Mientras el overlay esté abierto, refrescamos cada 15s (no toca red,
-        // solo re-lee localStorage que es alimentado por el polling global).
+        const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+        let _state = 'loading';            // 'loading' | 'ok' | 'error' | 'offline'
+        let _serverData = null;             // { pacientes, stats, ahora_mx } cuando llega
+        let _errorMsg = null;
+        let _consecutiveErrors = 0;
+        let _lastSyncTs = 0;
+
+        // Hace la petición al endpoint autoritativo. Devuelve { ok, data, error }.
+        async function loadFromServer() {
+            try {
+                const fetcher = window.fetchWithTimeout || ((u, o) => fetch(u, o));
+                const r = await fetcher(
+                    `/api/lista-pacientes/horizonte?doctor_id=${encodeURIComponent(doctor_id)}`,
+                    { cache: 'no-store' },
+                    10000
+                );
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                const j = await r.json();
+                if (!j.success) throw new Error(j.error || 'Server error');
+                return { ok: true, data: j };
+            } catch (e) {
+                return { ok: false, error: e?.message || String(e) };
+            }
+        }
+
+        // Wrapper: actualiza estado + re-renderiza
+        async function refresh() {
+            const result = await loadFromServer();
+            if (result.ok) {
+                _state = 'ok';
+                _serverData = result.data;
+                _consecutiveErrors = 0;
+                _lastSyncTs = Date.now();
+                _errorMsg = null;
+            } else {
+                _consecutiveErrors++;
+                _errorMsg = result.error;
+                _state = _consecutiveErrors >= 2 ? 'offline' : 'error';
+            }
+            if (document.getElementById('patient-list-overlay')) {
+                renderList(document.getElementById('pl-search')?.value?.toLowerCase() || '');
+            }
+        }
+
+        // Auto-refresh cada 30s mientras el overlay esté abierto
         if (window._patientListInterval) clearInterval(window._patientListInterval);
         window._patientListInterval = setInterval(() => {
             const overlay = document.getElementById('patient-list-overlay');
             if (!overlay) { clearInterval(window._patientListInterval); window._patientListInterval = null; return; }
-            renderList(document.getElementById('pl-search')?.value?.toLowerCase() || '');
-        }, 15000);
+            refresh();
+        }, 30000);
 
         const overlay = document.createElement('div');
         overlay.id = 'patient-list-overlay';
         overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.92);z-index:99999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(8px);padding:12px;box-sizing:border-box;';
 
+        // Botón global de reintento (expuesto para el botón inline del header)
+        window._plRetry = () => {
+            _state = 'loading';
+            _consecutiveErrors = 0;
+            renderList(document.getElementById('pl-search')?.value?.toLowerCase() || '');
+            refresh();
+        };
+
         const renderList = (q) => {
-            // Reconstruimos el array desde localStorage cada vez, así
-            // los datos (citas, recetas) reflejan el sync más reciente.
-            const patients = buildPatientsArray();
+            // Decide qué dataset usar según el estado actual:
+            //   - 'ok'      → datos frescos del servidor
+            //   - 'offline' → fallback a buildPatientsArray (localStorage)
+            //   - 'loading' / 'error' → arreglo vacío + mensaje
+            let patients = [];
+            let archivedCount = 0;
+            let headerText = '';
+            let diagLine = '';
+
+            if (_state === 'ok' && _serverData) {
+                patients = _serverData.pacientes || [];
+                const st = _serverData.stats || {};
+                headerText = `<b style="color:#60a5fa;">${patients.length}</b> hoy + mañana ${(()=>{const d=new Date();const t=new Date(d);t.setDate(t.getDate()+1);const f={weekday:'short',day:'2-digit',month:'short'};return `(${d.toLocaleDateString('es-ES',f)} → ${t.toLocaleDateString('es-ES',f)})`;})()}`;
+                if (st.expiradas > 0) headerText += ` &nbsp;·&nbsp; <span style="color:#c4b5fd;">${st.expiradas} en Historial</span>`;
+                const secAgo = Math.round((Date.now() - _lastSyncTs) / 1000);
+                diagLine = `📡 ${st.total_citas_doctor || 0} citas totales · ${st.hoy || 0} hoy · ${st.manana || 0} mañana · sync: hace ${secAgo}s`;
+            } else if (_state === 'offline') {
+                // Fallback: localStorage
+                patients = buildPatientsArray();
+                archivedCount = (patients._archived && patients._archived.length) || 0;
+                headerText = `<b style="color:#fbbf24;">${patients.length}</b> hoy + mañana <span style="color:#fbbf24;">(modo offline)</span>`;
+                if (archivedCount > 0) headerText += ` &nbsp;·&nbsp; <span style="color:#c4b5fd;">${archivedCount} en Historial</span>`;
+                diagLine = `⚠️ Sin conexión al servidor — mostrando datos locales. <a href="#" onclick="event.preventDefault(); window._plRetry();" style="color:#60a5fa;text-decoration:underline;">Reintentar</a>`;
+            } else if (_state === 'loading') {
+                headerText = `<span style="color:rgba(255,255,255,0.5);">⏳ Cargando agenda de 48h...</span>`;
+                diagLine = '';
+            } else { // error
+                headerText = `<span style="color:#f87171;">⚠️ No se pudo cargar</span> <button onclick="window._plRetry()" style="background:rgba(96,165,250,0.15);border:1px solid rgba(96,165,250,0.4);color:#60a5fa;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700;margin-left:8px;">🔄 Reintentar</button>`;
+                diagLine = _errorMsg ? `<span style="color:#f87171;">Error: ${_errorMsg}</span>` : '';
+            }
+
             const filtered = patients.filter(p =>
                 !q ||
                 p.name.toLowerCase().includes(q) ||
@@ -1810,8 +1880,9 @@ function renderSection(name, data) {
                         <div>
                             <h3 style="color:#60a5fa;margin:0;font-size:20px;display:flex;align-items:center;gap:8px;">👥 Lista de Pacientes</h3>
                             <p style="color:rgba(255,255,255,0.35);margin:4px 0 0;font-size:12px;">
-                                <b style="color:#60a5fa;">${patients.length}</b> hoy + mañana ${(()=>{const d=new Date();const t=new Date(d);t.setDate(t.getDate()+1);const f={weekday:'short',day:'2-digit',month:'short'};return `(${d.toLocaleDateString('es-ES',f)} → ${t.toLocaleDateString('es-ES',f)})`;})()}${patients._archived && patients._archived.length ? ` &nbsp;·&nbsp; <span style="color:#c4b5fd;">${patients._archived.length} en Historial</span>` : ''}
+                                ${headerText}
                             </p>
+                            ${diagLine ? `<p style="color:rgba(255,255,255,0.25);margin:3px 0 0;font-size:10px;font-family:'SF Mono',Menlo,monospace;">${diagLine}</p>` : ''}
                         </div>
                         <div style="display:flex; gap:12px;">
                             <button onclick="window.showMessagingCenter()" style="background:linear-gradient(135deg,rgba(16,185,129,0.2),rgba(16,185,129,0.05));border:1px solid rgba(16,185,129,0.4);border-radius:10px;padding:8px 16px;color:#34d399;font-size:14px;font-weight:700;display:flex;align-items:center;gap:6px;cursor:pointer;transition:transform 0.2s;" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='none'">
@@ -1877,8 +1948,11 @@ function renderSection(name, data) {
 
         window._plFilter = (q) => renderList(q);
 
+        // 1. Pintar overlay con estado 'loading'
         renderList('');
         document.body.appendChild(overlay);
+        // 2. Disparar carga del servidor inmediatamente (no bloqueante)
+        refresh();
     };
 
     // === Navegar a "Datos del Paciente" (tab overview) con paciente seleccionado ===

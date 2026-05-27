@@ -498,6 +498,210 @@ app.post('/api/settings/appearance', async (req, res) => {
     }
 });
 
+// =========================================================
+// LISTA DE PACIENTES — endpoints autoritativos
+// =========================================================
+// Resuelven el bug recurrente del módulo "Lista de Pacientes" (hoy + mañana)
+// devolviendo 0 aunque existan citas. El servidor es ÚNICA FUENTE DE VERDAD:
+// el cliente solo pinta lo que aquí devolvemos, sin depender de localStorage
+// ni de syncs que puedan fallar.
+//
+// Reglas de filtro (decisión del usuario):
+//   - HORIZONTE: cita aparece SI (cita_datetime + 24h > ahora) AND (cita_datetime <= fin_de_mañana)
+//     Cumple los dos requisitos a la vez: "hoy + mañana" Y "expira 24h después de la hora".
+//   - HISTORIAL: cita aparece SI (cita_datetime + 24h <= ahora) — la inversa.
+//
+// Timezone fija: America/Mexico_City (UTC-6, sin DST desde 2022).
+// =========================================================
+const MX_OFFSET_MS = 6 * 3600 * 1000; // México = UTC-6 todo el año
+
+// Devuelve los componentes Y/M/D de "ahora" según hora local de México.
+function nowInMx() {
+    const nowUtc = Date.now();
+    const d = new Date(nowUtc - MX_OFFSET_MS);
+    return {
+        nowUtc,
+        y: d.getUTCFullYear(),
+        m: d.getUTCMonth(),         // 0-indexed
+        d: d.getUTCDate(),
+        hh: d.getUTCHours(),
+        mm: d.getUTCMinutes()
+    };
+}
+
+// Convierte "YYYY-MM-DD" + "HH:MM" (interpretado como hora LOCAL de México)
+// a un timestamp UTC en ms. Permite comparar consistentemente con Date.now().
+function citaToUtcMs(fecha, hora) {
+    if (!fecha) return NaN;
+    const parts = String(fecha).slice(0, 10).split('-');
+    if (parts.length !== 3) return NaN;
+    const [y, m, d] = parts.map(Number);
+    const [hh, mm] = String(hora || '00:00').split(':').map(Number);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return NaN;
+    // MX local YYYY-MM-DD HH:MM == UTC YYYY-MM-DD (HH+6):MM
+    return Date.UTC(y, m - 1, d, (hh || 0) + 6, mm || 0, 0);
+}
+
+// Enriquece una cita con los datos del paciente (nombre, teléfono, flags, última receta).
+async function enrichCita(cita, todayMxMidnightUtcMs) {
+    const qsl = cita.qsl_code;
+    const pSnap = await db.collection(COLLECTIONS.pacientes).doc(qsl).get();
+    const pData = pSnap.exists ? (pSnap.data().data || {}) : {};
+    const consults = pData.consultations || [];
+    const lastConsult = consults[consults.length - 1];
+    let lastRx = 'Sin recetas previas';
+    if (pData.meds && pData.meds.length > 0) {
+        lastRx = '🏥 Ver Receta Asignada';
+    } else if (lastConsult) {
+        const rxText = String(lastConsult.referencias || lastConsult.observaciones || lastConsult.notas || '').trim();
+        if (rxText && rxText !== '=' && rxText !== '-') {
+            lastRx = '📝 ' + (rxText.length > 40 ? rxText.slice(0, 40) + '…' : rxText);
+        }
+    }
+    // Días respecto a hoy MX
+    const fparts = String(cita.fecha).slice(0, 10).split('-').map(Number);
+    const citaMidnight = Date.UTC(fparts[0], fparts[1] - 1, fparts[2]);
+    const dayDiff = Math.round((citaMidnight - todayMxMidnightUtcMs) / 86400000);
+    // Formato corto "DD mmm HH:MM"
+    const MESES = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+    const nextApptShort = `${String(fparts[2]).padStart(2,'0')} ${MESES[fparts[1]-1]} ${cita.hora}`;
+    return {
+        qsl,
+        name: pData.nombre_completo || cita.paciente_nombre || qsl,
+        telefono: pData.telefono || '—',
+        glucosa: !!pData.glucoseEnabled,
+        presion: !!pData.pressureEnabled,
+        nextAppt: nextApptShort,
+        nextApptDays: dayDiff,
+        lastRx,
+        fecha: cita.fecha,
+        hora: cita.hora,
+        motivo: cita.motivo || ''
+    };
+}
+
+// ----------------------------------------------------------
+// GET /api/lista-pacientes/horizonte?doctor_id=X
+// Devuelve los pacientes con cita en la ventana HOY + MAÑANA
+// (más 24h de gracia para citas pasadas hoy).
+// ----------------------------------------------------------
+app.get('/api/lista-pacientes/horizonte', async (req, res) => {
+    try {
+        const { doctor_id } = req.query;
+        if (!doctor_id) {
+            return res.status(400).json({ success: false, error: 'doctor_id requerido' });
+        }
+        const now = nowInMx();
+        // Medianoche de hoy en MX (para nextApptDays)
+        const todayMxMidnightUtcMs = Date.UTC(now.y, now.m, now.d);
+        // Fin de mañana en MX = (día + 2) a las 00:00 MX = (día + 2) a las 06:00 UTC menos 1ms
+        const endOfTomorrowUtcMs = Date.UTC(now.y, now.m, now.d + 2, 6, 0, 0) - 1;
+
+        const snap = await db.collection(COLLECTIONS.citas)
+            .where('doctor_id', '==', doctor_id)
+            .get();
+
+        const totalCitas = snap.size;
+        const inWindow = [];
+        let expired = 0;
+        let future = 0;
+
+        snap.docs.forEach(docSnap => {
+            const c = docSnap.data();
+            if (c.deleted) return;
+            const tsMs = citaToUtcMs(c.fecha, c.hora);
+            if (!Number.isFinite(tsMs)) return;
+            const tsPlus24 = tsMs + 24 * 3600 * 1000;
+            if (tsPlus24 <= now.nowUtc) { expired++; return; }
+            if (tsMs > endOfTomorrowUtcMs) { future++; return; }
+            inWindow.push({ id: docSnap.id, data: c, ts: tsMs });
+        });
+
+        // Una sola fila por paciente: nos quedamos con su cita MÁS PRÓXIMA
+        inWindow.sort((a, b) => a.ts - b.ts);
+        const byQsl = new Map();
+        for (const item of inWindow) {
+            if (!item.data.qsl_code) continue;
+            if (!byQsl.has(item.data.qsl_code)) byQsl.set(item.data.qsl_code, item);
+        }
+
+        // Enriquecer con datos de cada paciente (en paralelo)
+        const pacientes = await Promise.all(
+            Array.from(byQsl.values()).map(item => enrichCita(item.data, todayMxMidnightUtcMs))
+        );
+
+        // Conteos: hoy (dayDiff===0) y mañana (dayDiff===1) basados en la fecha de la cita
+        const hoyCount = pacientes.filter(p => p.nextApptDays === 0).length;
+        const mananaCount = pacientes.filter(p => p.nextApptDays === 1).length;
+
+        res.json({
+            success: true,
+            ahora_mx: `${now.y}-${String(now.m + 1).padStart(2, '0')}-${String(now.d).padStart(2, '0')} ${String(now.hh).padStart(2, '0')}:${String(now.mm).padStart(2, '0')}`,
+            stats: {
+                total_citas_doctor: totalCitas,
+                en_ventana: byQsl.size,
+                expiradas: expired,
+                futuras_fuera_ventana: future,
+                hoy: hoyCount,
+                manana: mananaCount
+            },
+            pacientes
+        });
+    } catch (err) {
+        console.error('/api/lista-pacientes/horizonte:', err);
+        res.status(500).json({ success: false, error: err.message || 'Database error' });
+    }
+});
+
+// ----------------------------------------------------------
+// GET /api/lista-pacientes/historial?doctor_id=X&dias=30
+// Devuelve citas EXPIRADAS (cita + 24h <= ahora) de los últimos N días.
+// ----------------------------------------------------------
+app.get('/api/lista-pacientes/historial', async (req, res) => {
+    try {
+        const { doctor_id } = req.query;
+        const dias = Math.min(parseInt(req.query.dias || '30', 10), 365);
+        if (!doctor_id) {
+            return res.status(400).json({ success: false, error: 'doctor_id requerido' });
+        }
+        const now = nowInMx();
+        const todayMxMidnightUtcMs = Date.UTC(now.y, now.m, now.d);
+        const desdeUtcMs = todayMxMidnightUtcMs - dias * 24 * 3600 * 1000;
+
+        const snap = await db.collection(COLLECTIONS.citas)
+            .where('doctor_id', '==', doctor_id)
+            .get();
+
+        const expiradas = [];
+        snap.docs.forEach(docSnap => {
+            const c = docSnap.data();
+            if (c.deleted) return;
+            const tsMs = citaToUtcMs(c.fecha, c.hora);
+            if (!Number.isFinite(tsMs)) return;
+            const tsPlus24 = tsMs + 24 * 3600 * 1000;
+            if (tsPlus24 > now.nowUtc) return;        // todavía está en Lista
+            if (tsMs < desdeUtcMs) return;            // demasiado antigua
+            expiradas.push({ data: c, ts: tsMs });
+        });
+
+        expiradas.sort((a, b) => b.ts - a.ts); // más reciente primero
+
+        const pacientes = await Promise.all(
+            expiradas.map(item => enrichCita(item.data, todayMxMidnightUtcMs))
+        );
+
+        res.json({
+            success: true,
+            ahora_mx: `${now.y}-${String(now.m + 1).padStart(2, '0')}-${String(now.d).padStart(2, '0')}`,
+            stats: { total: pacientes.length, dias_consultados: dias },
+            pacientes
+        });
+    } catch (err) {
+        console.error('/api/lista-pacientes/historial:', err);
+        res.status(500).json({ success: false, error: err.message || 'Database error' });
+    }
+});
+
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
