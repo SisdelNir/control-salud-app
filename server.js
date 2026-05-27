@@ -276,9 +276,25 @@ app.get('/api/appointments', async (req, res) => {
         const snap = await db.collection(COLLECTIONS.citas)
             .where('doctor_id', '==', doctor_id)
             .get();
-        const appointments = snap.docs
-            .filter(d => !d.data().deleted)  // excluir soft-deleted
-            .map(d => ({ id: d.id, ...d.data() }))
+        // Defensa: deduplicar por clave (qsl_code|fecha|hora) por si existen
+        // documentos duplicados antiguos (anteriores al fix de idempotencia).
+        // Para cada grupo nos quedamos con el más reciente.
+        const byKey = new Map();
+        snap.docs
+            .filter(d => !d.data().deleted)
+            .forEach(d => {
+                const data = d.data();
+                const key = `${data.qsl_code}|${data.fecha}|${data.hora}`;
+                const prev = byKey.get(key);
+                const tsNew = data.updated_at?.toMillis?.() || data.created_at?.toMillis?.() || 0;
+                if (!prev) {
+                    byKey.set(key, { doc: d, ts: tsNew });
+                } else if (tsNew > prev.ts) {
+                    byKey.set(key, { doc: d, ts: tsNew });
+                }
+            });
+        const appointments = Array.from(byKey.values())
+            .map(({ doc }) => ({ id: doc.id, ...doc.data() }))
             .sort((a, b) => {
                 if (a.fecha !== b.fecha) return a.fecha < b.fecha ? -1 : 1;
                 return a.hora < b.hora ? -1 : 1;
@@ -290,19 +306,43 @@ app.get('/api/appointments', async (req, res) => {
     }
 });
 
+// Crea o actualiza una cita usando un ID DETERMINÍSTICO basado en
+// doctor_id + qsl_code + fecha + hora. Esto hace al endpoint IDEMPOTENTE:
+// si el cliente reintenta la misma cita N veces (por errores de red,
+// doble click, etc.), siempre se escribe sobre el MISMO documento y no
+// se generan duplicados en Firestore. Reemplaza la versión anterior que
+// usaba .add() y producía un doc nuevo en cada reintento.
+function makeCitaId(doctor_id, qsl_code, fecha, hora) {
+    const safe = s => String(s || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+    return `${safe(doctor_id)}__${safe(qsl_code)}__${safe(fecha)}__${safe(hora)}`;
+}
+
 app.post('/api/appointments', async (req, res) => {
     try {
         const { doctor_id, qsl_code, paciente_nombre, fecha, hora, motivo } = req.body;
-        await db.collection(COLLECTIONS.citas).add({
+        if (!doctor_id || !qsl_code || !fecha || !hora) {
+            return res.status(400).json({ success: false, error: 'doctor_id, qsl_code, fecha y hora son requeridos' });
+        }
+        const id = makeCitaId(doctor_id, qsl_code, fecha, hora);
+        const ref = db.collection(COLLECTIONS.citas).doc(id);
+        const existing = await ref.get();
+        const payload = {
             doctor_id,
             qsl_code,
             paciente_nombre,
             fecha,
             hora,
-            motivo,
-            created_at: admin.firestore.FieldValue.serverTimestamp()
-        });
-        res.json({ success: true });
+            motivo: motivo || '',
+            // Resucitar si estaba soft-deleted (el cliente la está reagendando)
+            deleted: false,
+            deleted_at: admin.firestore.FieldValue.delete(),
+            updated_at: admin.firestore.FieldValue.serverTimestamp()
+        };
+        if (!existing.exists) {
+            payload.created_at = admin.firestore.FieldValue.serverTimestamp();
+        }
+        await ref.set(payload, { merge: true });
+        res.json({ success: true, id, created: !existing.exists });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, error: 'Database error' });
