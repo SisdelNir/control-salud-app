@@ -2604,12 +2604,40 @@ function renderSection(name, data) {
                     .sort((a,b) => new Date(a.date + 'T' + a.time) - new Date(b.date + 'T' + b.time))
                     .slice(0, 10);
 
-                    if(upcoming.length === 0) {
-                        // Sin citas hoy → mostrar pacientes recientes para acceso rápido
-                        const recent = patients.slice(-12).reverse();
-                        if (recent.length === 0) {
-                            return `<div style="text-align:center; padding: 40px; opacity: 0.5; font-size: 18px;">No hay citas agendadas próximas para el día de hoy. Utilice el buscador para encontrar un paciente.</div>`;
-                        }
+                    // Render que SIEMPRE muestra ambas secciones (si aplica):
+                    //   1. Próximas Citas para Hoy
+                    //   2. Pacientes Registrados (acceso rápido) — excluyendo los del paso 1
+                    let html = '';
+                    const qslsEnCitaHoy = new Set(upcoming.map(u => u.qsl));
+
+                    if (upcoming.length > 0) {
+                        const items = upcoming.map(u => `
+                            <div class="med-item" style="cursor:pointer; padding:18px 24px; background:linear-gradient(145deg, rgba(16,185,129,0.08), rgba(16,185,129,0.02)); border-left: 5px solid #10b981; border-radius: 12px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 15px rgba(0,0,0,0.1); border-right: 1px solid rgba(16,185,129,0.1); border-top: 1px solid rgba(16,185,129,0.1); border-bottom: 1px solid rgba(16,185,129,0.1);" onclick="window.selectPatientAndGoToConsultation('${u.qsl}')">
+                                <div class="med-info">
+                                    <h4 style="color:white; font-size:20px; font-weight: 600; margin-bottom: 6px;">${u.name}</h4>
+                                    <p style="color:rgba(255,255,255,0.6); font-size:14px; margin: 0;">ID: <b style="color:#10b981">${u.qsl}</b></p>
+                                </div>
+                                <div style="text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 8px;">
+                                    <div style="color: #10b981; font-size: 24px; font-weight: 700; background: rgba(16,185,129,0.1); padding: 8px 16px; border-radius: 8px; border: 1px solid rgba(16,185,129,0.2); display: inline-block;">
+                                        ⏰ ${u.time}
+                                    </div>
+                                    <div>
+                                        <span class="status-badge" style="background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.3); font-size: 12px; padding: 4px 10px;">Cita de Hoy</span>
+                                    </div>
+                                </div>
+                            </div>`).join('');
+                        html += `<div style="margin-bottom:25px;">
+                            <h4 style="color:#10b981; font-size:15px; text-transform:uppercase; letter-spacing:1px; margin-bottom:16px; display:flex; align-items:center; gap:8px;">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                Próximas Citas para Hoy (${upcoming.length})
+                            </h4>
+                            <div>${items}</div>
+                        </div>`;
+                    }
+
+                    // SIEMPRE mostrar pacientes registrados (excluyendo los ya listados arriba)
+                    const recent = patients.filter(qsl => !qslsEnCitaHoy.has(qsl)).slice(-20).reverse();
+                    if (recent.length > 0) {
                         const recentItems = recent.map(qsl => {
                             const pd = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}');
                             const nm = pd.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || qsl;
@@ -2622,39 +2650,22 @@ function renderSection(name, data) {
                                 <span class="status-badge" style="background:rgba(59,130,246,0.12); color:#60a5fa; border:1px solid rgba(59,130,246,0.3); font-size: 12px; padding: 6px 12px;">Abrir Consulta</span>
                             </div>`;
                         }).join('');
-                        return `<div style="margin-bottom:25px;">
+                        html += `<div style="margin-bottom:25px;">
                             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
                                 <h4 style="color:#60a5fa; font-size:15px; text-transform:uppercase; letter-spacing:1px; margin:0; display:flex; align-items:center; gap:8px;">
                                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
                                     Pacientes Registrados (acceso rápido)
                                 </h4>
-                                <span style="color:rgba(255,255,255,0.35); font-size:12px;">Sin citas para hoy — Mostrando últimos ${recent.length}</span>
+                                <span style="color:rgba(255,255,255,0.35); font-size:12px;">Mostrando ${recent.length} pacientes${upcoming.length ? ' (sin contar los de cita de hoy)' : ''}</span>
                             </div>
                             <div>${recentItems}</div>
                         </div>`;
                     }
-                    const items = upcoming.map(u => `
-                        <div class="med-item" style="cursor:pointer; padding:18px 24px; background:linear-gradient(145deg, rgba(16,185,129,0.08), rgba(16,185,129,0.02)); border-left: 5px solid #10b981; border-radius: 12px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 15px rgba(0,0,0,0.1); border-right: 1px solid rgba(16,185,129,0.1); border-top: 1px solid rgba(16,185,129,0.1); border-bottom: 1px solid rgba(16,185,129,0.1);" onclick="window.selectPatientAndGoToConsultation('${u.qsl}')">
-                            <div class="med-info">
-                                <h4 style="color:white; font-size:20px; font-weight: 600; margin-bottom: 6px;">${u.name}</h4>
-                                <p style="color:rgba(255,255,255,0.6); font-size:14px; margin: 0;">ID: <b style="color:#10b981">${u.qsl}</b></p>
-                            </div>
-                            <div style="text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 8px;">
-                                <div style="color: #10b981; font-size: 24px; font-weight: 700; background: rgba(16,185,129,0.1); padding: 8px 16px; border-radius: 8px; border: 1px solid rgba(16,185,129,0.2); display: inline-block;">
-                                    ⏰ ${u.time}
-                                </div>
-                                <div>
-                                    <span class="status-badge" style="background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.3); font-size: 12px; padding: 4px 10px;">Cita de Hoy</span>
-                                </div>
-                            </div>
-                        </div>`).join('');
-                    return `<div style="margin-bottom:25px;">
-                        <h4 style="color:#10b981; font-size:15px; text-transform:uppercase; letter-spacing:1px; margin-bottom:16px; display:flex; align-items:center; gap:8px;">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                            Próximas Citas para Hoy
-                        </h4>
-                        <div>${items}</div>
-                    </div>`;
+
+                    if (!html) {
+                        html = `<div style="text-align:center; padding: 40px; opacity: 0.5; font-size: 18px;">Aún no hay pacientes registrados. Utilice el botón "Datos del Paciente" para registrar uno.</div>`;
+                    }
+                    return html;
                 })()}
                 </div>
 
