@@ -7725,14 +7725,16 @@ function renderSection(name, data) {
         const generalLabel = (dl.getAttribute('data-general-label') || '— Sin paciente —').replace(/&quot;/g, '"');
 
         let html = '';
+        let rowIdx = 0;
         if (generalOn) {
             const genJS = generalLabel.replace(/'/g, "\\'");
             html += `
-                <div class="sps-row" onclick="window._spsPick('${id}', '', '${genJS}')"
+                <div class="sps-row" data-sps-idx="${rowIdx}" onclick="window._spsPick('${id}', '', '${genJS}')"
                     style="padding:10px 14px; cursor:pointer; color:rgba(255,255,255,0.6); font-style:italic; border-bottom:1px solid rgba(255,255,255,0.06);"
-                    onmouseover="this.style.background='rgba(96,165,250,0.1)';" onmouseout="this.style.background='transparent';">
+                    onmouseover="window._spsHover('${id}', ${rowIdx})">
                     ${generalLabel}
                 </div>`;
+            rowIdx++;
         }
 
         if (filtered.length === 0) {
@@ -7744,10 +7746,11 @@ function renderSection(name, data) {
                 const safeName = (p.nombre || '').replace(/'/g, "\\'");
                 const sub = [p.qsl, p.telefono && `📞 ${p.telefono}`, p.id_identificacion && `🪪 ${p.id_identificacion}`]
                     .filter(Boolean).join(' · ');
+                const myIdx = rowIdx++;
                 return `
-                <div class="sps-row" onclick="window._spsPick('${id}', '${p.qsl}', '${safeName}')"
+                <div class="sps-row" data-sps-idx="${myIdx}" onclick="window._spsPick('${id}', '${p.qsl}', '${safeName}')"
                     style="padding:10px 14px; cursor:pointer; border-bottom:1px solid rgba(255,255,255,0.04);"
-                    onmouseover="this.style.background='rgba(96,165,250,0.12)';" onmouseout="this.style.background='transparent';">
+                    onmouseover="window._spsHover('${id}', ${myIdx})">
                     <div style="color:white; font-size:14px; font-weight:600;">${p.nombre}</div>
                     <div style="color:rgba(255,255,255,0.5); font-size:11px; margin-top:2px;">${sub}</div>
                 </div>`;
@@ -7756,7 +7759,55 @@ function renderSection(name, data) {
 
         dl.innerHTML = html;
         dl.style.display = 'block';
+
+        // Resaltar el primer item (índice 0) para que Enter funcione inmediatamente
+        // sin que el usuario tenga que pulsar la flecha primero.
+        dl.setAttribute('data-active-idx', '0');
+        _spsApplyHighlight(id);
+
+        // Pequeña ayuda en el panel
+        if (!dl.querySelector('.sps-hint')) {
+            const hint = document.createElement('div');
+            hint.className = 'sps-hint';
+            hint.style.cssText = 'padding:6px 12px; font-size:10px; color:rgba(255,255,255,0.3); text-transform:uppercase; letter-spacing:0.5px; border-top:1px solid rgba(255,255,255,0.05); background:rgba(0,0,0,0.3); text-align:center;';
+            hint.innerHTML = '↑↓ Navegar &nbsp;·&nbsp; ↵ Seleccionar &nbsp;·&nbsp; Esc Cerrar';
+            dl.appendChild(hint);
+        }
     }
+
+    // Aplica el estilo de "fila activa" según data-active-idx
+    function _spsApplyHighlight(id) {
+        const dl = document.getElementById(id + '-list');
+        if (!dl) return;
+        const activeIdx = parseInt(dl.getAttribute('data-active-idx') || '-1', 10);
+        dl.querySelectorAll('.sps-row').forEach(row => {
+            const idx = parseInt(row.getAttribute('data-sps-idx'), 10);
+            if (idx === activeIdx) {
+                row.style.background = 'linear-gradient(90deg, rgba(96,165,250,0.25), rgba(96,165,250,0.12))';
+                row.style.borderLeft = '3px solid #60a5fa';
+                row.style.paddingLeft = '11px';
+                // Scroll hasta el item si no es visible
+                const dlRect = dl.getBoundingClientRect();
+                const rowRect = row.getBoundingClientRect();
+                if (rowRect.bottom > dlRect.bottom) {
+                    dl.scrollTop += rowRect.bottom - dlRect.bottom + 4;
+                } else if (rowRect.top < dlRect.top) {
+                    dl.scrollTop -= dlRect.top - rowRect.top + 4;
+                }
+            } else {
+                row.style.background = 'transparent';
+                row.style.borderLeft = '';
+                row.style.paddingLeft = '14px';
+            }
+        });
+    }
+
+    window._spsHover = function(id, idx) {
+        const dl = document.getElementById(id + '-list');
+        if (!dl) return;
+        dl.setAttribute('data-active-idx', String(idx));
+        _spsApplyHighlight(id);
+    };
 
     window._spsOnFocus = function(id) { _spsRender(id, document.getElementById(id + '-search')?.value || ''); };
     window._spsOnInput = function(id) {
@@ -7771,9 +7822,52 @@ function renderSection(name, data) {
         _spsRender(id, v);
     };
     window._spsOnKey = function(id, e) {
+        const dl = document.getElementById(id + '-list');
+        if (!dl) return;
+        const isOpen = dl.style.display !== 'none' && dl.style.display !== '';
+
         if (e.key === 'Escape') {
-            const dl = document.getElementById(id + '-list');
-            if (dl) dl.style.display = 'none';
+            dl.style.display = 'none';
+            return;
+        }
+
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            if (!isOpen) { _spsRender(id, document.getElementById(id + '-search')?.value || ''); return; }
+            const rows = dl.querySelectorAll('.sps-row');
+            if (rows.length === 0) return;
+            const cur = parseInt(dl.getAttribute('data-active-idx') || '-1', 10);
+            const next = (cur + 1) % rows.length;
+            dl.setAttribute('data-active-idx', String(next));
+            _spsApplyHighlight(id);
+            return;
+        }
+
+        if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (!isOpen) return;
+            const rows = dl.querySelectorAll('.sps-row');
+            if (rows.length === 0) return;
+            const cur = parseInt(dl.getAttribute('data-active-idx') || '0', 10);
+            const prev = cur <= 0 ? rows.length - 1 : cur - 1;
+            dl.setAttribute('data-active-idx', String(prev));
+            _spsApplyHighlight(id);
+            return;
+        }
+
+        if (e.key === 'Enter') {
+            if (!isOpen) return;
+            e.preventDefault();
+            const activeIdx = parseInt(dl.getAttribute('data-active-idx') || '-1', 10);
+            const row = dl.querySelector(`.sps-row[data-sps-idx="${activeIdx}"]`);
+            if (row) {
+                row.click();
+            } else {
+                // Si no hay nada destacado, seleccionar el primer resultado
+                const first = dl.querySelector('.sps-row');
+                if (first) first.click();
+            }
+            return;
         }
     };
     window._spsPick = function(id, qsl, nombre) {
