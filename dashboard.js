@@ -7795,6 +7795,7 @@ function renderSection(name, data) {
 
         let html = '';
         let rowIdx = 0;
+        let firstPatientIdx = -1; // índice de la primera fila de paciente real
         if (generalOn) {
             const genJS = generalLabel.replace(/'/g, "\\'");
             html += `
@@ -7811,6 +7812,7 @@ function renderSection(name, data) {
                 ${pacientes.length === 0 ? 'No hay pacientes registrados.' : 'No se encontraron pacientes con ese criterio.'}
             </div>`;
         } else {
+            firstPatientIdx = rowIdx; // primer paciente real (después de la opción general si existe)
             html += filtered.map(p => {
                 const safeName = (p.nombre || '').replace(/'/g, "\\'");
                 const sub = [p.qsl, p.telefono && `📞 ${p.telefono}`, p.id_identificacion && `🪪 ${p.id_identificacion}`]
@@ -7829,9 +7831,16 @@ function renderSection(name, data) {
         dl.innerHTML = html;
         dl.style.display = 'block';
 
-        // Resaltar el primer item (índice 0) para que Enter funcione inmediatamente
-        // sin que el usuario tenga que pulsar la flecha primero.
-        dl.setAttribute('data-active-idx', '0');
+        // Lógica de resaltado inicial:
+        //   - Búsqueda vacía → SIN resaltado (-1). Enter no hace nada hasta que el usuario
+        //     navegue con flechas o escriba algo. Evita seleccionar "sin paciente"
+        //     accidentalmente al abrir el panel.
+        //   - Búsqueda con texto y hay coincidencias → resalta el PRIMER PACIENTE real
+        //     (no la opción general). Así Enter inserta directamente el paciente que
+        //     se está viendo en la lista.
+        //   - Búsqueda con texto sin coincidencias → sin resaltado (-1).
+        const initialIdx = (q.length > 0 && firstPatientIdx >= 0) ? firstPatientIdx : -1;
+        dl.setAttribute('data-active-idx', String(initialIdx));
         _spsApplyHighlight(id);
 
         // Pequeña ayuda en el panel
@@ -7946,15 +7955,24 @@ function renderSection(name, data) {
 
         if (e.key === 'Enter') {
             if (!isOpen) return;
-            e.preventDefault();
             const activeIdx = parseInt(dl.getAttribute('data-active-idx') || '-1', 10);
-            const row = dl.querySelector(`.sps-row[data-sps-idx="${activeIdx}"]`);
+            const row = activeIdx >= 0 ? dl.querySelector(`.sps-row[data-sps-idx="${activeIdx}"]`) : null;
             if (row) {
+                // Hay algo resaltado → seleccionarlo
+                e.preventDefault();
                 row.click();
             } else {
-                // Si no hay nada destacado, seleccionar el primer resultado
-                const first = dl.querySelector('.sps-row');
-                if (first) first.click();
+                // Sin nada resaltado: si hay UN solo paciente visible (no la opción general),
+                // selecciónalo. Si hay varios o ninguno, no hagas nada (que Enter no
+                // tenga comportamiento ambiguo cuando el campo está vacío).
+                const patientRows = Array.from(dl.querySelectorAll('.sps-row')).filter(r => {
+                    // Excluir la opción "general" (la fila con estilo en itálica)
+                    return r.style.fontStyle !== 'italic';
+                });
+                if (patientRows.length === 1) {
+                    e.preventDefault();
+                    patientRows[0].click();
+                }
             }
             return;
         }
