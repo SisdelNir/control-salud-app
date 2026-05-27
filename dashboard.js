@@ -8468,20 +8468,37 @@ function renderSection(name, data) {
         const margen = saldo >= 0 ? '+' : '';
         const saldoColor = saldo >= 0 ? '#10b981' : '#f87171';
 
-        // Tabla detallada de TODAS las transacciones
+        // ===== Tabla estilo EXCEL: columnas separadas Ingreso / Egreso / Cargo / Saldo Acumulado =====
+        // El saldo acumulado se calcula fila por fila (running balance).
+        let _runSaldo = 0;
         const txsHtml = txs.map(t => {
-            let badge, color, label;
-            if (t.tipo === 'income') { badge = '💚 INGRESO'; color = '#10b981'; label = `+ ${_formatMoney(t.monto)}`; }
-            else if (t.tipo === 'expense') { badge = '💸 EGRESO'; color = '#f87171'; label = `- ${_formatMoney(t.monto)}`; }
-            else { badge = '⏳ CARGO'; color = '#fbbf24'; label = _formatMoney(t.monto); }
+            const monto = parseFloat(t.monto) || 0;
+            let tipoBadge, tipoColor, colIng = '', colEgr = '', colCar = '';
+            if (t.tipo === 'income') {
+                tipoBadge = '💚 INGRESO'; tipoColor = '#10b981';
+                colIng = `<span style="color:#10b981;font-weight:800;">${_formatMoney(monto)}</span>`;
+                _runSaldo += monto;
+            } else if (t.tipo === 'expense') {
+                tipoBadge = '💸 EGRESO'; tipoColor = '#f87171';
+                colEgr = `<span style="color:#f87171;font-weight:800;">${_formatMoney(monto)}</span>`;
+                _runSaldo -= monto;
+            } else {
+                tipoBadge = '⏳ CARGO'; tipoColor = '#fbbf24';
+                colCar = `<span style="color:#fbbf24;font-weight:800;">${_formatMoney(monto)}</span>`;
+                // Los cargos no afectan saldo realizado (solo cuentas por cobrar)
+            }
+            const saldoColorRow = _runSaldo >= 0 ? '#10b981' : '#f87171';
             return `
             <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.75);">${t.fecha || '—'} ${t.hora || ''}</td>
-                <td style="padding:8px 12px;font-size:11px;font-weight:700;color:${color};">${badge}</td>
+                <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.75);white-space:nowrap;">${t.fecha || '—'} ${t.hora || ''}</td>
+                <td style="padding:8px 12px;font-size:11px;font-weight:700;color:${tipoColor};white-space:nowrap;">${tipoBadge}</td>
                 <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.7);">${t.paciente_nombre || t.proveedor || '—'}</td>
                 <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.7);">${t.concepto || '—'}</td>
                 <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.6);">${t.metodo_pago || t.categoria || '—'}</td>
-                <td style="padding:8px 12px;text-align:right;font-size:13px;color:${color};font-weight:800;">${label}</td>
+                <td style="padding:8px 12px;text-align:right;font-size:13px;">${colIng || '<span style="color:rgba(255,255,255,0.15);">—</span>'}</td>
+                <td style="padding:8px 12px;text-align:right;font-size:13px;">${colEgr || '<span style="color:rgba(255,255,255,0.15);">—</span>'}</td>
+                <td style="padding:8px 12px;text-align:right;font-size:13px;">${colCar || '<span style="color:rgba(255,255,255,0.15);">—</span>'}</td>
+                <td style="padding:8px 12px;text-align:right;font-size:13px;color:${saldoColorRow};font-weight:800;white-space:nowrap;">${_runSaldo >= 0 ? '+' : ''}${_formatMoney(_runSaldo)}</td>
             </tr>`;
         }).join('');
 
@@ -8517,32 +8534,35 @@ function renderSection(name, data) {
                 ${hasPriv('exportar_estados') ? '<button onclick="window._imprimirEstado()" style="background:linear-gradient(135deg,#7c3aed,#a78bfa); color:white; border:none; padding:12px 24px; border-radius:12px; cursor:pointer; font-weight:800; font-size:13px; display:flex; align-items:center; gap:8px;">🖨️ Imprimir / PDF</button>' : ''}
             </div>
 
-            <!-- TRES TARJETAS GRANDES: INGRESOS · EGRESOS · SALDO -->
-            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:16px; margin-bottom:28px;">
-
-                <!-- INGRESOS -->
-                <div style="background:linear-gradient(135deg, rgba(16,185,129,0.12), rgba(16,185,129,0.04)); border:1px solid rgba(16,185,129,0.4); border-radius:16px; padding:22px; position:relative; overflow:hidden;">
-                    <div style="position:absolute; top:-20px; right:-20px; font-size:90px; opacity:0.08;">💚</div>
-                    <p style="color:#34d399; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1.5px; margin:0 0 10px;">INGRESOS</p>
-                    <h2 style="color:#10b981; font-size:30px; font-weight:900; margin:0 0 6px; letter-spacing:-0.5px;">${_formatMoney(totIngresos)}</h2>
-                    <p style="color:rgba(255,255,255,0.5); font-size:12px; margin:0;">${ingresos.length} movimiento${ingresos.length !== 1 ? 's' : ''} de cobro</p>
-                </div>
-
-                <!-- EGRESOS -->
-                <div style="background:linear-gradient(135deg, rgba(239,68,68,0.12), rgba(239,68,68,0.04)); border:1px solid rgba(239,68,68,0.4); border-radius:16px; padding:22px; position:relative; overflow:hidden;">
-                    <div style="position:absolute; top:-20px; right:-20px; font-size:90px; opacity:0.08;">💸</div>
-                    <p style="color:#fca5a5; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1.5px; margin:0 0 10px;">EGRESOS</p>
-                    <h2 style="color:#f87171; font-size:30px; font-weight:900; margin:0 0 6px; letter-spacing:-0.5px;">${_formatMoney(totEgresos)}</h2>
-                    <p style="color:rgba(255,255,255,0.5); font-size:12px; margin:0;">${egresos.length} movimiento${egresos.length !== 1 ? 's' : ''} de gasto</p>
-                </div>
-
-                <!-- SALDO NETO -->
-                <div style="background:linear-gradient(135deg, ${saldo >= 0 ? 'rgba(99,102,241,0.18)' : 'rgba(239,68,68,0.18)'}, rgba(99,102,241,0.04)); border:1px solid ${saldoColor}55; border-radius:16px; padding:22px; position:relative; overflow:hidden;">
-                    <div style="position:absolute; top:-20px; right:-20px; font-size:90px; opacity:0.08;">${saldo >= 0 ? '📊' : '⚠️'}</div>
-                    <p style="color:${saldoColor}; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1.5px; margin:0 0 10px;">SALDO ${saldo >= 0 ? '(UTILIDAD)' : '(PÉRDIDA)'}</p>
-                    <h2 style="color:${saldoColor}; font-size:32px; font-weight:900; margin:0 0 6px; letter-spacing:-0.5px;">${margen}${_formatMoney(saldo)}</h2>
-                    <p style="color:rgba(255,255,255,0.5); font-size:12px; margin:0;">Ingresos − Egresos del periodo</p>
-                </div>
+            <!-- RESUMEN ESTILO EXCEL: una sola tabla compacta con columnas y totales -->
+            <div style="border:1px solid rgba(167,139,250,0.25); border-radius:12px; overflow:hidden; margin-bottom:24px;">
+                <table style="width:100%; border-collapse:collapse;">
+                    <thead style="background:rgba(167,139,250,0.12);">
+                        <tr>
+                            <th style="padding:11px 14px; text-align:left; font-size:10px; color:rgba(255,255,255,0.7); text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.05);">Resumen</th>
+                            <th style="padding:11px 14px; text-align:right; font-size:10px; color:#34d399; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.05);">💚 Ingresos</th>
+                            <th style="padding:11px 14px; text-align:right; font-size:10px; color:#fca5a5; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.05);">💸 Egresos</th>
+                            <th style="padding:11px 14px; text-align:right; font-size:10px; color:#fbbf24; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.05);">⏳ Cargos pend.</th>
+                            <th style="padding:11px 14px; text-align:right; font-size:10px; color:${saldoColor}; text-transform:uppercase; letter-spacing:1px;">${saldo >= 0 ? '📊 Saldo (Utilidad)' : '⚠️ Saldo (Pérdida)'}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr style="background:rgba(0,0,0,0.15);">
+                            <td style="padding:14px; font-size:12px; color:rgba(255,255,255,0.8); font-weight:700; border-right:1px solid rgba(255,255,255,0.05);">Total del periodo</td>
+                            <td style="padding:14px; text-align:right; font-size:18px; color:#10b981; font-weight:900; border-right:1px solid rgba(255,255,255,0.05);">${_formatMoney(totIngresos)}</td>
+                            <td style="padding:14px; text-align:right; font-size:18px; color:#f87171; font-weight:900; border-right:1px solid rgba(255,255,255,0.05);">${_formatMoney(totEgresos)}</td>
+                            <td style="padding:14px; text-align:right; font-size:18px; color:#fbbf24; font-weight:900; border-right:1px solid rgba(255,255,255,0.05);">${_formatMoney(cargosPendientes)}</td>
+                            <td style="padding:14px; text-align:right; font-size:20px; color:${saldoColor}; font-weight:900;">${margen}${_formatMoney(saldo)}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding:8px 14px; font-size:11px; color:rgba(255,255,255,0.45); border-right:1px solid rgba(255,255,255,0.05);">Cantidad de movimientos</td>
+                            <td style="padding:8px 14px; text-align:right; font-size:11px; color:rgba(255,255,255,0.45); border-right:1px solid rgba(255,255,255,0.05);">${ingresos.length}</td>
+                            <td style="padding:8px 14px; text-align:right; font-size:11px; color:rgba(255,255,255,0.45); border-right:1px solid rgba(255,255,255,0.05);">${egresos.length}</td>
+                            <td style="padding:8px 14px; text-align:right; font-size:11px; color:rgba(255,255,255,0.45); border-right:1px solid rgba(255,255,255,0.05);">${cargos.filter(c => c.estado === 'pending').length}</td>
+                            <td style="padding:8px 14px; text-align:right; font-size:11px; color:rgba(255,255,255,0.45);">Ingresos − Egresos</td>
+                        </tr>
+                    </tbody>
+                </table>
             </div>
 
             <!-- BLOQUE INFO: CARGOS PENDIENTES (cuentas por cobrar) -->
@@ -8570,24 +8590,30 @@ function renderSection(name, data) {
                 </div>
             </div>
 
-            <!-- DETALLE COMPLETO DE TRANSACCIONES -->
+            <!-- DETALLE COMPLETO DE TRANSACCIONES (estilo Excel: columnas separadas + totales por columna) -->
             <h4 style="color:white; font-size:14px; font-weight:800; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px;">📋 Detalle de Movimientos (${txs.length})</h4>
-            <div style="border:1px solid rgba(255,255,255,0.06); border-radius:12px; overflow:auto;">
-                <table style="width:100%; border-collapse:collapse;">
-                    <thead style="background:rgba(167,139,250,0.08); position:sticky; top:0;">
+            <div style="border:1px solid rgba(255,255,255,0.08); border-radius:12px; overflow:auto;">
+                <table style="width:100%; border-collapse:collapse; min-width:900px;">
+                    <thead style="background:rgba(167,139,250,0.12); position:sticky; top:0;">
                         <tr>
-                            <th style="padding:11px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Fecha</th>
-                            <th style="padding:11px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Tipo</th>
-                            <th style="padding:11px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Cliente / Proveedor</th>
-                            <th style="padding:11px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Concepto</th>
-                            <th style="padding:11px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Método/Cat.</th>
-                            <th style="padding:11px 12px;text-align:right;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Monto</th>
+                            <th style="padding:11px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Fecha</th>
+                            <th style="padding:11px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Tipo</th>
+                            <th style="padding:11px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Cliente / Proveedor</th>
+                            <th style="padding:11px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Concepto</th>
+                            <th style="padding:11px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Método/Cat.</th>
+                            <th style="padding:11px 12px;text-align:right;font-size:10px;color:#34d399;text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Ingreso</th>
+                            <th style="padding:11px 12px;text-align:right;font-size:10px;color:#fca5a5;text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Egreso</th>
+                            <th style="padding:11px 12px;text-align:right;font-size:10px;color:#fbbf24;text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Cargo</th>
+                            <th style="padding:11px 12px;text-align:right;font-size:10px;color:rgba(255,255,255,0.85);text-transform:uppercase;letter-spacing:1px;">Saldo Acum.</th>
                         </tr>
                     </thead>
                     <tbody>${txsHtml}</tbody>
-                    <tfoot style="background:rgba(167,139,250,0.06);">
+                    <tfoot style="background:rgba(167,139,250,0.1); border-top:2px solid rgba(167,139,250,0.3);">
                         <tr>
-                            <td colspan="5" style="padding:14px 12px; font-weight:800; color:white; font-size:13px;">SALDO NETO DEL PERIODO</td>
+                            <td colspan="5" style="padding:14px 12px; font-weight:800; color:white; font-size:12px; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.04);">TOTALES</td>
+                            <td style="padding:14px 12px; text-align:right; font-weight:900; color:#10b981; font-size:14px; border-right:1px solid rgba(255,255,255,0.04);">${_formatMoney(totIngresos)}</td>
+                            <td style="padding:14px 12px; text-align:right; font-weight:900; color:#f87171; font-size:14px; border-right:1px solid rgba(255,255,255,0.04);">${_formatMoney(totEgresos)}</td>
+                            <td style="padding:14px 12px; text-align:right; font-weight:900; color:#fbbf24; font-size:14px; border-right:1px solid rgba(255,255,255,0.04);">${_formatMoney(totCargos)}</td>
                             <td style="padding:14px 12px; text-align:right; font-weight:900; color:${saldoColor}; font-size:18px;">${margen}${_formatMoney(saldo)}</td>
                         </tr>
                     </tfoot>
@@ -8612,27 +8638,36 @@ function renderSection(name, data) {
             return true;
         }).sort((a, b) => ((a.fecha || '') + 'T' + (a.hora || '00:00')).localeCompare((b.fecha || '') + 'T' + (b.hora || '00:00')));
 
+        // Estilo Excel: una columna por tipo + saldo acumulado (running balance)
         let saldo = 0;
         const rows = txs.map(t => {
-            const ingreso = (t.tipo === 'income') ? (parseFloat(t.monto) || 0) : 0;
-            const egreso = (t.tipo === 'expense' || t.tipo === 'charge') ? (parseFloat(t.monto) || 0) : 0;
+            const monto = parseFloat(t.monto) || 0;
+            const ingreso = (t.tipo === 'income') ? monto : 0;
+            const egreso = (t.tipo === 'expense') ? monto : 0;
+            const cargo = (t.tipo === 'charge') ? monto : 0;
+            // Solo ingresos y egresos afectan el saldo realizado.
+            // Los cargos son cuentas por cobrar pendientes (no realizadas aún).
             saldo += ingreso - egreso;
-            const tipoLabel = t.tipo === 'income' ? '✓ Pago' : (t.tipo === 'expense' ? '↑ Egreso' : '○ Cargo');
-            const color = t.tipo === 'income' ? '#10b981' : '#f87171';
+            const tipoLabel = t.tipo === 'income' ? '💚 Pago' : (t.tipo === 'expense' ? '💸 Egreso' : '⏳ Cargo');
+            const tipoColor = t.tipo === 'income' ? '#10b981' : (t.tipo === 'expense' ? '#f87171' : '#fbbf24');
             return `
                 <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                    <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.8);">${t.fecha || '—'}</td>
-                    <td style="padding:8px 12px;font-size:12px;color:${color};font-weight:600;">${tipoLabel}</td>
-                    <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.7);">${t.paciente_nombre || t.proveedor || '—'}</td>
-                    <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.7);">${t.concepto || '—'}</td>
-                    <td style="padding:8px 12px;text-align:right;font-size:12px;color:${color};font-weight:700;">${_formatMoney(t.monto)}</td>
-                    <td style="padding:8px 12px;text-align:right;font-size:12px;color:${saldo >= 0 ? '#10b981' : '#f87171'};font-weight:700;">${_formatMoney(saldo)}</td>
+                    <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.8);white-space:nowrap;border-right:1px solid rgba(255,255,255,0.03);">${t.fecha || '—'} ${t.hora || ''}</td>
+                    <td style="padding:8px 12px;font-size:11px;color:${tipoColor};font-weight:700;white-space:nowrap;border-right:1px solid rgba(255,255,255,0.03);">${tipoLabel}</td>
+                    <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.7);border-right:1px solid rgba(255,255,255,0.03);">${t.paciente_nombre || t.proveedor || '—'}</td>
+                    <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.7);border-right:1px solid rgba(255,255,255,0.03);">${t.concepto || '—'}</td>
+                    <td style="padding:8px 12px;text-align:right;font-size:12px;border-right:1px solid rgba(255,255,255,0.03);">${ingreso > 0 ? `<span style="color:#10b981;font-weight:800;">${_formatMoney(ingreso)}</span>` : '<span style="color:rgba(255,255,255,0.15);">—</span>'}</td>
+                    <td style="padding:8px 12px;text-align:right;font-size:12px;border-right:1px solid rgba(255,255,255,0.03);">${egreso > 0 ? `<span style="color:#f87171;font-weight:800;">${_formatMoney(egreso)}</span>` : '<span style="color:rgba(255,255,255,0.15);">—</span>'}</td>
+                    <td style="padding:8px 12px;text-align:right;font-size:12px;border-right:1px solid rgba(255,255,255,0.03);">${cargo > 0 ? `<span style="color:#fbbf24;font-weight:800;">${_formatMoney(cargo)}</span>` : '<span style="color:rgba(255,255,255,0.15);">—</span>'}</td>
+                    <td style="padding:8px 12px;text-align:right;font-size:13px;color:${saldo >= 0 ? '#10b981' : '#f87171'};font-weight:800;white-space:nowrap;">${saldo >= 0 ? '+' : ''}${_formatMoney(saldo)}</td>
                 </tr>`;
         }).join('');
 
         const totIngreso = txs.filter(t => t.tipo === 'income').reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
         const totEgreso = txs.filter(t => t.tipo === 'expense').reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
         const totCharge = txs.filter(t => t.tipo === 'charge').reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
+        const saldoFinal = totIngreso - totEgreso;
+        const saldoFinalColor = saldoFinal >= 0 ? '#10b981' : '#f87171';
 
         const contenedor = document.getElementById('fz-estado-resultado');
         if (!contenedor) return;
@@ -8653,37 +8688,55 @@ function renderSection(name, data) {
                 </div>
                 ${hasPriv('exportar_estados') ? '<button onclick="window._imprimirEstado()" style="background:linear-gradient(135deg,#1e40af,#3b82f6);color:white;border:none;padding:10px 22px;border-radius:10px;cursor:pointer;font-weight:700;font-size:13px;">🖨️ Imprimir / PDF</button>' : ''}
             </div>
-            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:16px;">
-                <div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);border-radius:10px;padding:12px;">
-                    <div style="font-size:10px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;">Total ingresos</div>
-                    <div style="font-size:18px;color:#10b981;font-weight:800;">${_formatMoney(totIngreso)}</div>
-                </div>
-                <div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.25);border-radius:10px;padding:12px;">
-                    <div style="font-size:10px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;">Total egresos</div>
-                    <div style="font-size:18px;color:#f87171;font-weight:800;">${_formatMoney(totEgreso)}</div>
-                </div>
-                <div style="background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);border-radius:10px;padding:12px;">
-                    <div style="font-size:10px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;">Cargos generados</div>
-                    <div style="font-size:18px;color:#fbbf24;font-weight:800;">${_formatMoney(totCharge)}</div>
-                </div>
-                <div style="background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.25);border-radius:10px;padding:12px;">
-                    <div style="font-size:10px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;">Saldo final</div>
-                    <div style="font-size:18px;color:${saldo >= 0 ? '#10b981' : '#f87171'};font-weight:800;">${_formatMoney(saldo)}</div>
-                </div>
-            </div>
-            <div style="border:1px solid rgba(255,255,255,0.06);border-radius:10px;overflow:auto;">
-                <table style="width:100%;border-collapse:collapse;">
-                    <thead style="background:rgba(255,255,255,0.04);">
+            <!-- RESUMEN ESTILO EXCEL: tabla compacta con totales por columna -->
+            <div style="border:1px solid rgba(59,130,246,0.25); border-radius:12px; overflow:hidden; margin-bottom:18px;">
+                <table style="width:100%; border-collapse:collapse;">
+                    <thead style="background:rgba(59,130,246,0.12);">
                         <tr>
-                            <th style="padding:10px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Fecha</th>
-                            <th style="padding:10px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Tipo</th>
-                            <th style="padding:10px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Cliente/Prov.</th>
-                            <th style="padding:10px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Concepto</th>
-                            <th style="padding:10px 12px;text-align:right;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Monto</th>
-                            <th style="padding:10px 12px;text-align:right;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Saldo</th>
+                            <th style="padding:11px 14px; text-align:left; font-size:10px; color:rgba(255,255,255,0.7); text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.05);">Resumen</th>
+                            <th style="padding:11px 14px; text-align:right; font-size:10px; color:#34d399; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.05);">💚 Ingresos</th>
+                            <th style="padding:11px 14px; text-align:right; font-size:10px; color:#fca5a5; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.05);">💸 Egresos</th>
+                            <th style="padding:11px 14px; text-align:right; font-size:10px; color:#fbbf24; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.05);">⏳ Cargos</th>
+                            <th style="padding:11px 14px; text-align:right; font-size:10px; color:${saldoFinalColor}; text-transform:uppercase; letter-spacing:1px;">Saldo Final</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr style="background:rgba(0,0,0,0.15);">
+                            <td style="padding:12px 14px; font-size:12px; color:rgba(255,255,255,0.8); font-weight:700; border-right:1px solid rgba(255,255,255,0.05);">Total del periodo</td>
+                            <td style="padding:12px 14px; text-align:right; font-size:16px; color:#10b981; font-weight:900; border-right:1px solid rgba(255,255,255,0.05);">${_formatMoney(totIngreso)}</td>
+                            <td style="padding:12px 14px; text-align:right; font-size:16px; color:#f87171; font-weight:900; border-right:1px solid rgba(255,255,255,0.05);">${_formatMoney(totEgreso)}</td>
+                            <td style="padding:12px 14px; text-align:right; font-size:16px; color:#fbbf24; font-weight:900; border-right:1px solid rgba(255,255,255,0.05);">${_formatMoney(totCharge)}</td>
+                            <td style="padding:12px 14px; text-align:right; font-size:18px; color:${saldoFinalColor}; font-weight:900;">${saldoFinal >= 0 ? '+' : ''}${_formatMoney(saldoFinal)}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- DETALLE ESTILO EXCEL: columnas separadas Ingreso / Egreso / Cargo + Saldo Acumulado -->
+            <div style="border:1px solid rgba(255,255,255,0.08);border-radius:12px;overflow:auto;">
+                <table style="width:100%;border-collapse:collapse; min-width:850px;">
+                    <thead style="background:rgba(59,130,246,0.1); position:sticky; top:0;">
+                        <tr>
+                            <th style="padding:10px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Fecha</th>
+                            <th style="padding:10px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Tipo</th>
+                            <th style="padding:10px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Cliente/Prov.</th>
+                            <th style="padding:10px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Concepto</th>
+                            <th style="padding:10px 12px;text-align:right;font-size:10px;color:#34d399;text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Ingreso</th>
+                            <th style="padding:10px 12px;text-align:right;font-size:10px;color:#fca5a5;text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Egreso</th>
+                            <th style="padding:10px 12px;text-align:right;font-size:10px;color:#fbbf24;text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Cargo</th>
+                            <th style="padding:10px 12px;text-align:right;font-size:10px;color:rgba(255,255,255,0.85);text-transform:uppercase;letter-spacing:1px;">Saldo Acum.</th>
                         </tr>
                     </thead>
                     <tbody>${rows}</tbody>
+                    <tfoot style="background:rgba(59,130,246,0.12); border-top:2px solid rgba(59,130,246,0.3);">
+                        <tr>
+                            <td colspan="4" style="padding:14px 12px; font-weight:800; color:white; font-size:12px; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.04);">TOTALES</td>
+                            <td style="padding:14px 12px; text-align:right; font-weight:900; color:#10b981; font-size:14px; border-right:1px solid rgba(255,255,255,0.04);">${_formatMoney(totIngreso)}</td>
+                            <td style="padding:14px 12px; text-align:right; font-weight:900; color:#f87171; font-size:14px; border-right:1px solid rgba(255,255,255,0.04);">${_formatMoney(totEgreso)}</td>
+                            <td style="padding:14px 12px; text-align:right; font-weight:900; color:#fbbf24; font-size:14px; border-right:1px solid rgba(255,255,255,0.04);">${_formatMoney(totCharge)}</td>
+                            <td style="padding:14px 12px; text-align:right; font-weight:900; color:${saldoFinalColor}; font-size:16px;">${saldoFinal >= 0 ? '+' : ''}${_formatMoney(saldoFinal)}</td>
+                        </tr>
+                    </tfoot>
                 </table>
             </div>
         </div>`;
