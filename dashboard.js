@@ -1623,8 +1623,11 @@ function renderSection(name, data) {
         //   (a) tiene cita programada para HOY (24h, atendida o no), o
         //   (b) tiene cita programada para MAÑANA (día inmediato siguiente), o
         //   (c) fue atendido HOY (consulta registrada con fecha de hoy).
-        //   Otros casos (cita en 2+ días, citas pasadas, sin cita) → Historial.
         //   La lista se ordena cronológicamente por fecha+hora ascendente.
+        //
+        // ESTRATEGIA: iteramos primero sobre las CITAS (no sobre el registry),
+        // así garantizamos que cualquier cita de hoy/mañana en localStorage
+        // genere su paciente en la lista, aunque el registry esté desincronizado.
         function buildPatientsArray() {
             const registry = JSON.parse(localStorage.getItem(key) || '[]');
             const allAppts = window.getAppointments ? window.getAppointments() : [];
@@ -1635,40 +1638,52 @@ function renderSection(name, data) {
             const tomorrow = new Date(now);
             tomorrow.setDate(tomorrow.getDate() + 1);
             const tomorrowISO = fmtISO(tomorrow);
-            const archived = []; // pacientes movidos al historial (info para el header)
 
-            const active = registry.slice(-200).reverse().map(qsl => {
-                qsl = typeof qsl === 'string' ? qsl : (qsl.qsl || qsl.codigo || qsl.id || String(qsl));
+            // 1) Citas de HOY o MAÑANA → mapear por qsl con la más temprana
+            const relevantAppts = allAppts.filter(a =>
+                a && (a.date === todayISO || a.date === tomorrowISO)
+            );
+            const byQsl = new Map(); // qsl → upcoming appointment
+            for (const a of relevantAppts) {
+                if (!a.qsl) continue;
+                const existing = byQsl.get(a.qsl);
+                if (!existing) {
+                    byQsl.set(a.qsl, a);
+                } else {
+                    const tsA = new Date(a.date + 'T' + (a.time || '00:00')).getTime();
+                    const tsExisting = new Date(existing.date + 'T' + (existing.time || '00:00')).getTime();
+                    if (tsA < tsExisting) byQsl.set(a.qsl, a);
+                }
+            }
+
+            // 2) Añadir pacientes atendidos HOY aunque no tengan cita registrada
+            const registrySet = new Set();
+            registry.forEach(q => {
+                const qsl = typeof q === 'string' ? q : (q.qsl || q.codigo || q.id || String(q));
+                registrySet.add(qsl);
+                if (byQsl.has(qsl)) return;
                 const data = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}');
-                const name = data.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || qsl;
-
-                // Citas para HOY o MAÑANA
-                const relevantAppts = allAppts.filter(a =>
-                    (a.qsl === qsl || a.name === name) &&
-                    (a.date === todayISO || a.date === tomorrowISO)
-                );
-                // Atendido HOY (cualquier consulta con date de hoy)
                 const attendedToday = (data.consultations || []).some(c =>
                     typeof c.date === 'string' &&
                     (c.date.includes(todayES) || c.date.startsWith(todayISO))
                 );
+                if (attendedToday) byQsl.set(qsl, null); // sin upcoming pero entra en lista
+            });
 
-                // Sin cita hoy/mañana NI atendido hoy → archivar
-                if (relevantAppts.length === 0 && !attendedToday) {
-                    archived.push({ qsl, name });
-                    return null;
-                }
-
-                // Próxima cita mostrada = la más cercana cronológicamente
-                const upcoming = relevantAppts
-                    .sort((a,b) => new Date(a.date+'T'+(a.time||'00:00')) - new Date(b.date+'T'+(b.time||'00:00')))[0];
+            // 3) Construir filas para cada qsl seleccionado
+            function buildRow(qsl, upcoming) {
+                const data = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}');
+                const name = data.nombre_completo
+                    || localStorage.getItem(`patient_name_${qsl}`)
+                    || (upcoming && upcoming.name)
+                    || qsl;
 
                 let nextAppt = '—';
                 let nextApptDays = null;
                 if (upcoming) {
                     const apptDate = new Date(upcoming.date + 'T12:00:00');
                     const diffDays = Math.ceil((apptDate - now) / 86400000);
-                    const label = new Date(upcoming.date+'T12:00:00').toLocaleDateString('es-ES',{day:'2-digit',month:'short'});
+                    const label = apptDate.toLocaleDateString('es-ES', { day:'2-digit', month:'short' });
                     nextAppt = `${label} ${upcoming.time}`;
                     nextApptDays = diffDays;
                 }
@@ -1689,13 +1704,23 @@ function renderSection(name, data) {
                 }
                 return {
                     qsl, name,
-                    telefono: data.telefono || '—',
-                    glucosa:  !!data.glucoseEnabled,
-                    presion:  !!data.pressureEnabled,
+                    telefono: data.telefono || (upcoming && upcoming.telefono) || '—',
+                    glucosa: !!data.glucoseEnabled,
+                    presion: !!data.pressureEnabled,
                     nextAppt, nextApptDays,
                     lastRx: lastRxShort
                 };
-            }).filter(Boolean);
+            }
+
+            const active = [];
+            for (const [qsl, upcoming] of byQsl.entries()) {
+                active.push(buildRow(qsl, upcoming));
+            }
+
+            // Contar archivados (pacientes del registry que NO están en Lista)
+            const archived = Array.from(registrySet)
+                .filter(q => !byQsl.has(q))
+                .map(q => ({ qsl: q }));
 
             // Orden cronológico ASC por próxima cita (hoy primero, luego mañana, por hora).
             active.sort((a, b) => {
