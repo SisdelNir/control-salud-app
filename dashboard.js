@@ -7620,7 +7620,15 @@ function renderSection(name, data) {
                 <div class="loading-state"><div class="spinner"></div><p>Cargando finanzas...</p></div>
             </div>
         `;
-        try { await _syncFinanzasFromCloud(); } catch (e) {}
+        // Sincronizar EN PARALELO: finanzas + pacientes (los selectores los necesitan)
+        try {
+            await Promise.all([
+                _syncFinanzasFromCloud(),
+                (typeof syncPatientsFromCloud === 'function')
+                    ? syncPatientsFromCloud({ force: true })
+                    : Promise.resolve()
+            ]);
+        } catch (e) {}
         const c = document.getElementById('finanzas-tab-content');
         if (c) c.innerHTML = _buildFinanzasResumenTab();
     }
@@ -7631,7 +7639,16 @@ function renderSection(name, data) {
         const c = document.getElementById('finanzas-tab-content');
         if (!c) return;
         c.innerHTML = `<div class="loading-state"><div class="spinner"></div></div>`;
-        try { await _syncFinanzasFromCloud(); } catch (e) {}
+        // Sincronizar finanzas + pacientes (cualquiera de los 3 tabs que use selectores
+        // de paciente necesita la lista actualizada desde Firestore)
+        try {
+            await Promise.all([
+                _syncFinanzasFromCloud(),
+                (typeof syncPatientsFromCloud === 'function')
+                    ? syncPatientsFromCloud({ force: true })
+                    : Promise.resolve()
+            ]);
+        } catch (e) {}
         if (tab === 'resumen') c.innerHTML = _buildFinanzasResumenTab();
         else if (tab === 'cobros') c.innerHTML = _buildFinanzasCobrosTab();
         else if (tab === 'deudas') c.innerHTML = _buildFinanzasDeudasTab();
@@ -7809,7 +7826,27 @@ function renderSection(name, data) {
         _spsApplyHighlight(id);
     };
 
-    window._spsOnFocus = function(id) { _spsRender(id, document.getElementById(id + '-search')?.value || ''); };
+    window._spsOnFocus = function(id) {
+        _spsRender(id, document.getElementById(id + '-search')?.value || '');
+        // Si la cache local está vacía, intenta refrescar desde Firestore en background
+        // y re-renderiza al terminar. Esto asegura que el buscador SIEMPRE muestre
+        // pacientes existentes aunque la pestaña se haya abierto antes de que el
+        // sync periódico hubiera traído los datos.
+        const pacientes = _listPacientesParaSelect();
+        if (pacientes.length === 0 && typeof syncPatientsFromCloud === 'function' && !window._spsRefreshing) {
+            window._spsRefreshing = true;
+            syncPatientsFromCloud({ force: true })
+                .then(() => {
+                    const search = document.getElementById(id + '-search');
+                    const dl = document.getElementById(id + '-list');
+                    if (dl && dl.style.display !== 'none' && document.activeElement === search) {
+                        _spsRender(id, search.value || '');
+                    }
+                })
+                .catch(() => {})
+                .finally(() => { window._spsRefreshing = false; });
+        }
+    };
     window._spsOnInput = function(id) {
         const v = document.getElementById(id + '-search')?.value || '';
         // Mientras el usuario escribe, anulamos cualquier QSL previo
