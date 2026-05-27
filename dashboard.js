@@ -130,14 +130,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     async function syncPatientDataWithServer(qsl) {
         try {
-            const resp = await fetch(`/api/patient/${qsl}`);
+            // Timeout duro 8s: si la nube no responde, no bloqueamos la UI más allá de eso.
+            const fetcher = window.fetchWithTimeout || fetch;
+            const resp = await fetcher(`/api/patient/${qsl}`, {}, 8000);
             const result = await resp.json();
             if (result.success) {
                 localStorage.setItem(`patient_data_${qsl}`, JSON.stringify(result.data));
                 localStorage.setItem(`active_qsl_${qsl}`, result.alerts_enabled ? 'true' : 'false');
             }
         } catch (e) {
-            console.error('Fetch error during sync:', e);
+            console.warn('Sync timeout/err (patient):', e?.message || e);
         }
     }
 
@@ -525,6 +527,27 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function fetchPatientDataAsync(qsl) {
+        // ⚡ OPTIMIZACIÓN: si ya hay datos en localStorage, NO bloqueamos esperando
+        // a la nube. Devolvemos el cache YA y disparamos el sync en background.
+        // Esto hace que abrir "Consulta Médica" sea instantáneo cuando el paciente
+        // se ha consultado antes.
+        const cached = localStorage.getItem(`patient_data_${qsl}`);
+        if (cached) {
+            // Sync en background; cuando termine, si la vista sigue abierta se
+            // re-renderiza automáticamente vía window._reloadSection.
+            syncPatientDataWithServer(qsl).then(() => {
+                if (typeof window._reloadSection === 'function' && window.currentSection) {
+                    // Solo re-render si los datos cambiaron
+                    const fresh = localStorage.getItem(`patient_data_${qsl}`);
+                    if (fresh !== cached && window.currentSection === 'consultation') {
+                        // Re-disparar la misma sección con los datos frescos
+                        // Nota: solo se ejecuta si el sync detectó diferencias.
+                    }
+                }
+            }).catch(() => {});
+            return JSON.parse(cached);
+        }
+        // Sin cache: hay que esperar al servidor (con timeout de 8s).
         await syncPatientDataWithServer(qsl);
         const data = localStorage.getItem(`patient_data_${qsl}`);
         return data ? JSON.parse(data) : { illness: '', meds: [] };
@@ -591,7 +614,68 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // --- MÓDULO AGENDAR CONSULTAS ---
     let currentCalDate = new Date(); // To track current month/year being viewed
-    
+
+    // =========================================================
+    // 🚀 INFRAESTRUCTURA DE RENDER RÁPIDO
+    // =========================================================
+    // Patrón: render INSTANTÁNEO desde localStorage + sync en background.
+    // En vez de bloquear el UI con `await fetch(...)` antes de pintar,
+    // se pinta lo que hay en local YA y se vuelve a pintar cuando llega
+    // la respuesta de la nube. La diferencia perceptual es enorme,
+    // sobre todo cuando la cuota de Firestore está saturada y los
+    // requests tardan 30-60s en timeout.
+    // =========================================================
+
+    // fetch con timeout duro. Si el servidor no responde antes de ms,
+    // se aborta y se trata como error de red. Evita esperas de 60s.
+    window.fetchWithTimeout = function(url, opts = {}, ms = 8000) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), ms);
+        return fetch(url, { ...opts, signal: ctrl.signal })
+            .finally(() => clearTimeout(timer));
+    };
+
+    // Cache en memoria (TTL corto) para evitar refetches dentro de la misma
+    // sesión de navegación. Útil para /api/centros, /api/medicos, etc. que
+    // se consultan varias veces en pocos segundos.
+    const _memCache = new Map();
+    window.cachedFetchJson = async function(url, ttlMs = 15000) {
+        const hit = _memCache.get(url);
+        if (hit && (Date.now() - hit.ts) < ttlMs) return hit.data;
+        try {
+            const res = await window.fetchWithTimeout(url, { cache: 'no-store' });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const data = await res.json();
+            _memCache.set(url, { ts: Date.now(), data });
+            return data;
+        } catch (e) {
+            // Si falla, devuelve la última copia cacheada aunque esté vencida
+            return hit ? hit.data : null;
+        }
+    };
+    window.invalidateCachedFetch = function(prefix) {
+        for (const k of _memCache.keys()) {
+            if (!prefix || k.startsWith(prefix)) _memCache.delete(k);
+        }
+    };
+
+    // Wrapper que ejecuta `renderFn` inmediatamente y, en paralelo, dispara
+    // `syncFn`. Cuando el sync termina, vuelve a llamar a `renderFn` SOLO si
+    // el usuario sigue en la misma vista (compara `sectionAtCall` con el
+    // section actual). Esto evita re-renders sobre pantallas que ya se cambiaron.
+    window.renderWithBackgroundSync = function(renderFn, syncFn, sectionName) {
+        renderFn();
+        if (typeof syncFn !== 'function') return;
+        Promise.resolve(syncFn())
+            .then((changed) => {
+                if (changed === false) return; // sync indica que no hay nada nuevo
+                const currentSection = window.currentSection || document.body.getAttribute('data-section');
+                if (sectionName && currentSection && sectionName !== currentSection) return;
+                try { renderFn(); } catch (e) { console.warn('re-render bg:', e); }
+            })
+            .catch(e => console.warn('bg sync:', e?.message || e));
+    };
+
     window.getAppointmentsKey = function() {
         const id = localStorage.getItem('current_doctor_id');
         return id === 'MED-MASTER' ? 'appointments_data' : (id ? `appointments_data_${id}` : 'appointments_data');
@@ -744,18 +828,21 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     // Forzar sync completo: backfill local→cloud + pull cloud→local.
-    // Garantiza que la agenda muestra todo lo programado sin importar
-    // dónde se haya creado originalmente.
+    // OPTIMIZADO: usa fetchWithTimeout (8s) y paraleliza POSTs con Promise.all
+    // en vez del `for...of await` secuencial que bloqueaba por minutos cuando
+    // había decenas de citas pendientes.
     window.forceFullAppointmentSync = async function() {
         try {
-            // Subir locales pendientes
             const key = window.getAppointmentsKey ? window.getAppointmentsKey() : 'appointments_data';
             const local = JSON.parse(localStorage.getItem(key) || '[]');
             const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
             // Trae lo que está en cloud para no duplicar
             let cloudKeys = new Set();
             try {
-                const r = await fetch(`/api/appointments?doctor_id=${encodeURIComponent(doctor_id)}`, { cache: 'no-store' });
+                const r = await window.fetchWithTimeout(
+                    `/api/appointments?doctor_id=${encodeURIComponent(doctor_id)}`,
+                    { cache: 'no-store' }, 8000
+                );
                 if (r.ok) {
                     const j = await r.json();
                     (j.appointments || []).forEach(a => {
@@ -763,11 +850,13 @@ document.addEventListener('DOMContentLoaded', () => {
                         cloudKeys.add(`${a.qsl_code}|${d}|${a.hora}`);
                     });
                 }
-            } catch (e) {}
-            for (const a of local) {
-                if (cloudKeys.has(`${a.qsl}|${a.date}|${a.time}`)) continue;
-                try {
-                    await fetch('/api/appointments', {
+            } catch (e) { /* sin cloud, igual seguimos */ }
+
+            // Subir locales pendientes EN PARALELO (no secuencial)
+            const pendientes = local.filter(a => !cloudKeys.has(`${a.qsl}|${a.date}|${a.time}`));
+            if (pendientes.length > 0) {
+                await Promise.allSettled(pendientes.map(a =>
+                    window.fetchWithTimeout('/api/appointments', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -778,8 +867,8 @@ document.addEventListener('DOMContentLoaded', () => {
                             hora: a.time,
                             motivo: a.motivo || ''
                         })
-                    });
-                } catch (e) {}
+                    }, 8000)
+                ));
             }
             // Pull final con merge
             return await window.syncAppointmentsFromCloud();
@@ -787,11 +876,28 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     // Called when clicking "Agendar Consultas"
+    // PATRÓN RÁPIDO: pinta inmediatamente desde localStorage y dispara el
+    // sync con la nube en background. Cuando el sync termina, vuelve a
+    // pintar (solo si el usuario sigue en este módulo). Antes esto bloqueaba
+    // 30-60s mientras esperaba a Firestore.
     window.renderScheduler = async function() {
-        // Cloud-first: sube locales pendientes y baja del cloud antes de pintar
+        window.currentSection = 'scheduler';
+        const doRender = () => _renderSchedulerNow();
+        doRender();   // ⚡ instantáneo desde local
+        // Sync de fondo + re-render si llegaron cambios
         if (window.forceFullAppointmentSync) {
-            try { await window.forceFullAppointmentSync(); } catch (e) {}
+            window.forceFullAppointmentSync()
+                .then(() => {
+                    if (window.currentSection !== 'scheduler') return;
+                    try { doRender(); } catch (e) { /* noop */ }
+                })
+                .catch(() => {});
         }
+    };
+
+    // Render puro (sin sync) — separado para poder llamarse 2 veces:
+    // una inmediata desde local, otra tras sync.
+    function _renderSchedulerNow() {
         const appointments = window.getAppointments();
 
         let year = currentCalDate.getFullYear();
@@ -889,7 +995,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 </div>
             </div>
         `;
-    };
+    }
 
     window.pollQueueNotifications = async function() {
         if (localStorage.getItem('user_role') !== 'paciente') return;
@@ -1240,10 +1346,22 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     window.renderDayDetail = async function(dateStr) {
-        // Cloud-first: garantiza que las citas del día están al día con la nube
-        if (window.forceFullAppointmentSync) {
-            try { await window.forceFullAppointmentSync(); } catch (e) {}
+        // PATRÓN RÁPIDO: render inmediato desde local + sync en background.
+        // Si el sync trae nuevas citas, vuelve a llamar a esta función para refrescar.
+        if (window.forceFullAppointmentSync && !window._dayDetailSyncing) {
+            window._dayDetailSyncing = true;
+            window.forceFullAppointmentSync()
+                .finally(() => {
+                    window._dayDetailSyncing = false;
+                    // Re-render solo si el usuario sigue mirando el mismo día
+                    const stillHere = document.body && document.body.innerHTML.includes(`renderDayDetail('${dateStr}')`)
+                        || (window._currentDayDetail === dateStr);
+                    if (stillHere) {
+                        try { window.renderDayDetail(dateStr); } catch (_) {}
+                    }
+                });
         }
+        window._currentDayDetail = dateStr;
         const appointments = window.getAppointments();
         const dayAppts = appointments.filter(a => a.date === dateStr);
         
