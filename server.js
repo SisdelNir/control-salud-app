@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const bodyParser = require('body-parser');
-const db = require('./db');
+const { db, admin, COLLECTIONS, initDB } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,7 +12,7 @@ app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname, './')));
 
 // Initialize DB
-db.initDB();
+initDB();
 
 // --- API Endpoints ---
 
@@ -20,11 +20,12 @@ db.initDB();
 app.get('/api/patient/:qsl/verify', async (req, res) => {
     try {
         const { qsl } = req.params;
-        const result = await db.query('SELECT data FROM pacientes WHERE qsl_code = $1', [qsl]);
-        if (result.rows.length === 0) {
+        const doc = await db.collection(COLLECTIONS.pacientes).doc(qsl).get();
+        if (!doc.exists) {
             return res.json({ success: false });
         }
-        const name = result.rows[0].data.nombre_completo || qsl;
+        const data = doc.data().data || {};
+        const name = data.nombre_completo || qsl;
         res.json({ success: true, name });
     } catch (err) {
         console.error(err);
@@ -36,11 +37,12 @@ app.get('/api/patient/:qsl/verify', async (req, res) => {
 app.get('/api/patient/:qsl', async (req, res) => {
     try {
         const { qsl } = req.params;
-        const result = await db.query('SELECT data, alerts_enabled FROM pacientes WHERE qsl_code = $1', [qsl]);
-        if (result.rows.length === 0) {
+        const doc = await db.collection(COLLECTIONS.pacientes).doc(qsl).get();
+        if (!doc.exists) {
             return res.json({ success: false, data: { illness: '', meds: [] } });
         }
-        res.json({ success: true, data: result.rows[0].data, alerts_enabled: result.rows[0].alerts_enabled });
+        const docData = doc.data();
+        res.json({ success: true, data: docData.data || {}, alerts_enabled: docData.alerts_enabled || false });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, error: 'Database error' });
@@ -52,9 +54,9 @@ app.post('/api/patient/:qsl', async (req, res) => {
     try {
         const { qsl } = req.params;
         const { data } = req.body;
-        await db.query(
-            'INSERT INTO pacientes (qsl_code, data) VALUES ($1, $2) ON CONFLICT (qsl_code) DO UPDATE SET data = $2',
-            [qsl, data]
+        await db.collection(COLLECTIONS.pacientes).doc(qsl).set(
+            { data, created_at: admin.firestore.FieldValue.serverTimestamp() },
+            { merge: true }
         );
         res.json({ success: true });
     } catch (err) {
@@ -72,23 +74,40 @@ app.post('/api/login', async (req, res) => {
         }
 
         // Check if it's an Admin General
-        const centroResult = await db.query('SELECT * FROM centros_medicos WHERE admin_code = $1', [pass]);
-        if (centroResult.rows.length > 0) {
-            const centro = centroResult.rows[0];
-            return res.json({ success: true, role: 'admin_general', id_centro: centro.id_centro, name: 'Administrador Central', nombre_centro: centro.nombre, max_medicos: centro.max_medicos });
+        const centroSnap = await db.collection(COLLECTIONS.centros_medicos)
+            .where('admin_code', '==', pass)
+            .limit(1)
+            .get();
+        if (!centroSnap.empty) {
+            const centro = centroSnap.docs[0].data();
+            return res.json({
+                success: true,
+                role: 'admin_general',
+                id_centro: centro.id_centro,
+                name: 'Administrador Central',
+                nombre_centro: centro.nombre,
+                max_medicos: centro.max_medicos
+            });
         }
 
         const passHash = Buffer.from(pass).toString('base64');
-        const result = await db.query('SELECT id_medico, data FROM medicos');
-        const medico = result.rows.find(r => 
-            r.data.usuario.toUpperCase() === pass.toUpperCase() || 
-            r.data.password_hash === passHash
-        );
-        
+        const medicosSnap = await db.collection(COLLECTIONS.medicos).get();
+        let medico = null;
+        medicosSnap.forEach(docSnap => {
+            if (medico) return;
+            const d = docSnap.data().data || {};
+            if (
+                (d.usuario && d.usuario.toUpperCase() === pass.toUpperCase()) ||
+                d.password_hash === passHash
+            ) {
+                medico = { id_medico: docSnap.id, data: d };
+            }
+        });
+
         if (medico) {
             return res.json({ success: true, role: 'medico', id: medico.id_medico, name: medico.data.nombre_completo, data: medico.data });
         }
-        
+
         res.json({ success: false });
     } catch (err) {
         console.error(err);
@@ -98,13 +117,12 @@ app.post('/api/login', async (req, res) => {
 
 // Toggle patient alerts
 app.post('/api/patient/:qsl/alerts', async (req, res) => {
-
     try {
         const { qsl } = req.params;
         const { enabled } = req.body;
-        await db.query(
-            'INSERT INTO pacientes (qsl_code, alerts_enabled) VALUES ($1, $2) ON CONFLICT (qsl_code) DO UPDATE SET alerts_enabled = $2',
-            [qsl, enabled]
+        await db.collection(COLLECTIONS.pacientes).doc(qsl).set(
+            { alerts_enabled: enabled },
+            { merge: true }
         );
         res.json({ success: true });
     } catch (err) {
@@ -113,11 +131,11 @@ app.post('/api/patient/:qsl/alerts', async (req, res) => {
     }
 });
 
-// Get/Update medicos (Stored in JSON for simplicity or can be expanded)
+// Get/Update medicos
 app.get('/api/medicos', async (req, res) => {
     try {
-        const result = await db.query('SELECT id_medico, data FROM medicos');
-        const medicos = result.rows.map(r => ({ id_medico: r.id_medico, ...r.data }));
+        const snap = await db.collection(COLLECTIONS.medicos).get();
+        const medicos = snap.docs.map(d => ({ id_medico: d.id, ...(d.data().data || {}) }));
         res.json({ success: true, medicos });
     } catch (err) {
         console.error(err);
@@ -129,9 +147,9 @@ app.post('/api/medico/:id', async (req, res) => {
     try {
         const { id } = req.params;
         const data = req.body;
-        await db.query(
-            'INSERT INTO medicos (id_medico, data) VALUES ($1, $2) ON CONFLICT (id_medico) DO UPDATE SET data = $2',
-            [id, data]
+        await db.collection(COLLECTIONS.medicos).doc(id).set(
+            { data, created_at: admin.firestore.FieldValue.serverTimestamp() },
+            { merge: true }
         );
         res.json({ success: true });
     } catch (err) {
@@ -143,7 +161,7 @@ app.post('/api/medico/:id', async (req, res) => {
 app.delete('/api/medico/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        await db.query('DELETE FROM medicos WHERE id_medico = $1', [id]);
+        await db.collection(COLLECTIONS.medicos).doc(id).delete();
         res.json({ success: true });
     } catch (err) {
         console.error(err);
@@ -154,8 +172,9 @@ app.delete('/api/medico/:id', async (req, res) => {
 // Centros Medicos routes
 app.get('/api/centros', async (req, res) => {
     try {
-        const result = await db.query('SELECT * FROM centros_medicos');
-        res.json({ success: true, centros: result.rows });
+        const snap = await db.collection(COLLECTIONS.centros_medicos).get();
+        const centros = snap.docs.map(d => d.data());
+        res.json({ success: true, centros });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, error: 'Database error' });
@@ -165,11 +184,23 @@ app.get('/api/centros', async (req, res) => {
 app.post('/api/centro/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const { nombre, admin_code, max_medicos, admin_nombre, admin_id, admin_telefono, admin_correo } = req.body;
-        await db.query(
-            'INSERT INTO centros_medicos (id_centro, nombre, admin_code, max_medicos, admin_nombre, admin_id, admin_telefono, admin_correo) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (id_centro) DO UPDATE SET nombre = $2, admin_code = $3, max_medicos = $4, admin_nombre = $5, admin_id = $6, admin_telefono = $7, admin_correo = $8',
-            [id, nombre, admin_code, max_medicos, admin_nombre, admin_id, admin_telefono, admin_correo]
-        );
+        const { nombre, admin_code, max_medicos, admin_nombre, admin_id, admin_telefono, admin_correo, pais, nit, moneda, timezone, dateLocale } = req.body;
+        await db.collection(COLLECTIONS.centros_medicos).doc(id).set({
+            id_centro: id,
+            nombre,
+            admin_code,
+            max_medicos,
+            admin_nombre,
+            admin_id,
+            admin_telefono,
+            admin_correo,
+            pais,
+            nit,
+            moneda,
+            timezone,
+            date_locale: dateLocale,
+            created_at: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
         res.json({ success: true });
     } catch (err) {
         console.error(err);
@@ -180,7 +211,7 @@ app.post('/api/centro/:id', async (req, res) => {
 app.delete('/api/centro/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        await db.query('DELETE FROM centros_medicos WHERE id_centro = $1', [id]);
+        await db.collection(COLLECTIONS.centros_medicos).doc(id).delete();
         res.json({ success: true });
     } catch (err) {
         console.error(err);
@@ -193,8 +224,16 @@ app.delete('/api/centro/:id', async (req, res) => {
 app.get('/api/appointments', async (req, res) => {
     try {
         const { doctor_id } = req.query;
-        const result = await db.query('SELECT * FROM citas WHERE doctor_id = $1 ORDER BY fecha ASC, hora ASC', [doctor_id]);
-        res.json({ success: true, appointments: result.rows });
+        const snap = await db.collection(COLLECTIONS.citas)
+            .where('doctor_id', '==', doctor_id)
+            .get();
+        const appointments = snap.docs
+            .map(d => ({ id: d.id, ...d.data() }))
+            .sort((a, b) => {
+                if (a.fecha !== b.fecha) return a.fecha < b.fecha ? -1 : 1;
+                return a.hora < b.hora ? -1 : 1;
+            });
+        res.json({ success: true, appointments });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, error: 'Database error' });
@@ -204,10 +243,15 @@ app.get('/api/appointments', async (req, res) => {
 app.post('/api/appointments', async (req, res) => {
     try {
         const { doctor_id, qsl_code, paciente_nombre, fecha, hora, motivo } = req.body;
-        await db.query(
-            'INSERT INTO citas (doctor_id, qsl_code, paciente_nombre, fecha, hora, motivo) VALUES ($1, $2, $3, $4, $5, $6)',
-            [doctor_id, qsl_code, paciente_nombre, fecha, hora, motivo]
-        );
+        await db.collection(COLLECTIONS.citas).add({
+            doctor_id,
+            qsl_code,
+            paciente_nombre,
+            fecha,
+            hora,
+            motivo,
+            created_at: admin.firestore.FieldValue.serverTimestamp()
+        });
         res.json({ success: true });
     } catch (err) {
         console.error(err);
@@ -218,7 +262,15 @@ app.post('/api/appointments', async (req, res) => {
 app.delete('/api/appointments', async (req, res) => {
     try {
         const { doctor_id, qsl_code, fecha, hora } = req.body;
-        await db.query('DELETE FROM citas WHERE doctor_id = $1 AND qsl_code = $2 AND fecha = $3 AND hora = $4', [doctor_id, qsl_code, fecha, hora]);
+        const snap = await db.collection(COLLECTIONS.citas)
+            .where('doctor_id', '==', doctor_id)
+            .where('qsl_code', '==', qsl_code)
+            .where('fecha', '==', fecha)
+            .where('hora', '==', hora)
+            .get();
+        const batch = db.batch();
+        snap.docs.forEach(d => batch.delete(d.ref));
+        await batch.commit();
         res.json({ success: true });
     } catch (err) {
         console.error(err);
@@ -231,8 +283,17 @@ app.delete('/api/appointments', async (req, res) => {
 app.get('/api/patient/:qsl/alerts/messages', async (req, res) => {
     try {
         const { qsl } = req.params;
-        const result = await db.query('SELECT * FROM alertas_sistema WHERE qsl_code = $1 ORDER BY created_at DESC', [qsl]);
-        res.json({ success: true, alerts: result.rows });
+        const snap = await db.collection(COLLECTIONS.alertas_sistema)
+            .where('qsl_code', '==', qsl)
+            .get();
+        const alerts = snap.docs
+            .map(d => ({ id: d.id, ...d.data() }))
+            .sort((a, b) => {
+                const ta = a.created_at?.toMillis?.() || 0;
+                const tb = b.created_at?.toMillis?.() || 0;
+                return tb - ta;
+            });
+        res.json({ success: true, alerts });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, error: 'Database error' });
@@ -243,10 +304,12 @@ app.post('/api/patient/:qsl/alerts/messages', async (req, res) => {
     try {
         const { qsl } = req.params;
         const { id, mensaje, leido } = req.body;
-        await db.query(
-            'INSERT INTO alertas_sistema (id, qsl_code, mensaje, leido) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO UPDATE SET leido = $4',
-            [id, qsl, mensaje, leido]
-        );
+        await db.collection(COLLECTIONS.alertas_sistema).doc(id).set({
+            qsl_code: qsl,
+            mensaje,
+            leido,
+            created_at: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
         res.json({ success: true });
     } catch (err) {
         console.error(err);
@@ -259,8 +322,17 @@ app.post('/api/patient/:qsl/alerts/messages', async (req, res) => {
 app.get('/api/messages/history', async (req, res) => {
     try {
         const { doctor_id } = req.query;
-        const result = await db.query('SELECT * FROM historial_mensajes WHERE doctor_id = $1 ORDER BY created_at DESC', [doctor_id]);
-        res.json({ success: true, history: result.rows });
+        const snap = await db.collection(COLLECTIONS.historial_mensajes)
+            .where('doctor_id', '==', doctor_id)
+            .get();
+        const history = snap.docs
+            .map(d => ({ id: d.id, ...d.data() }))
+            .sort((a, b) => {
+                const ta = a.created_at?.toMillis?.() || 0;
+                const tb = b.created_at?.toMillis?.() || 0;
+                return tb - ta;
+            });
+        res.json({ success: true, history });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, error: 'Database error' });
@@ -270,10 +342,15 @@ app.get('/api/messages/history', async (req, res) => {
 app.post('/api/messages/history', async (req, res) => {
     try {
         const { id, doctor_id, mensaje, canal, grupo_objetivo, cantidad_destinatarios, nombres_destinatarios } = req.body;
-        await db.query(
-            'INSERT INTO historial_mensajes (id, doctor_id, mensaje, canal, grupo_objetivo, cantidad_destinatarios, nombres_destinatarios) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-            [id, doctor_id, mensaje, canal, grupo_objetivo, cantidad_destinatarios, JSON.stringify(nombres_destinatarios)]
-        );
+        await db.collection(COLLECTIONS.historial_mensajes).doc(id).set({
+            doctor_id,
+            mensaje,
+            canal,
+            grupo_objetivo,
+            cantidad_destinatarios,
+            nombres_destinatarios,
+            created_at: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
         res.json({ success: true });
     } catch (err) {
         console.error(err);
@@ -289,4 +366,3 @@ app.get('*', (req, res) => {
 app.listen(PORT, () => {
     console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
-
