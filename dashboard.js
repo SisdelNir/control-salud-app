@@ -6872,15 +6872,21 @@ function renderSection(name, data) {
                 </div>`;
             }).join('');
 
+            const usuariosTabName = isOffice ? 'usuarios' : 'medicos';
+            const switchFn = isOffice ? 'switchConfigurationTab' : 'switchConfigTab';
             return `
             <div>
-                <!-- Aviso superior -->
-                <div style="background:linear-gradient(135deg, rgba(34,211,238,0.08), rgba(34,211,238,0.02)); border:1px solid rgba(34,211,238,0.25); border-radius:14px; padding:18px 22px; margin-bottom:24px; display:flex; align-items:flex-start; gap:14px;">
+                <!-- Aviso superior con CTA directo -->
+                <div style="background:linear-gradient(135deg, rgba(34,211,238,0.08), rgba(34,211,238,0.02)); border:1px solid rgba(34,211,238,0.25); border-radius:14px; padding:18px 22px; margin-bottom:24px; display:flex; align-items:flex-start; gap:14px; flex-wrap:wrap;">
                     <div style="font-size:28px; line-height:1;">🔐</div>
-                    <div style="flex:1;">
+                    <div style="flex:1; min-width:240px;">
                         <h4 style="color:#22d3ee; font-size:14px; font-weight:700; margin:0 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Catálogo de módulos disponibles</h4>
                         <p style="color:rgba(255,255,255,0.7); font-size:13px; margin:0; line-height:1.5;">${emptyMsg}</p>
                     </div>
+                    <button onclick="window.${switchFn}('${usuariosTabName}', document.querySelector('#config-tabs-bar .config-tab-btn'))"
+                        style="background:linear-gradient(135deg,#0ea5e9,#22d3ee); color:white; border:none; padding:12px 22px; border-radius:10px; cursor:pointer; font-size:13px; font-weight:800; letter-spacing:0.3px; display:flex; align-items:center; gap:8px; box-shadow:0 4px 12px rgba(34,211,238,0.3);">
+                        ➕ ${isOffice ? 'Crear primer usuario' : 'Crear primer médico'}
+                    </button>
                 </div>
 
                 <!-- Resumen -->
