@@ -1799,15 +1799,19 @@ function renderSection(name, data) {
             return (consult.observaciones || consult.referencias || consult.notas || '').toString().trim();
         }
 
-        // REGLA HISTORIAL: solo citas cuya fecha+hora ya pasó hace MÁS DE 24 HORAS.
-        // Las citas de hoy/mañana (o pasadas <24h) están en la Lista Principal;
-        // aquí solo aparece lo "cerrado" después del periodo de gracia de 24h.
+        // HISTORIAL: muestra TODAS las citas, ordenadas con prioridad útil:
+        //   1° Citas FUTURAS (hoy + mañana + posteriores) en orden ASCENDENTE
+        //      → la más próxima primero, la más lejana después.
+        //   2° Citas PASADAS en orden DESCENDENTE (la más reciente primero).
+        // Así el médico ve primero qué le toca atender (hoy → mañana → siguientes),
+        // y debajo el registro histórico de lo que ya ocurrió.
         const now = new Date();
-        const cutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000); // hace 24h
+        const nowMs = now.getTime();
 
         const records = allAppts
             .map(a => {
                 const p = patientMap[a.qsl] || { name: a.name || '(Paciente eliminado)', telefono: '—' };
+                const ts = new Date((a.date || '') + 'T' + (a.time || '00:00')).getTime();
                 return {
                     qsl: a.qsl,
                     name: p.name,
@@ -1817,13 +1821,18 @@ function renderSection(name, data) {
                     motivo: a.motivo || '',
                     observaciones: observationsOf(a),
                     status: statusOf(a),
-                    _ts: new Date((a.date || '') + 'T' + (a.time || '00:00')).getTime()
+                    _ts: Number.isFinite(ts) ? ts : 0,
+                    _isFuture: Number.isFinite(ts) && ts >= nowMs
                 };
             })
-            // Solo si la cita ya pasó hace más de 24h
-            .filter(r => Number.isFinite(r._ts) && r._ts < cutoff.getTime())
-            // Más recientes primero
-            .sort((a, b) => b._ts - a._ts);
+            .filter(r => r._ts > 0)
+            .sort((a, b) => {
+                // Futuras primero, luego pasadas
+                if (a._isFuture && !b._isFuture) return -1;
+                if (!a._isFuture && b._isFuture) return 1;
+                if (a._isFuture) return a._ts - b._ts; // futuras ASC (más próxima primero)
+                return b._ts - a._ts;                  // pasadas DESC (más reciente primero)
+            });
 
         const overlay = document.createElement('div');
         overlay.id = 'appointment-history-overlay';
@@ -1852,8 +1861,7 @@ function renderSection(name, data) {
                 total: records.length,
                 attended: records.filter(r => r.status === 'attended').length,
                 missed: records.filter(r => r.status === 'missed').length,
-                pending: records.filter(r => r.status === 'pending').length,
-                unscheduled: records.filter(r => r.status === 'unscheduled').length
+                pending: records.filter(r => r.status === 'pending').length
             };
 
             const rows = filtered.length > 0
@@ -1882,8 +1890,9 @@ function renderSection(name, data) {
                         <div>
                             <h3 style="color:#c4b5fd;margin:0;font-size:20px;display:flex;align-items:center;gap:10px;">📋 Historial de Citas</h3>
                             <p style="color:rgba(255,255,255,0.4);margin:4px 0 0;font-size:12px;">
-                                <span style="color:rgba(255,255,255,0.6);">Citas con más de 24h de pasadas — </span>
+                                <span style="color:rgba(255,255,255,0.6);">Próximas primero, luego registro pasado — </span>
                                 Total: <b style="color:white;">${stats.total}</b> &nbsp;·&nbsp;
+                                <span style="color:#fbbf24;">⏳ Próximas: <b>${stats.pending}</b></span> &nbsp;·&nbsp;
                                 <span style="color:#34d399;">✓ Atendidas: <b>${stats.attended}</b></span> &nbsp;·&nbsp;
                                 <span style="color:#f87171;">✕ No atendidas: <b>${stats.missed}</b></span>
                             </p>
