@@ -4096,13 +4096,34 @@ function renderSection(name, data) {
 
     window.activateCode = (qsl) => window.toggleAlerts(qsl, true);
 
+    // showElegantAlert(title, message, isError = false)
+    //   - Por defecto el mensaje se renderiza como texto plano (seguro contra XSS).
+    //   - Si `isError` viene como objeto { html: true } se renderiza como HTML.
+    //     Útil cuando el código quiere mostrar formato (negritas, divs estilizados,
+    //     códigos resaltados, etc) y el contenido NO proviene del usuario.
     window.showElegantAlert = (title, message, isError = false) => {
         const modal = document.getElementById('custom-alert-modal');
         if (!modal) { alert(message); return; }
+
+        // Detectar modo HTML: tercer arg puede ser un objeto { html: true, error?: bool }
+        let useHtml = false;
+        let isErr = false;
+        if (typeof isError === 'object' && isError !== null) {
+            useHtml = !!isError.html;
+            isErr = !!isError.error;
+        } else {
+            isErr = !!isError;
+        }
+
         document.getElementById('alert-title').textContent = title;
-        document.getElementById('alert-message').textContent = message;
+        const msgEl = document.getElementById('alert-message');
+        if (useHtml) {
+            msgEl.innerHTML = message;
+        } else {
+            msgEl.textContent = message;
+        }
         const icon = document.getElementById('alert-icon');
-        if (isError) {
+        if (isErr) {
             icon.textContent = '⚠';
             icon.style.filter = 'drop-shadow(0 0 10px rgba(239, 68, 68, 0.4))';
         } else {
@@ -6791,15 +6812,22 @@ function renderSection(name, data) {
             local.push({ id_medico, ...medData });
             localStorage.setItem('tabla_medicos', JSON.stringify(local));
 
+            // Escape básico del nombre para evitar inyección HTML accidental
+            const nombreSafe = nombre.replace(/[<>&"']/g, c => ({
+                '<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'
+            }[c]));
             // Mostrar el código generado con opción de copiar — el admin debe entregarlo al usuario
             window.showElegantAlert(
                 '✅ Usuario Creado',
-                `Se registró exitosamente a <b>${nombre}</b>.<br><br>` +
-                `<div style="background:rgba(34,211,238,0.1); border:1px solid rgba(34,211,238,0.3); border-radius:12px; padding:18px; margin:10px 0; text-align:center;">` +
-                `<div style="font-size:11px; color:#67e8f9; text-transform:uppercase; letter-spacing:1px; margin-bottom:8px;">🔑 Código de Acceso</div>` +
-                `<div style="font-family:'Courier New',monospace; font-size:32px; font-weight:800; color:#22d3ee; letter-spacing:8px;">${codigo}</div>` +
-                `</div>` +
-                `<p style="font-size:13px; color:rgba(255,255,255,0.65);">Entregue este código al usuario. Lo necesitará para iniciar sesión.</p>`
+                `<div style="text-align:center;">` +
+                  `<p style="font-size:14px; color:rgba(255,255,255,0.85); margin:0 0 6px;">Se registró exitosamente a <b style="color:#22d3ee;">${nombreSafe}</b></p>` +
+                  `<div style="background:linear-gradient(135deg,rgba(34,211,238,0.12),rgba(34,211,238,0.04)); border:1px solid rgba(34,211,238,0.35); border-radius:14px; padding:20px; margin:14px 0;">` +
+                    `<div style="font-size:11px; color:#67e8f9; text-transform:uppercase; letter-spacing:1.5px; font-weight:700; margin-bottom:10px;">🔑 Código de Acceso</div>` +
+                    `<div style="font-family:'Courier New',monospace; font-size:34px; font-weight:800; color:#22d3ee; letter-spacing:8px;">${codigo}</div>` +
+                  `</div>` +
+                  `<p style="font-size:13px; color:rgba(255,255,255,0.6); margin:0;">Entregue este código al usuario.<br>Lo necesitará para iniciar sesión.</p>` +
+                `</div>`,
+                { html: true }
             );
             window.switchConfigurationTab('usuarios', document.querySelector('#config-tabs-bar .config-tab-btn'));
         } catch(e) {
