@@ -398,8 +398,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // === SINCRONIZACIÓN UNIFICADA ===
     async function syncEverythingFromCloud({ force = false } = {}) {
+        const start = Date.now();
         // Todos en paralelo para minimizar latencia (~ tiempo del más lento, no la suma)
-        await Promise.allSettled([
+        const results = await Promise.allSettled([
             syncPatientsFromCloud({ force }),
             syncMedicosFromCloud(),
             syncCentrosFromCloud(),
@@ -407,7 +408,59 @@ document.addEventListener('DOMContentLoaded', () => {
             syncAppearanceFromCloud(),
             syncMessageHistoryFromCloud()
         ]);
-        try { window._lastFullSync = Date.now(); } catch (e) {}
+        try {
+            window._lastFullSync = Date.now();
+            window._lastSyncDuration = window._lastFullSync - start;
+            window._lastSyncOk = results.every(r => r.status === 'fulfilled');
+            _updateSyncBadge();
+        } catch (e) {}
+    }
+
+    // === INDICADOR VISIBLE DE SINCRONIZACIÓN (badge flotante) ===
+    function _ensureSyncBadge() {
+        if (document.getElementById('cloud-sync-badge')) return;
+        const badge = document.createElement('div');
+        badge.id = 'cloud-sync-badge';
+        badge.title = 'Estado de sincronización con la nube — clic para forzar sync';
+        badge.style.cssText = 'position:fixed;bottom:14px;right:14px;z-index:99999;background:rgba(0,0,0,0.75);border:1px solid rgba(16,185,129,0.45);color:#34d399;padding:6px 12px;border-radius:20px;font-size:11px;font-weight:700;font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;gap:6px;cursor:pointer;backdrop-filter:blur(8px);box-shadow:0 4px 12px rgba(0,0,0,0.3);letter-spacing:0.3px;';
+        badge.innerHTML = '<span class="sync-dot" style="width:8px;height:8px;border-radius:50%;background:#34d399;display:inline-block;animation:syncPulse 2s ease-in-out infinite;"></span><span class="sync-text">Sincronizando...</span>';
+        badge.onclick = () => {
+            if (window._syncEverythingFromCloud) window._syncEverythingFromCloud({ force: true });
+        };
+        document.body.appendChild(badge);
+        // Animación CSS para el pulse
+        if (!document.getElementById('cloud-sync-style')) {
+            const style = document.createElement('style');
+            style.id = 'cloud-sync-style';
+            style.textContent = '@keyframes syncPulse { 0%,100%{opacity:1;transform:scale(1);} 50%{opacity:0.4;transform:scale(0.7);} }';
+            document.head.appendChild(style);
+        }
+    }
+    function _updateSyncBadge() {
+        _ensureSyncBadge();
+        const badge = document.getElementById('cloud-sync-badge');
+        if (!badge) return;
+        const dot = badge.querySelector('.sync-dot');
+        const txt = badge.querySelector('.sync-text');
+        const ok = window._lastSyncOk !== false;
+        const ms = window._lastSyncDuration || 0;
+        const ageSec = window._lastFullSync ? Math.floor((Date.now() - window._lastFullSync) / 1000) : null;
+        if (ok) {
+            badge.style.borderColor = 'rgba(16,185,129,0.45)';
+            badge.style.color = '#34d399';
+            if (dot) dot.style.background = '#34d399';
+            const ageTxt = ageSec === null ? 'recién' : (ageSec < 5 ? 'ahora' : `hace ${ageSec}s`);
+            if (txt) txt.textContent = `🟢 Nube OK · ${ageTxt} · ${ms}ms`;
+        } else {
+            badge.style.borderColor = 'rgba(239,68,68,0.5)';
+            badge.style.color = '#f87171';
+            if (dot) dot.style.background = '#f87171';
+            if (txt) txt.textContent = '🔴 Error de sync — clic para reintentar';
+        }
+    }
+    // Refresca el contador "hace Xs" cada segundo aunque no haya nuevo sync
+    if (!window._cloudSyncBadgeTimer) {
+        window._cloudSyncBadgeTimer = setInterval(_updateSyncBadge, 1000);
     }
 
     // Arrancar polling cada 3 segundos
