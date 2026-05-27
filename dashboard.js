@@ -1363,10 +1363,10 @@ function renderSection(name, data) {
         // Construye SIEMPRE el array de pacientes desde el localStorage actual,
         // así cada re-render usa los datos más frescos (citas, recetas, etc.).
         //
-        // REGLA DE FILTRO:
-        //   Un paciente aparece en la lista si tiene ≥1 cita futura, o si
-        //   no tiene citas. Los que sólo tienen citas pasadas (atendidas o no)
-        //   se trasladan al Historial y dejan de aparecer aquí.
+        // REGLA DE FILTRO (estricta):
+        //   Un paciente aparece en Lista SOLO si tiene ≥1 cita futura.
+        //   Sin cita futura → va al Historial (sea por citas pasadas o por
+        //   no tener ninguna cita agendada).
         function buildPatientsArray() {
             const registry = JSON.parse(localStorage.getItem(key) || '[]');
             const allAppts = window.getAppointments ? window.getAppointments() : [];
@@ -1381,10 +1381,9 @@ function renderSection(name, data) {
                 // Citas relacionadas con este paciente
                 const patientAppts = allAppts.filter(a => a.qsl === qsl || a.name === name);
                 const futureAppts = patientAppts.filter(a => new Date(a.date + 'T' + (a.time || '00:00')) >= now);
-                const pastAppts = patientAppts.filter(a => new Date(a.date + 'T' + (a.time || '00:00')) < now);
 
-                // Si tiene SOLO citas pasadas (≥1 pasada, 0 futuras) → archivar
-                if (pastAppts.length > 0 && futureAppts.length === 0) {
+                // Sin cita futura → archivar (va al Historial)
+                if (futureAppts.length === 0) {
                     archived.push({ qsl, name });
                     return null;
                 }
@@ -1634,7 +1633,7 @@ function renderSection(name, data) {
         }
 
         // Lista enriquecida ordenada por fecha descendente (más recientes primero)
-        const records = allAppts
+        const apptRecords = allAppts
             .map(a => {
                 const p = patientMap[a.qsl] || { name: a.name || '(Paciente eliminado)', telefono: '—' };
                 return {
@@ -1654,14 +1653,45 @@ function renderSection(name, data) {
                 return db - da;
             });
 
+        // Pacientes sin ninguna cita agendada (también van al historial)
+        const now = new Date();
+        const patientsWithAnyAppt = new Set(
+            allAppts.flatMap(a => [a.qsl, a.name].filter(Boolean))
+        );
+        const unscheduled = registry
+            .map(qsl => typeof qsl === 'string' ? qsl : (qsl.qsl || qsl.codigo || qsl.id || String(qsl)))
+            .filter(qsl => {
+                const p = patientMap[qsl];
+                if (!p) return false;
+                // Sin cita futura Y sin ningún registro de cita
+                const has = patientsWithAnyAppt.has(qsl) || patientsWithAnyAppt.has(p.name);
+                return !has;
+            })
+            .map(qsl => {
+                const p = patientMap[qsl];
+                return {
+                    qsl,
+                    name: p.name,
+                    telefono: p.telefono,
+                    date: '',
+                    time: '',
+                    motivo: '',
+                    observaciones: '',
+                    status: 'unscheduled'
+                };
+            });
+
+        const records = [...apptRecords, ...unscheduled];
+
         const overlay = document.createElement('div');
         overlay.id = 'appointment-history-overlay';
         overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.94);z-index:9999999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(10px);padding:12px;box-sizing:border-box;';
 
         const statusBadge = (s) => {
-            if (s === 'attended') return '<span title="Atendida" style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.5);color:#34d399;font-size:18px;font-weight:bold;">✓</span>';
-            if (s === 'missed')   return '<span title="No atendida" style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:rgba(239,68,68,0.2);border:1px solid rgba(239,68,68,0.5);color:#f87171;font-size:18px;font-weight:bold;">✕</span>';
-            if (s === 'pending')  return '<span title="Pendiente" style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:rgba(251,191,36,0.18);border:1px solid rgba(251,191,36,0.5);color:#fbbf24;font-size:16px;">⏳</span>';
+            if (s === 'attended')    return '<span title="Atendida" style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.5);color:#34d399;font-size:18px;font-weight:bold;">✓</span>';
+            if (s === 'missed')      return '<span title="No atendida" style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:rgba(239,68,68,0.2);border:1px solid rgba(239,68,68,0.5);color:#f87171;font-size:18px;font-weight:bold;">✕</span>';
+            if (s === 'pending')     return '<span title="Pendiente" style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:rgba(251,191,36,0.18);border:1px solid rgba(251,191,36,0.5);color:#fbbf24;font-size:16px;">⏳</span>';
+            if (s === 'unscheduled') return '<span title="Sin cita agendada" style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:rgba(148,163,184,0.15);border:1px solid rgba(148,163,184,0.4);color:#cbd5e1;font-size:14px;">📋</span>';
             return '<span title="Sin datos" style="opacity:0.4;">—</span>';
         };
 
@@ -1680,14 +1710,15 @@ function renderSection(name, data) {
                 total: records.length,
                 attended: records.filter(r => r.status === 'attended').length,
                 missed: records.filter(r => r.status === 'missed').length,
-                pending: records.filter(r => r.status === 'pending').length
+                pending: records.filter(r => r.status === 'pending').length,
+                unscheduled: records.filter(r => r.status === 'unscheduled').length
             };
 
             const rows = filtered.length > 0
                 ? filtered.map(r => {
                     const fechaLabel = r.date
                         ? new Date(r.date + 'T12:00:00').toLocaleDateString('es-ES', { day: '2-digit', month: 'short', year: 'numeric' }) + ' · ' + (r.time || '')
-                        : '—';
+                        : (r.status === 'unscheduled' ? '<span style="color:rgba(203,213,225,0.6);">Sin agendar</span>' : '—');
                     return `<tr style="border-bottom:1px solid rgba(255,255,255,0.06);cursor:pointer;transition:background 0.15s;"
                                 onmouseover="this.style.background='rgba(168,85,247,0.08)'"
                                 onmouseout="this.style.background='transparent'"
@@ -1700,7 +1731,7 @@ function renderSection(name, data) {
                         <td style="padding:11px 14px;text-align:center;">${statusBadge(r.status)}</td>
                     </tr>`;
                 }).join('')
-                : `<tr><td colspan="6" style="padding:40px;text-align:center;color:rgba(255,255,255,0.35);font-size:14px;">No se encontraron citas en el historial.</td></tr>`;
+                : `<tr><td colspan="6" style="padding:40px;text-align:center;color:rgba(255,255,255,0.35);font-size:14px;">No se encontraron registros en el historial.</td></tr>`;
 
             overlay.innerHTML = `
                 <div style="background:linear-gradient(145deg,#0f172a,#1a1530);border:1px solid rgba(168,85,247,0.35);border-radius:20px;padding:28px;width:98vw;height:96vh;display:flex;flex-direction:column;box-shadow:0 30px 80px rgba(0,0,0,0.7);box-sizing:border-box;">
@@ -1712,7 +1743,7 @@ function renderSection(name, data) {
                                 Total: <b style="color:white;">${stats.total}</b> &nbsp;·&nbsp;
                                 <span style="color:#34d399;">✓ Atendidas: <b>${stats.attended}</b></span> &nbsp;·&nbsp;
                                 <span style="color:#f87171;">✕ No atendidas: <b>${stats.missed}</b></span> &nbsp;·&nbsp;
-                                <span style="color:#fbbf24;">⏳ Pendientes: <b>${stats.pending}</b></span>
+                                <span style="color:#fbbf24;">⏳ Pendientes: <b>${stats.pending}</b></span>${stats.unscheduled ? ` &nbsp;·&nbsp; <span style="color:#cbd5e1;">📋 Sin agendar: <b>${stats.unscheduled}</b></span>` : ''}
                             </p>
                         </div>
                         <button onclick="document.getElementById('appointment-history-overlay').remove()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:white;padding:8px 16px;border-radius:10px;cursor:pointer;font-size:14px;">✕ Cerrar</button>
