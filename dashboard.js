@@ -6365,6 +6365,29 @@ function renderSection(name, data) {
     };
 
     // ---- TAB: MÉDICOS (crear / gestionar) ----
+    // Genera un código de acceso de 6 caracteres alfanuméricos.
+    // Excluye caracteres ambiguos (0/O, 1/I/L) para evitar confusiones al dictarlo.
+    function generarCodigoAcceso() {
+        const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+        let code = '';
+        for (let i = 0; i < 6; i++) {
+            code += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        return code;
+    }
+
+    // Genera un código único (que no esté ya en uso por otro usuario)
+    async function generarCodigoUnico(medicosExistentes) {
+        const usados = new Set((medicosExistentes || []).map(m => (m.usuario || '').toUpperCase()));
+        let code;
+        let intentos = 0;
+        do {
+            code = generarCodigoAcceso();
+            intentos++;
+        } while (usados.has(code) && intentos < 20);
+        return code;
+    }
+
     async function buildMedicosTab() {
         let medicos = [];
         try {
@@ -6375,76 +6398,149 @@ function renderSection(name, data) {
             medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
         }
 
-        const medicosHtml = medicos.length > 0 ? medicos.map(m => `
+        const medicosHtml = medicos.length > 0 ? medicos.map(m => {
+            const codigo = m.usuario || '——————';
+            const telefono = m.telefono || '—';
+            const docId = m.id_identificacion || m.dpi || '—';
+            return `
             <div style="background:linear-gradient(135deg,rgba(96,165,250,0.08),rgba(96,165,250,0.02)); border:1px solid rgba(96,165,250,0.2); border-radius:16px; padding:18px; position:relative; display:flex; align-items:center; gap:16px;">
-                <div style="width:48px; height:48px; border-radius:50%; background:linear-gradient(135deg,#1d4ed8,#60a5fa); display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:800; color:white; flex-shrink:0;">${(m.nombre_completo||m.usuario||'?').charAt(0).toUpperCase()}</div>
+                <div style="width:48px; height:48px; border-radius:50%; background:linear-gradient(135deg,#1d4ed8,#60a5fa); display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:800; color:white; flex-shrink:0;">${(m.nombre_completo||'?').charAt(0).toUpperCase()}</div>
                 <div style="flex:1; min-width:0;">
-                    <h4 style="color:white; font-size:16px; font-weight:700; margin-bottom:3px;">${m.nombre_completo || m.usuario || m.id_medico}</h4>
-                    <p style="color:rgba(255,255,255,0.5); font-size:12px;">ID: ${m.id_medico} ${m.id_centro ? '· Centro: '+m.id_centro : ''}</p>
+                    <h4 style="color:white; font-size:16px; font-weight:700; margin-bottom:4px;">${m.nombre_completo || m.id_medico}</h4>
+                    <p style="color:rgba(255,255,255,0.55); font-size:12px; margin:0 0 6px;">📞 ${telefono} &nbsp;·&nbsp; 🪪 ID: ${docId}</p>
+                    <div style="display:inline-flex; align-items:center; gap:8px; background:rgba(34,211,238,0.08); border:1px solid rgba(34,211,238,0.3); padding:4px 10px; border-radius:8px;">
+                        <span style="font-size:10px; color:#67e8f9; text-transform:uppercase; letter-spacing:0.5px;">Código</span>
+                        <span style="font-family:'Courier New',monospace; font-size:14px; font-weight:800; color:#22d3ee; letter-spacing:2px;">${codigo}</span>
+                        <button onclick="navigator.clipboard.writeText('${codigo}'); this.textContent='✓'; setTimeout(()=>this.textContent='📋',1500);" style="background:transparent; border:none; color:#22d3ee; cursor:pointer; font-size:13px; padding:0 2px;" title="Copiar código">📋</button>
+                    </div>
                 </div>
                 <div style="display:flex; gap:8px;">
-                    <button onclick="window.editarMedicoForm('${m.id_medico}')" style="background:rgba(96,165,250,0.1); color:#60a5fa; border:1px solid rgba(96,165,250,0.3); padding:8px 14px; border-radius:10px; cursor:pointer; font-size:13px; font-weight:600;">✏️ Editar</button>
-                    <button onclick="window.deleteMedicoConfig('${m.id_medico}')" style="background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.2); padding:8px 14px; border-radius:10px; cursor:pointer; font-size:13px; font-weight:600;">🗑</button>
+                    <button onclick="window.deleteMedicoConfig('${m.id_medico}')" style="background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.2); padding:8px 14px; border-radius:10px; cursor:pointer; font-size:13px; font-weight:600;" title="Eliminar usuario">🗑</button>
                 </div>
-            </div>
-        `).join('') : `<div style="text-align:center; padding:60px; border:2px dashed rgba(255,255,255,0.06); border-radius:20px;"><div style="font-size:48px; margin-bottom:12px;">👨‍⚕️</div><p style="color:var(--text-muted);">No hay médicos registrados.</p></div>`;
+            </div>`;
+        }).join('') : `<div style="text-align:center; padding:60px; border:2px dashed rgba(255,255,255,0.06); border-radius:20px;"><div style="font-size:48px; margin-bottom:12px;">👨‍⚕️</div><p style="color:var(--text-muted);">No hay usuarios registrados.</p></div>`;
+
+        const codigoInicial = await generarCodigoUnico(medicos);
+        // Guarda el código generado para que crearNuevoMedico lo use
+        window._codigoGenerado = codigoInicial;
 
         return `
         <div style="display:grid; grid-template-columns:1fr 380px; gap:24px; align-items:start;">
             <div>
-                <h3 style="color:#60a5fa; font-size:18px; font-weight:700; margin-bottom:20px;">👨‍⚕️ Médicos Registrados (${medicos.length})</h3>
+                <h3 style="color:#60a5fa; font-size:18px; font-weight:700; margin-bottom:20px;">👨‍⚕️ Usuarios Registrados (${medicos.length})</h3>
                 <div style="display:grid; gap:14px;">${medicosHtml}</div>
             </div>
             <div class="widget-card" style="border:1px solid rgba(96,165,250,0.2); background:rgba(0,0,0,0.3); position:sticky; top:0;" id="medico-form-card">
-                <h3 class="widget-title" style="color:#60a5fa; font-size:16px; margin-bottom:20px;">➕ Nuevo Acceso de Médico</h3>
-                <div style="display:grid; gap:12px;">
-                    <div class="input-group"><label>Nombre Completo</label><input type="text" id="nm-nombre" placeholder="Dr. Juan Pérez"></div>
-                    <div class="input-group"><label>Usuario (para iniciar sesión)</label><input type="text" id="nm-usuario" placeholder="juan.perez"></div>
-                    <div class="input-group"><label>Contraseña</label><input type="text" id="nm-pass" placeholder="Contraseña segura" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other" style="-webkit-text-security: disc; text-security: disc;"></div>
-                    <div class="input-group"><label>Especialidad (opcional)</label><input type="text" id="nm-especialidad" placeholder="Medicina General"></div>
-                    <div class="input-group"><label>Centro Médico (ID)</label><input type="text" id="nm-centro" placeholder="ID del centro (opcional)"></div>
-                    <button onclick="window.crearNuevoMedico()" style="width:100%; padding:14px; background:linear-gradient(135deg,#1d4ed8,#60a5fa); color:white; font-weight:800; border-radius:12px; border:none; cursor:pointer; font-size:15px; margin-top:8px;">CREAR ACCESO</button>
+                <h3 class="widget-title" style="color:#60a5fa; font-size:16px; margin-bottom:20px;">➕ Nuevo Usuario</h3>
+                <div style="display:grid; gap:14px;">
+                    <div class="input-group">
+                        <label>Nombre Completo *</label>
+                        <input type="text" id="nm-nombre" placeholder="Dr. Juan Pérez" autocomplete="off">
+                    </div>
+                    <div class="input-group">
+                        <label>Número de Identificación *</label>
+                        <input type="text" id="nm-dpi" placeholder="DPI / Pasaporte" autocomplete="off">
+                    </div>
+                    <div class="input-group">
+                        <label>Número de Teléfono *</label>
+                        <input type="text" id="nm-telefono" placeholder="Ej: +502 5555-1234" autocomplete="off">
+                    </div>
+
+                    <!-- Código de acceso generado automáticamente -->
+                    <div style="background:linear-gradient(135deg,rgba(34,211,238,0.08),rgba(34,211,238,0.02)); border:1px solid rgba(34,211,238,0.3); border-radius:12px; padding:14px 16px; margin-top:4px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                            <span style="font-size:11px; color:#67e8f9; text-transform:uppercase; letter-spacing:1px; font-weight:700;">🔑 Código de Acceso (auto-generado)</span>
+                            <button type="button" onclick="window.regenerarCodigo()" style="background:rgba(34,211,238,0.1); border:1px solid rgba(34,211,238,0.3); color:#22d3ee; padding:3px 10px; border-radius:6px; cursor:pointer; font-size:11px; font-weight:600;" title="Generar otro código">🔄 Regenerar</button>
+                        </div>
+                        <div id="nm-codigo-display" style="font-family:'Courier New',monospace; font-size:28px; font-weight:800; color:#22d3ee; letter-spacing:6px; text-align:center; padding:8px 0;">${codigoInicial}</div>
+                        <p style="font-size:11px; color:rgba(255,255,255,0.45); margin:0; text-align:center;">El usuario inicia sesión escribiendo este código</p>
+                    </div>
+
+                    <button onclick="window.crearNuevoMedico()" style="width:100%; padding:14px; background:linear-gradient(135deg,#1d4ed8,#60a5fa); color:white; font-weight:800; border-radius:12px; border:none; cursor:pointer; font-size:15px; margin-top:6px;">CREAR USUARIO</button>
                 </div>
             </div>
         </div>`;
     }
 
+    window.regenerarCodigo = async function() {
+        let medicos = [];
+        try {
+            const resp = await fetch('/api/medicos');
+            const result = await resp.json();
+            medicos = result.medicos || [];
+        } catch(e) {
+            medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+        }
+        const nuevo = await generarCodigoUnico(medicos);
+        window._codigoGenerado = nuevo;
+        const display = document.getElementById('nm-codigo-display');
+        if (display) display.textContent = nuevo;
+    };
+
     window.crearNuevoMedico = async function() {
         const nombre = document.getElementById('nm-nombre')?.value.trim();
-        const usuario = document.getElementById('nm-usuario')?.value.trim();
-        const pass = document.getElementById('nm-pass')?.value.trim();
-        const especialidad = document.getElementById('nm-especialidad')?.value.trim();
-        const centro = document.getElementById('nm-centro')?.value.trim();
+        const dpi = document.getElementById('nm-dpi')?.value.trim();
+        const telefono = document.getElementById('nm-telefono')?.value.trim();
+        const codigo = window._codigoGenerado;
 
-        if (!nombre || !usuario || !pass) {
-            window.showElegantAlert('⚠️ Campos requeridos', 'Nombre, usuario y contraseña son obligatorios.', '⚠️');
+        if (!nombre || !dpi || !telefono) {
+            window.showElegantAlert('⚠️ Campos requeridos', 'Nombre, número de identificación y teléfono son obligatorios.', '⚠️');
+            return;
+        }
+        if (!codigo || codigo.length !== 6) {
+            window.showElegantAlert('⚠️ Código inválido', 'No se pudo generar el código de acceso. Intenta nuevamente.', '⚠️');
             return;
         }
 
         const id_medico = 'MED-' + Date.now();
-        const password_hash = btoa(pass);
-        const medData = { nombre_completo: nombre, usuario, password_hash, especialidad: especialidad || '', id_centro: centro || '', created_at: new Date().toISOString() };
+        // El usuario inicia sesión escribiendo el código de 6 caracteres.
+        // Lo guardamos como `usuario` (campo que la función login() ya consulta).
+        const medData = {
+            nombre_completo: nombre,
+            id_identificacion: dpi,
+            telefono: telefono,
+            usuario: codigo,
+            password_hash: btoa(codigo),
+            created_at: new Date().toISOString()
+        };
 
         try {
             await fetch(`/api/medico/${id_medico}`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(medData) });
-            // También guardar en localStorage
+            // También guardar en localStorage como caché
             const local = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
             local.push({ id_medico, ...medData });
             localStorage.setItem('tabla_medicos', JSON.stringify(local));
-            window.showElegantAlert('✅ Acceso Creado', `El médico ${nombre} ya puede iniciar sesión con su usuario.`);
-            window.switchConfigTab('medicos', null);
+
+            // Mostrar el código generado con opción de copiar — el admin debe entregarlo al usuario
+            window.showElegantAlert(
+                '✅ Usuario Creado',
+                `Se registró exitosamente a <b>${nombre}</b>.<br><br>` +
+                `<div style="background:rgba(34,211,238,0.1); border:1px solid rgba(34,211,238,0.3); border-radius:12px; padding:18px; margin:10px 0; text-align:center;">` +
+                `<div style="font-size:11px; color:#67e8f9; text-transform:uppercase; letter-spacing:1px; margin-bottom:8px;">🔑 Código de Acceso</div>` +
+                `<div style="font-family:'Courier New',monospace; font-size:32px; font-weight:800; color:#22d3ee; letter-spacing:8px;">${codigo}</div>` +
+                `</div>` +
+                `<p style="font-size:13px; color:rgba(255,255,255,0.65);">Entregue este código al usuario. Lo necesitará para iniciar sesión.</p>`
+            );
+            window.switchConfigurationTab('usuarios', document.querySelector('#config-tabs-bar .config-tab-btn'));
         } catch(e) {
-            window.showElegantAlert('❌ Error', 'No se pudo guardar el médico. Revisa la conexión.');
+            window.showElegantAlert('❌ Error', 'No se pudo guardar el usuario. Revisa la conexión.');
         }
     };
 
     window.deleteMedicoConfig = async function(id) {
-        if (!confirm('¿Eliminar este acceso de médico?')) return;
+        if (!confirm('¿Eliminar este usuario del sistema?')) return;
         try {
             await fetch(`/api/medico/${id}`, { method: 'DELETE' });
             const local = JSON.parse(localStorage.getItem('tabla_medicos') || '[]').filter(m => m.id_medico !== id);
             localStorage.setItem('tabla_medicos', JSON.stringify(local));
-            window.switchConfigTab('medicos', null);
+            // Re-render del tab Usuarios (módulo Configuración usa switchConfigurationTab)
+            const tabContent = document.getElementById('config-tab-content');
+            if (tabContent) {
+                tabContent.innerHTML = `<div class="loading-state"><div class="spinner"></div></div>`;
+                tabContent.innerHTML = await buildMedicosTab();
+            } else if (typeof window.switchConfigTab === 'function') {
+                window.switchConfigTab('medicos', null);
+            }
         } catch(e) { window.showElegantAlert('❌ Error', 'No se pudo eliminar.'); }
     };
 
