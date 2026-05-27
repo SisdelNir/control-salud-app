@@ -1401,7 +1401,7 @@ document.addEventListener('DOMContentLoaded', () => {
     /* End of Scheduler logic */
 
 function renderSection(name, data) {
-        if (userRole === 'medico' && !selectedPatientQSL && name !== 'settings' && name !== 'programmer' && name !== 'scheduler') {
+        if (userRole === 'medico' && !selectedPatientQSL && name !== 'settings' && name !== 'programmer' && name !== 'scheduler' && name !== 'configuration') {
             if (name === 'consultation') {
                 window.renderDoctorHome('search');
                 return;
@@ -6691,20 +6691,21 @@ function renderSection(name, data) {
     async function renderConfiguration() {
         contentArea.innerHTML = `
             <div class="config-tabs" id="config-tabs-bar" style="margin-bottom:24px;">
-                <button class="config-tab-btn active" onclick="window.switchConfigurationTab('privilegios', this)">🔐 Privilegios de Usuario</button>
+                <button class="config-tab-btn active" onclick="window.switchConfigurationTab('usuarios', this)">👨‍⚕️ Usuarios del Sistema</button>
+                <button class="config-tab-btn" onclick="window.switchConfigurationTab('privilegios', this)">🔐 Privilegios</button>
                 <button class="config-tab-btn" onclick="window.switchConfigurationTab('recordatorios', this)">🔔 Recordatorios</button>
                 <button class="config-tab-btn" onclick="window.switchConfigurationTab('apariencia', this)">🎨 Apariencia</button>
             </div>
             <div id="config-tab-content">
-                <div class="loading-state"><div class="spinner"></div><p>Cargando privilegios...</p></div>
+                <div class="loading-state"><div class="spinner"></div><p>Cargando usuarios...</p></div>
             </div>
         `;
-        // Cargar el primer tab (privilegios)
+        // Cargar el primer tab (Usuarios)
         const tabContent = document.getElementById('config-tab-content');
         try {
-            tabContent.innerHTML = await buildPrivilegiosTab();
+            tabContent.innerHTML = await buildMedicosTab();
         } catch (e) {
-            tabContent.innerHTML = '<p style="color:#f87171;padding:30px;">Error al cargar privilegios.</p>';
+            tabContent.innerHTML = '<p style="color:#f87171;padding:30px;">Error al cargar usuarios.</p>';
         }
     }
 
@@ -6715,7 +6716,9 @@ function renderSection(name, data) {
         if (!tabContent) return;
         tabContent.innerHTML = `<div class="loading-state"><div class="spinner"></div></div>`;
 
-        if (tab === 'privilegios') {
+        if (tab === 'usuarios') {
+            tabContent.innerHTML = await buildMedicosTab();
+        } else if (tab === 'privilegios') {
             tabContent.innerHTML = await buildPrivilegiosTab();
         } else if (tab === 'apariencia') {
             tabContent.innerHTML = buildAparienciaTab();
