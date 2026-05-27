@@ -24,11 +24,25 @@
                 </div>
             </header>
 
-            <form id="qsl-form" autocomplete="off">
+            <form id="qsl-form" autocomplete="off" data-form-type="other" data-lpignore="true">
+                <!-- Honeypot: Chrome rellena estos y no los reales -->
+                <input type="text" name="fake-user" style="display:none;" tabindex="-1" autocomplete="username">
+                <input type="password" name="fake-pass" style="display:none;" tabindex="-1" autocomplete="new-password">
+
                 <div class="input-group" style="margin-bottom: 25px;">
                     <label id="input-label" for="login-code">CÓDIGO DE ACCESO</label>
-                    <input type="password" id="login-code" placeholder="Ingrese su código..." maxlength="20"
-                        autocomplete="new-password" autofocus>
+                    <input type="text" id="login-code" name="access-code" placeholder="Ingrese su código..." maxlength="20"
+                        inputmode="text"
+                        autocomplete="off"
+                        autocorrect="off"
+                        autocapitalize="off"
+                        spellcheck="false"
+                        data-lpignore="true"
+                        data-1p-ignore="true"
+                        data-bwignore="true"
+                        data-form-type="other"
+                        style="-webkit-text-security: disc; text-security: disc; font-family: 'Outfit', system-ui, sans-serif;"
+                        autofocus>
                     <div class="input-focus-line"></div>
                 </div>
 

@@ -4469,11 +4469,19 @@ function renderSection(name, data) {
                 </div>
                 <div class="input-group" style="margin-bottom: 20px;">
                     <label>Clave Maestra Actual *</label>
-                    <input type="password" id="current-doc-pass" placeholder="Ingresar clave actual para autorizar..." autocomplete="new-password" ${!isDoc ? 'disabled' : ''}>
+                    <input type="text" id="current-doc-pass" placeholder="Ingresar clave actual para autorizar..."
+                        autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                        data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other"
+                        style="-webkit-text-security: disc; text-security: disc;"
+                        ${!isDoc ? 'disabled' : ''}>
                 </div>
                 <div class="input-group" style="margin-bottom: 20px;">
                     <label>Nueva Clave de Acceso</label>
-                    <input type="password" id="new-doc-pass" placeholder="Ingresar nueva clave..." autocomplete="new-password" ${!isDoc ? 'disabled' : ''}>
+                    <input type="text" id="new-doc-pass" placeholder="Ingresar nueva clave..."
+                        autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                        data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other"
+                        style="-webkit-text-security: disc; text-security: disc;"
+                        ${!isDoc ? 'disabled' : ''}>
                 </div>
                 ${isDoc ? `
                     <button class="btn-primary" style="width: 100%; margin-bottom: 20px; background: #fbbf24; color: #000; font-weight: 800;" onclick="window.updateDocProfile()">ACTUALIZAR CREDENCIALES</button>
@@ -6349,7 +6357,7 @@ function renderSection(name, data) {
                 <div style="display:grid; gap:12px;">
                     <div class="input-group"><label>Nombre Completo</label><input type="text" id="nm-nombre" placeholder="Dr. Juan Pérez"></div>
                     <div class="input-group"><label>Usuario (para iniciar sesión)</label><input type="text" id="nm-usuario" placeholder="juan.perez"></div>
-                    <div class="input-group"><label>Contraseña</label><input type="password" id="nm-pass" placeholder="Contraseña segura" autocomplete="new-password"></div>
+                    <div class="input-group"><label>Contraseña</label><input type="text" id="nm-pass" placeholder="Contraseña segura" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other" style="-webkit-text-security: disc; text-security: disc;"></div>
                     <div class="input-group"><label>Especialidad (opcional)</label><input type="text" id="nm-especialidad" placeholder="Medicina General"></div>
                     <div class="input-group"><label>Centro Médico (ID)</label><input type="text" id="nm-centro" placeholder="ID del centro (opcional)"></div>
                     <button onclick="window.crearNuevoMedico()" style="width:100%; padding:14px; background:linear-gradient(135deg,#1d4ed8,#60a5fa); color:white; font-weight:800; border-radius:12px; border:none; cursor:pointer; font-size:15px; margin-top:8px;">CREAR ACCESO</button>
