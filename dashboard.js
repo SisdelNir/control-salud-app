@@ -898,6 +898,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // Render puro (sin sync) — separado para poder llamarse 2 veces:
     // una inmediata desde local, otra tras sync.
     function _renderSchedulerNow() {
+        // Estamos en vista de calendario (mes), NO en day-detail.
+        // Limpiar el estado evita que un sync residual de un renderDayDetail
+        // anterior reabra el día automáticamente.
+        window._currentSchedulerView = 'month';
+        window._currentDayDetail = null;
+
         const appointments = window.getAppointments();
 
         let year = currentCalDate.getFullYear();
@@ -1346,22 +1352,30 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     window.renderDayDetail = async function(dateStr) {
+        // Marcar PRIMERO el estado de vista: estamos en day-detail viendo este día.
+        // El sync en background usará estas banderas para decidir si re-renderizar.
+        window._currentDayDetail = dateStr;
+        window._currentSchedulerView = 'day';
+
         // PATRÓN RÁPIDO: render inmediato desde local + sync en background.
-        // Si el sync trae nuevas citas, vuelve a llamar a esta función para refrescar.
         if (window.forceFullAppointmentSync && !window._dayDetailSyncing) {
             window._dayDetailSyncing = true;
             window.forceFullAppointmentSync()
                 .finally(() => {
                     window._dayDetailSyncing = false;
-                    // Re-render solo si el usuario sigue mirando el mismo día
-                    const stillHere = document.body && document.body.innerHTML.includes(`renderDayDetail('${dateStr}')`)
-                        || (window._currentDayDetail === dateStr);
-                    if (stillHere) {
+                    // Re-render SOLO si el usuario sigue viendo este día específico.
+                    // NO uses document.body.innerHTML.includes() porque la grilla del
+                    // calendario también contiene `renderDayDetail('YYYY-MM-DD')` en
+                    // los onclick de cada celda → siempre daba true y reabría el día
+                    // automáticamente después de pulsar Volver.
+                    const stillOnSameDay = window._currentSchedulerView === 'day'
+                        && window._currentDayDetail === dateStr
+                        && window.currentSection === 'scheduler';
+                    if (stillOnSameDay) {
                         try { window.renderDayDetail(dateStr); } catch (_) {}
                     }
                 });
         }
-        window._currentDayDetail = dateStr;
         const appointments = window.getAppointments();
         const dayAppts = appointments.filter(a => a.date === dateStr);
         
@@ -6696,6 +6710,46 @@ function renderSection(name, data) {
         //   - admin : todos los que NO son oficina (médicos)
         medicos = medicos.filter(m => isOffice ? m.tipo === 'oficina' : m.tipo !== 'oficina');
 
+        // ----- DEDUP DEFENSIVO -----
+        // Si una persona quedó registrada varias veces (race condition antigua),
+        // mostramos UNA sola fila por DPI + tipo. Conservamos el documento con
+        // created_at más antiguo (el primero creado). Los demás se cuentan
+        // como ocultos para ofrecer un botón de limpieza.
+        const dedupSeen = new Map();         // dpi → registro conservado
+        const dedupHidden = [];              // ids de duplicados ocultados
+        for (const m of medicos) {
+            const dpi = String(m.id_identificacion || m.dpi || '').trim().toLowerCase();
+            // Si no tiene DPI, también dedupear por usuario (código) como fallback
+            const key = dpi || `__cod__${(m.usuario || '').toUpperCase()}` || `__id__${m.id_medico}`;
+            const prev = dedupSeen.get(key);
+            if (!prev) { dedupSeen.set(key, m); continue; }
+            // Elegimos el más antiguo (created_at más bajo). Si empata, el actual gana al previo.
+            const tsPrev = prev.created_at || '';
+            const tsCurr = m.created_at || '';
+            if (tsCurr && (!tsPrev || tsCurr < tsPrev)) {
+                dedupHidden.push(prev.id_medico);
+                dedupSeen.set(key, m);
+            } else {
+                dedupHidden.push(m.id_medico);
+            }
+        }
+        const medicosDeduped = Array.from(dedupSeen.values());
+        const hiddenCount = medicos.length - medicosDeduped.length;
+        medicos = medicosDeduped;
+
+        // Banner de aviso si hay duplicados detectados (ofrece limpieza permanente)
+        const dupBanner = hiddenCount > 0 ? `
+            <div style="background:rgba(251,191,36,0.08); border:1px solid rgba(251,191,36,0.35); border-radius:12px; padding:12px 16px; margin-bottom:16px; display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+                <div style="display:flex; align-items:center; gap:10px;">
+                    <span style="font-size:20px;">⚠️</span>
+                    <div>
+                        <p style="color:#fbbf24; font-size:12px; font-weight:800; margin:0 0 2px;">${hiddenCount} usuario${hiddenCount === 1 ? '' : 's'} duplicado${hiddenCount === 1 ? '' : 's'} oculto${hiddenCount === 1 ? '' : 's'}</p>
+                        <p style="color:rgba(255,255,255,0.55); font-size:11px; margin:0;">Detectados por DPI repetido. Pulsa "Limpiar duplicados" para borrarlos permanentemente.</p>
+                    </div>
+                </div>
+                <button onclick="window.limpiarUsuariosDuplicados()" style="background:rgba(251,191,36,0.15); color:#fbbf24; border:1px solid rgba(251,191,36,0.4); padding:8px 16px; border-radius:10px; cursor:pointer; font-size:12px; font-weight:700; white-space:nowrap;">🧹 Limpiar duplicados</button>
+            </div>` : '';
+
         const medicosHtml = medicos.length > 0 ? medicos.map(m => {
             const codigo = m.usuario || '——————';
             const telefono = m.telefono || '—';
@@ -6728,6 +6782,7 @@ function renderSection(name, data) {
             <div>
                 <h3 style="color:#60a5fa; font-size:18px; font-weight:700; margin-bottom:20px;">${icon} ${userLabelPlural} Registrados (${medicos.length})</h3>
                 ${isOffice ? '<p style="color:rgba(255,255,255,0.5);font-size:12px;margin-top:-12px;margin-bottom:16px;">Personal administrativo. NO podrán acceder a consultas médicas ni crear nuevos médicos.</p>' : ''}
+                ${dupBanner}
                 <div style="display:grid; gap:14px;">${medicosHtml}</div>
             </div>
             <div class="widget-card" style="border:1px solid rgba(96,165,250,0.2); background:rgba(0,0,0,0.3); position:sticky; top:0;" id="medico-form-card">
@@ -6779,7 +6834,14 @@ function renderSection(name, data) {
 
     window.crearNuevoMedico = async function() {
         // Guard contra doble-click: si ya hay una creación en vuelo, ignorar.
+        // IMPORTANTE: se setea YA, antes de cualquier await, para cerrar la
+        // ventana de race condition que producía registros duplicados cuando el
+        // usuario hacía doble-click rápido o reactivaba el botón antes del POST.
         if (window._crearNuevoMedicoInFlight) return;
+        window._crearNuevoMedicoInFlight = true;
+
+        // Helper para liberar el guard en CUALQUIER salida (incluye errores)
+        const releaseGuard = () => { window._crearNuevoMedicoInFlight = false; };
 
         const nombre = document.getElementById('nm-nombre')?.value.trim();
         const dpi = document.getElementById('nm-dpi')?.value.trim();
@@ -6788,28 +6850,52 @@ function renderSection(name, data) {
 
         if (!nombre || !dpi || !telefono) {
             window.showElegantAlert('⚠️ Campos requeridos', 'Nombre, número de identificación y teléfono son obligatorios.', '⚠️');
-            return;
+            return releaseGuard();
         }
         if (!codigo || codigo.length !== 6) {
             window.showElegantAlert('⚠️ Código inválido', 'No se pudo generar el código de acceso. Intenta nuevamente.', '⚠️');
-            return;
+            return releaseGuard();
         }
 
-        // Validar que el código NO esté ya en uso por otro usuario (defensivo).
+        const isOffice = window._privilegeContext === 'office';
+        const tipoEsperado = isOffice ? 'oficina' : 'medico';
+
+        // Validaciones contra duplicados (código + DPI). Se hace UNA sola
+        // consulta a /api/medicos y se valida ambos contra esa lista.
         try {
             const resp = await fetch('/api/medicos');
             const result = await resp.json();
-            const exists = (result.medicos || []).some(m =>
+            const existing = (result.medicos || []);
+            // Duplicado por código (cualquier tipo)
+            const codigoEnUso = existing.some(m =>
                 (m.usuario || '').toUpperCase() === codigo.toUpperCase()
             );
-            if (exists) {
+            if (codigoEnUso) {
                 window.showElegantAlert('⚠️ Código duplicado', 'Ese código ya está en uso. Pulsa "Regenerar" para obtener uno nuevo.', true);
-                return;
+                return releaseGuard();
             }
-        } catch(e) { /* si falla la verificación, continuamos */ }
+            // Duplicado por DPI dentro del MISMO tipo (oficina/médico).
+            // Una persona física no debe registrarse 2 veces como oficina ni 2 veces como médico.
+            const dpiNorm = String(dpi).trim().toLowerCase();
+            const dpiEnUso = existing.some(m =>
+                String(m.id_identificacion || m.dpi || '').trim().toLowerCase() === dpiNorm &&
+                (m.tipo || 'medico') === tipoEsperado
+            );
+            if (dpiEnUso) {
+                window.showElegantAlert(
+                    '⚠️ DPI ya registrado',
+                    `Ya existe un ${isOffice ? 'usuario de oficina' : 'médico'} con el DPI/identificación <b>${dpi}</b>. No se puede registrar dos veces a la misma persona.`,
+                    { html: true }
+                );
+                return releaseGuard();
+            }
+        } catch(e) {
+            // Si falla la consulta, NO bloqueamos la creación (modo offline),
+            // pero registramos para depurar.
+            console.warn('[crearNuevoMedico] No se pudo verificar duplicados:', e?.message || e);
+        }
 
-        // Marcar como "en vuelo" y deshabilitar el botón visualmente
-        window._crearNuevoMedicoInFlight = true;
+        // Deshabilitar el botón visualmente (el guard ya está activo)
         const btn = document.querySelector('#medico-form-card button[onclick*="crearNuevoMedico"]');
         const originalBtnHTML = btn ? btn.innerHTML : null;
         if (btn) {
@@ -6819,7 +6905,7 @@ function renderSection(name, data) {
             btn.innerHTML = '⏳ Creando...';
         }
 
-        const isOffice = window._privilegeContext === 'office';
+        // isOffice ya está declarado arriba (junto con tipoEsperado)
         const id_medico = (isOffice ? 'OFI-' : 'MED-') + Date.now();
         const medData = {
             nombre_completo: nombre,
@@ -6827,7 +6913,7 @@ function renderSection(name, data) {
             telefono: telefono,
             usuario: codigo,
             password_hash: btoa(codigo),
-            tipo: isOffice ? 'oficina' : 'medico',
+            tipo: tipoEsperado,
             created_at: new Date().toISOString()
         };
 
@@ -6872,34 +6958,63 @@ function renderSection(name, data) {
         }
     };
 
-    // Limpia usuarios duplicados (mismo `usuario` = mismo código de acceso):
-    // conserva el documento creado primero (created_at más antiguo) y marca
-    // los demás como deleted=true en Firestore.
+    // Limpia usuarios duplicados. Agrupa por DPI+tipo y por código (usuario).
+    // Conserva el documento más antiguo (created_at menor) y marca los demás
+    // como deleted=true en Firestore. Cubre ambos casos:
+    //   - mismo DPI registrado N veces (incluso si los códigos son distintos)
+    //   - mismo código de acceso usado por N documentos (race condition vieja)
     window.limpiarUsuariosDuplicados = async function() {
         try {
             const resp = await fetch('/api/medicos');
             const result = await resp.json();
             const medicos = result.medicos || [];
-            const byCodigo = new Map();
-            // Agrupar por código (usuario)
-            for (const m of medicos) {
-                const k = (m.usuario || '').toUpperCase();
-                if (!k) continue;
-                if (!byCodigo.has(k)) byCodigo.set(k, []);
-                byCodigo.get(k).push(m);
-            }
-            let removed = 0;
-            for (const [codigo, arr] of byCodigo.entries()) {
-                if (arr.length <= 1) continue;
-                // Conservar el primero (created_at más antiguo); eliminar los demás
-                arr.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
-                for (let i = 1; i < arr.length; i++) {
-                    await fetch(`/api/medico/${arr[i].id_medico}`, { method: 'DELETE' });
-                    removed++;
+
+            // Agrupador genérico: clave → array de docs.
+            const groupBy = (key) => {
+                const map = new Map();
+                for (const m of medicos) {
+                    const k = key(m);
+                    if (!k) continue;
+                    if (!map.has(k)) map.set(k, []);
+                    map.get(k).push(m);
                 }
+                return map;
+            };
+
+            // Set de IDs ya marcados para borrar (evita duplicar peticiones DELETE).
+            const toDelete = new Set();
+
+            // Pasada 1: por DPI + tipo (persona física dentro del mismo rol)
+            const byDpiTipo = groupBy(m => {
+                const dpi = String(m.id_identificacion || m.dpi || '').trim().toLowerCase();
+                if (!dpi) return null;
+                return `${dpi}__${m.tipo || 'medico'}`;
+            });
+            for (const arr of byDpiTipo.values()) {
+                if (arr.length <= 1) continue;
+                arr.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+                for (let i = 1; i < arr.length; i++) toDelete.add(arr[i].id_medico);
             }
+
+            // Pasada 2: por código de acceso (usuario)
+            const byCodigo = groupBy(m => (m.usuario || '').toUpperCase() || null);
+            for (const arr of byCodigo.values()) {
+                if (arr.length <= 1) continue;
+                arr.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+                for (let i = 1; i < arr.length; i++) toDelete.add(arr[i].id_medico);
+            }
+
+            // Ejecutar borrados (DELETE → soft-delete en Firestore)
+            let removed = 0;
+            for (const id of toDelete) {
+                try {
+                    await fetch(`/api/medico/${id}`, { method: 'DELETE' });
+                    removed++;
+                } catch (_) { /* continuar con los demás */ }
+            }
+
             if (removed > 0) {
-                window.showElegantAlert('🧹 Limpieza completada', `Se eliminaron ${removed} usuarios duplicados.`);
+                window.showElegantAlert('🧹 Limpieza completada', `Se eliminaron ${removed} usuario${removed === 1 ? '' : 's'} duplicado${removed === 1 ? '' : 's'}.`);
             } else {
                 window.showElegantAlert('✅ Sin duplicados', 'No se encontraron usuarios duplicados.');
             }
