@@ -465,13 +465,32 @@ document.addEventListener('DOMContentLoaded', () => {
         return data ? JSON.parse(data) : [];
     };
 
+    // Devuelve true si la fecha+hora ya pasó respecto al reloj actual.
+    window.isPastSlot = function(dateStr, timeStr) {
+        if (!dateStr || !timeStr) return false;
+        const slot = new Date(`${dateStr}T${timeStr}`);
+        if (isNaN(slot.getTime())) return false;
+        return slot.getTime() <= Date.now();
+    };
+
     window.saveAppointment = function(appt) {
+        // Validación: no permitir agendar en el pasado
+        if (window.isPastSlot(appt.date, appt.time)) {
+            const msg = `No es posible agendar una cita para el ${appt.date} a las ${appt.time} porque esa hora ya pasó. Seleccione una fecha y hora futura.`;
+            if (typeof window.showElegantAlert === 'function') {
+                window.showElegantAlert('Hora no válida', msg);
+            } else {
+                alert(msg);
+            }
+            return false;
+        }
+
         const appointments = window.getAppointments();
         appointments.push(appt);
         // Sort chronologically
         appointments.sort((a, b) => new Date(a.date + 'T' + a.time) - new Date(b.date + 'T' + b.time));
         localStorage.setItem(window.getAppointmentsKey(), JSON.stringify(appointments));
-        
+
         // --- Nube Sync ---
         const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
         fetch('/api/appointments', {
@@ -479,6 +498,7 @@ document.addEventListener('DOMContentLoaded', () => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ doctor_id, qsl_code: appt.qsl, paciente_nombre: appt.name, fecha: appt.date, hora: appt.time, motivo: appt.motivo })
         }).catch(e => console.error('Cloud sync err', e));
+        return true;
     };
 
     window.deleteAppointment = function(qsl, dateStr, timeStr) {
@@ -957,14 +977,26 @@ document.addEventListener('DOMContentLoaded', () => {
                         </div>
                     `;
                 } else {
-                    timeslotsHtml += `
-                        <div class="time-slot" onclick="window.promptSchedulePatient('${dateStr}', '${timeStr}')">
-                            <div class="time-label">${timeStr}</div>
-                            <div class="time-content">
-                                Disponible + (Clic para agendar cita)
+                    const isPast = window.isPastSlot ? window.isPastSlot(dateStr, timeStr) : false;
+                    if (isPast) {
+                        timeslotsHtml += `
+                            <div class="time-slot" style="opacity:0.35; cursor:not-allowed;" title="Esta hora ya pasó">
+                                <div class="time-label" style="color:rgba(255,255,255,0.4);">${timeStr}</div>
+                                <div class="time-content" style="color:rgba(255,255,255,0.4); text-decoration:line-through;">
+                                    Hora pasada
+                                </div>
                             </div>
-                        </div>
-                    `;
+                        `;
+                    } else {
+                        timeslotsHtml += `
+                            <div class="time-slot" onclick="window.promptSchedulePatient('${dateStr}', '${timeStr}')">
+                                <div class="time-label">${timeStr}</div>
+                                <div class="time-content">
+                                    Disponible + (Clic para agendar cita)
+                                </div>
+                            </div>
+                        `;
+                    }
                 }
             }
         }
@@ -988,6 +1020,17 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     window.promptSchedulePatient = function(dateStr, timeStr) {
+        // Bloqueo defensivo: no permitir agendar en una hora que ya pasó
+        if (window.isPastSlot && window.isPastSlot(dateStr, timeStr)) {
+            const msg = `No es posible agendar una cita para el ${dateStr} a las ${timeStr} porque esa hora ya pasó. Seleccione una fecha y hora futura.`;
+            if (typeof window.showElegantAlert === 'function') {
+                window.showElegantAlert('Hora no válida', msg);
+            } else {
+                alert(msg);
+            }
+            return;
+        }
+
         // First choice: New or Existing?
         const mainOverlay = document.createElement('div');
         mainOverlay.id = 'scheduler-modal';
