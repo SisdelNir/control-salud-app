@@ -6810,8 +6810,8 @@ function renderSection(name, data) {
     async function buildPrivilegiosTab() {
         const isOffice = window._privilegeContext === 'office';
         const emptyMsg = isOffice
-            ? 'No hay usuarios de oficina creados. Ve a la pestaña "Usuarios de Oficina" para crear uno.'
-            : 'No hay médicos registrados. Crea un acceso primero.';
+            ? 'Aún no hay usuarios de oficina creados. Estos son los módulos disponibles que podrá asignar a sus colaboradores una vez los registre en la pestaña <b>"Usuarios de Oficina"</b>.'
+            : 'Aún no hay médicos registrados. Estos son los módulos disponibles que podrá asignar una vez cree el primer acceso desde la pestaña <b>"Usuarios del Sistema"</b>.';
 
         let medicos = [];
         try {
@@ -6826,7 +6826,67 @@ function renderSection(name, data) {
         medicos = medicos.filter(m => isOffice ? m.tipo === 'oficina' : m.tipo !== 'oficina');
 
         if (medicos.length === 0) {
-            return `<div style="text-align:center; padding:80px; border:2px dashed rgba(255,255,255,0.06); border-radius:20px;"><div style="font-size:48px; margin-bottom:16px;">🔐</div><p style="color:var(--text-muted); font-size:16px;">${emptyMsg}</p></div>`;
+            // Catálogo de SOLO LECTURA con los módulos disponibles para asignar
+            const PRIVS = _getFilteredPrivileges();
+            const totalItems = Object.values(PRIVS).reduce((acc, cat) => acc + cat.items.length, 0);
+
+            const previewHtml = Object.entries(PRIVS).map(([catKey, cat]) => {
+                const items = cat.items.map(it => `
+                    <div style="display:flex; justify-content:space-between; align-items:center; padding:12px 16px; background:rgba(0,0,0,0.15); border-radius:10px; border:1px solid rgba(255,255,255,0.04); margin-bottom:8px;">
+                        <div style="flex:1; min-width:0;">
+                            <div style="color:white; font-size:14px; font-weight:600; margin-bottom:3px; display:flex; align-items:center; gap:8px;">
+                                ${it.label}
+                                ${it.sensitive ? '<span style="background:rgba(251,146,60,0.15); border:1px solid rgba(251,146,60,0.35); color:#fdba74; font-size:10px; font-weight:700; padding:2px 7px; border-radius:6px; text-transform:uppercase; letter-spacing:0.5px;">⚠️ Sensible</span>' : ''}
+                            </div>
+                            <p style="color:rgba(255,255,255,0.45); font-size:12px; margin:0;">${it.desc}</p>
+                        </div>
+                        <div style="background:rgba(148,163,184,0.1); border:1px dashed rgba(148,163,184,0.3); color:rgba(255,255,255,0.35); font-size:11px; padding:5px 12px; border-radius:8px; font-weight:600; margin-left:14px;">No asignado</div>
+                    </div>
+                `).join('');
+
+                return `
+                <div style="background:linear-gradient(135deg, ${cat.color}11, transparent); border:1px solid ${cat.color}33; border-radius:14px; padding:18px; margin-bottom:16px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid rgba(255,255,255,0.06);">
+                        <h4 style="color:${cat.color}; font-size:15px; font-weight:700; margin:0;">${cat.label}</h4>
+                        <span style="background:rgba(255,255,255,0.06); color:rgba(255,255,255,0.55); font-size:11px; font-weight:700; padding:4px 10px; border-radius:8px;">${cat.items.length} privilegios</span>
+                    </div>
+                    ${items}
+                </div>`;
+            }).join('');
+
+            return `
+            <div>
+                <!-- Aviso superior -->
+                <div style="background:linear-gradient(135deg, rgba(34,211,238,0.08), rgba(34,211,238,0.02)); border:1px solid rgba(34,211,238,0.25); border-radius:14px; padding:18px 22px; margin-bottom:24px; display:flex; align-items:flex-start; gap:14px;">
+                    <div style="font-size:28px; line-height:1;">🔐</div>
+                    <div style="flex:1;">
+                        <h4 style="color:#22d3ee; font-size:14px; font-weight:700; margin:0 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Catálogo de módulos disponibles</h4>
+                        <p style="color:rgba(255,255,255,0.7); font-size:13px; margin:0; line-height:1.5;">${emptyMsg}</p>
+                    </div>
+                </div>
+
+                <!-- Resumen -->
+                <div style="display:flex; gap:14px; margin-bottom:22px; flex-wrap:wrap;">
+                    <div style="flex:1; min-width:160px; background:rgba(96,165,250,0.06); border:1px solid rgba(96,165,250,0.2); border-radius:12px; padding:14px 18px;">
+                        <p style="color:rgba(255,255,255,0.5); font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 6px; font-weight:700;">Categorías</p>
+                        <p style="color:#60a5fa; font-size:24px; font-weight:800; margin:0;">${Object.keys(PRIVS).length}</p>
+                    </div>
+                    <div style="flex:1; min-width:160px; background:rgba(167,139,250,0.06); border:1px solid rgba(167,139,250,0.2); border-radius:12px; padding:14px 18px;">
+                        <p style="color:rgba(255,255,255,0.5); font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 6px; font-weight:700;">Privilegios totales</p>
+                        <p style="color:#a78bfa; font-size:24px; font-weight:800; margin:0;">${totalItems}</p>
+                    </div>
+                    <div style="flex:1; min-width:160px; background:rgba(251,146,60,0.06); border:1px solid rgba(251,146,60,0.2); border-radius:12px; padding:14px 18px;">
+                        <p style="color:rgba(255,255,255,0.5); font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 6px; font-weight:700;">Privilegios sensibles</p>
+                        <p style="color:#fdba74; font-size:24px; font-weight:800; margin:0;">${Object.values(PRIVS).flatMap(c => c.items).filter(i => i.sensitive).length}</p>
+                    </div>
+                </div>
+
+                <!-- Catálogo -->
+                <h3 style="color:white; font-size:16px; font-weight:700; margin:0 0 16px; display:flex; align-items:center; gap:10px;">
+                    📋 <span>Módulos y Privilegios del Sistema</span>
+                </h3>
+                ${previewHtml}
+            </div>`;
         }
 
         const firstMed = medicos[0];
