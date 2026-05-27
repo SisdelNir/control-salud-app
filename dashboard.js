@@ -281,24 +281,16 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (e) { console.warn('backfill citas:', e?.message || e); }
     }
 
-    // Helper: re-renderiza la sección activa (programmer/admin_general) si
-    // los datos detrás de ella han cambiado en la nube.
-    //
-    // GUARDA: nunca recargar si el usuario está escribiendo en un input,
-    // textarea o select — perdería su entrada en proceso.
+    // Helper: NO recargar automáticamente el Módulo Programador / Admin Central.
+    // El sync sigue actualizando localStorage en background; los datos quedan
+    // frescos para la próxima vez que el usuario navegue a esas secciones.
+    // Esto evita reinicios molestos cada pocos segundos y pérdida de datos
+    // si el usuario está editando un formulario.
     function _refreshAdminViewIfActive() {
-        const ae = document.activeElement;
-        if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) {
-            // Diferir hasta que el usuario deje de editar
-            return;
-        }
-        const progActive = document.querySelector('.nav-item[data-section="programmer"].active, li[data-section="programmer"].active');
-        const admActive  = document.querySelector('.nav-item[data-section="admin_general"].active, li[data-section="admin_general"].active');
-        if (progActive && typeof window._reloadSection === 'function') {
-            try { window._reloadSection('programmer'); } catch (e) {}
-        } else if (admActive && typeof window._reloadSection === 'function') {
-            try { window._reloadSection('admin_general'); } catch (e) {}
-        }
+        // No-op intencional. Si en el futuro se desea refresco automático,
+        // habría que: (1) preservar el tab activo, (2) preservar valores
+        // de inputs, (3) preservar scroll, (4) comparar contenido real.
+        return;
     }
 
     // Crea una "firma" estable de un array de objetos ignorando timestamps
@@ -625,36 +617,43 @@ document.addEventListener('DOMContentLoaded', () => {
             return false;
         }
 
+        // Dedupe local: si ya existe la misma cita (mismo qsl+fecha+hora) NO la dupliques
         const appointments = window.getAppointments();
-        appointments.push(appt);
+        const dupIdx = appointments.findIndex(a => a.qsl === appt.qsl && a.date === appt.date && a.time === appt.time);
+        if (dupIdx >= 0) {
+            // Reemplaza la existente (por si cambió nombre/motivo) en vez de duplicar
+            appointments[dupIdx] = { ...appointments[dupIdx], ...appt };
+        } else {
+            appointments.push(appt);
+        }
         // Sort chronologically
         appointments.sort((a, b) => new Date(a.date + 'T' + a.time) - new Date(b.date + 'T' + b.time));
         localStorage.setItem(window.getAppointmentsKey(), JSON.stringify(appointments));
 
         // --- Nube Sync ---
+        // El endpoint POST /api/appointments es IDEMPOTENTE (usa ID determinístico
+        // doctor+qsl+fecha+hora). Reintentos sobre el mismo doc NO crean duplicados.
         const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
-        fetch('/api/appointments', {
+        const payload = { doctor_id, qsl_code: appt.qsl, paciente_nombre: appt.name, fecha: appt.date, hora: appt.time, motivo: appt.motivo };
+        const doPost = () => fetch('/api/appointments', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ doctor_id, qsl_code: appt.qsl, paciente_nombre: appt.name, fecha: appt.date, hora: appt.time, motivo: appt.motivo })
-        })
+            body: JSON.stringify(payload)
+        });
+        doPost()
         .then(r => {
             if (!r.ok) throw new Error('HTTP ' + r.status);
             console.log(`[DR-SISDEL] Cita subida al cloud: ${appt.name} · ${appt.date} ${appt.time}`);
         })
         .catch(e => {
             console.error('Cloud sync err (cita):', e);
-            // Reintento automático con backoff exponencial corto
             let attempt = 0;
             const retry = () => {
                 attempt++;
                 if (attempt > 5) return;
                 setTimeout(() => {
-                    fetch('/api/appointments', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ doctor_id, qsl_code: appt.qsl, paciente_nombre: appt.name, fecha: appt.date, hora: appt.time, motivo: appt.motivo })
-                    }).then(r => { if (!r.ok) retry(); else console.log(`[DR-SISDEL] Cita reintentada OK (intento ${attempt})`); })
+                    doPost()
+                      .then(r => { if (!r.ok) retry(); else console.log(`[DR-SISDEL] Cita reintentada OK (intento ${attempt})`); })
                       .catch(retry);
                 }, Math.min(1000 * attempt, 5000));
             };
