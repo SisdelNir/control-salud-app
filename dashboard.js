@@ -8345,7 +8345,7 @@ function renderSection(name, data) {
         return `
         <div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:24px;margin-bottom:16px;">
             <h3 style="color:white;font-size:17px;margin:0 0 16px;">📄 Generar Estado de Cuenta</h3>
-            <div style="display:grid; grid-template-columns:1fr 180px 180px auto; gap:14px; align-items:end;">
+            <div style="display:grid; grid-template-columns:1fr 180px 180px; gap:14px; align-items:end;">
                 <div class="input-group"><label>Paciente</label>
                     ${_smartPatientSelect({
                         id: 'fz-estado-qsl',
@@ -8360,18 +8360,209 @@ function renderSection(name, data) {
                 <div class="input-group"><label>Hasta</label>
                     <input type="date" id="fz-estado-hasta" value="${_todayISO()}">
                 </div>
-                <button onclick="window._generarEstado()" style="padding:12px 22px;background:linear-gradient(135deg,#3b82f6,#60a5fa);color:white;font-weight:800;border-radius:12px;border:none;cursor:pointer;font-size:14px;">
-                    📊 Generar
+            </div>
+
+            <!-- Botones de acción: por paciente vs estado general de la clínica -->
+            <div style="display:flex; gap:12px; margin-top:18px; flex-wrap:wrap;">
+                <button onclick="window._generarEstado()" style="flex:1; min-width:240px; padding:14px 22px; background:linear-gradient(135deg,#3b82f6,#60a5fa); color:white; font-weight:800; border-radius:12px; border:none; cursor:pointer; font-size:14px; display:flex; align-items:center; justify-content:center; gap:8px;">
+                    📊 Generar Estado del Paciente
+                </button>
+                <button onclick="window._generarEstadoGeneral()" style="flex:1; min-width:240px; padding:14px 22px; background:linear-gradient(135deg,#7c3aed,#a78bfa); color:white; font-weight:800; border-radius:12px; border:none; cursor:pointer; font-size:14px; display:flex; align-items:center; justify-content:center; gap:8px; box-shadow:0 4px 14px rgba(124,58,237,0.25);" title="Reporte global de la clínica: ingresos, egresos y saldo en el periodo seleccionado (ignora el filtro de paciente)">
+                    📈 Estado General de la Clínica
                 </button>
             </div>
+            <p style="color:rgba(255,255,255,0.4); font-size:11px; margin:10px 0 0; text-align:center;">
+                <b style="color:#a78bfa;">Estado General de la Clínica</b> ignora el filtro de paciente y muestra ingresos, egresos y saldo de TODA la operación en el rango de fechas.
+            </p>
         </div>
         <div id="fz-estado-resultado">
             <div style="text-align:center;color:rgba(255,255,255,0.4);padding:40px;font-size:14px;">
-                Selecciona los filtros y pulsa <b>Generar</b>.
+                Selecciona los filtros y pulsa el botón correspondiente.
                 ${canExport ? '' : '<br><br>🔒 Sin privilegio "Exportar estados de cuenta" — solo lectura en pantalla.'}
             </div>
         </div>`;
     }
+
+    // ---- ESTADO GENERAL DE LA CLÍNICA (ingresos / egresos / saldo del periodo) ----
+    window._generarEstadoGeneral = function() {
+        const desde = document.getElementById('fz-estado-desde')?.value || '';
+        const hasta = document.getElementById('fz-estado-hasta')?.value || '';
+
+        // IMPORTANTE: ignora el filtro de paciente — es un reporte global
+        const txs = _getFinanzasCache().filter(t => {
+            if (desde && (t.fecha || '') < desde) return false;
+            if (hasta && (t.fecha || '') > hasta) return false;
+            return true;
+        }).sort((a, b) => ((a.fecha || '') + 'T' + (a.hora || '00:00')).localeCompare((b.fecha || '') + 'T' + (b.hora || '00:00')));
+
+        const ingresos = txs.filter(t => t.tipo === 'income');
+        const egresos = txs.filter(t => t.tipo === 'expense');
+        const cargos = txs.filter(t => t.tipo === 'charge');
+
+        const totIngresos = ingresos.reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
+        const totEgresos = egresos.reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
+        const totCargos = cargos.reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
+        const cargosPendientes = cargos.filter(c => c.estado === 'pending').reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
+        const saldo = totIngresos - totEgresos;
+
+        // Agrupar ingresos por método de pago
+        const porMetodo = {};
+        ingresos.forEach(t => {
+            const m = t.metodo_pago || 'otro';
+            porMetodo[m] = (porMetodo[m] || 0) + (parseFloat(t.monto) || 0);
+        });
+
+        // Agrupar egresos por categoría / concepto
+        const egresosPorCategoria = {};
+        egresos.forEach(t => {
+            const c = t.categoria || t.concepto || 'Sin categoría';
+            egresosPorCategoria[c] = (egresosPorCategoria[c] || 0) + (parseFloat(t.monto) || 0);
+        });
+
+        const contenedor = document.getElementById('fz-estado-resultado');
+        if (!contenedor) return;
+        if (txs.length === 0) {
+            contenedor.innerHTML = `<div style="text-align:center;color:rgba(255,255,255,0.4);padding:40px;">Sin movimientos en el rango seleccionado.</div>`;
+            return;
+        }
+
+        const rangoLabel = (desde || '⌖ inicio') + ' → ' + (hasta || _todayISO());
+        const fechaEmision = new Date().toLocaleString('es-GT', { day: '2-digit', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+        const margen = saldo >= 0 ? '+' : '';
+        const saldoColor = saldo >= 0 ? '#10b981' : '#f87171';
+
+        // Tabla detallada de TODAS las transacciones
+        const txsHtml = txs.map(t => {
+            let badge, color, label;
+            if (t.tipo === 'income') { badge = '💚 INGRESO'; color = '#10b981'; label = `+ ${_formatMoney(t.monto)}`; }
+            else if (t.tipo === 'expense') { badge = '💸 EGRESO'; color = '#f87171'; label = `- ${_formatMoney(t.monto)}`; }
+            else { badge = '⏳ CARGO'; color = '#fbbf24'; label = _formatMoney(t.monto); }
+            return `
+            <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
+                <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.75);">${t.fecha || '—'} ${t.hora || ''}</td>
+                <td style="padding:8px 12px;font-size:11px;font-weight:700;color:${color};">${badge}</td>
+                <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.7);">${t.paciente_nombre || t.proveedor || '—'}</td>
+                <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.7);">${t.concepto || '—'}</td>
+                <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.6);">${t.metodo_pago || t.categoria || '—'}</td>
+                <td style="padding:8px 12px;text-align:right;font-size:13px;color:${color};font-weight:800;">${label}</td>
+            </tr>`;
+        }).join('');
+
+        // Mini tabla: ingresos por método de pago
+        const metodoLabels = { efectivo: '💵 Efectivo', tarjeta: '💳 Tarjeta', transferencia: '🏦 Transferencia', otro: '📌 Otro' };
+        const metodoHtml = Object.entries(porMetodo).map(([m, v]) => `
+            <div style="display:flex;justify-content:space-between;padding:8px 12px;background:rgba(16,185,129,0.05);border-radius:8px;margin-bottom:6px;">
+                <span style="color:rgba(255,255,255,0.75); font-size:13px;">${metodoLabels[m] || m}</span>
+                <span style="color:#10b981; font-weight:800; font-size:13px;">${_formatMoney(v)}</span>
+            </div>`).join('') || '<div style="color:rgba(255,255,255,0.4); padding:10px;">Sin ingresos en el periodo.</div>';
+
+        // Mini tabla: egresos por categoría
+        const categoriaHtml = Object.entries(egresosPorCategoria).sort((a, b) => b[1] - a[1]).map(([c, v]) => `
+            <div style="display:flex;justify-content:space-between;padding:8px 12px;background:rgba(239,68,68,0.05);border-radius:8px;margin-bottom:6px;">
+                <span style="color:rgba(255,255,255,0.75); font-size:13px;">${c}</span>
+                <span style="color:#f87171; font-weight:800; font-size:13px;">${_formatMoney(v)}</span>
+            </div>`).join('') || '<div style="color:rgba(255,255,255,0.4); padding:10px;">Sin egresos en el periodo.</div>';
+
+        contenedor.innerHTML = `
+        <div id="fz-printable" style="background:linear-gradient(135deg, rgba(124,58,237,0.05), rgba(167,139,250,0.02)); border:1px solid rgba(167,139,250,0.25); border-radius:18px; padding:28px;">
+
+            <!-- ENCABEZADO DEL REPORTE -->
+            <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:24px;flex-wrap:wrap;gap:14px; padding-bottom:18px; border-bottom:1px solid rgba(167,139,250,0.2);">
+                <div>
+                    <p style="color:#a78bfa; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1.5px; margin:0 0 6px;">📈 Reporte Financiero · Clínica Completa</p>
+                    <h3 style="color:white;font-size:22px;margin:0 0 6px;font-weight:800;">Estado General de Resultados</h3>
+                    <p style="color:rgba(255,255,255,0.6);font-size:13px;margin:0;">
+                        <b>Periodo:</b> ${rangoLabel} &nbsp;·&nbsp;
+                        <b>Movimientos:</b> ${txs.length} &nbsp;·&nbsp;
+                        <span style="color:rgba(255,255,255,0.4);">Generado el ${fechaEmision}</span>
+                    </p>
+                </div>
+                ${hasPriv('exportar_estados') ? '<button onclick="window._imprimirEstado()" style="background:linear-gradient(135deg,#7c3aed,#a78bfa); color:white; border:none; padding:12px 24px; border-radius:12px; cursor:pointer; font-weight:800; font-size:13px; display:flex; align-items:center; gap:8px;">🖨️ Imprimir / PDF</button>' : ''}
+            </div>
+
+            <!-- TRES TARJETAS GRANDES: INGRESOS · EGRESOS · SALDO -->
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:16px; margin-bottom:28px;">
+
+                <!-- INGRESOS -->
+                <div style="background:linear-gradient(135deg, rgba(16,185,129,0.12), rgba(16,185,129,0.04)); border:1px solid rgba(16,185,129,0.4); border-radius:16px; padding:22px; position:relative; overflow:hidden;">
+                    <div style="position:absolute; top:-20px; right:-20px; font-size:90px; opacity:0.08;">💚</div>
+                    <p style="color:#34d399; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1.5px; margin:0 0 10px;">INGRESOS</p>
+                    <h2 style="color:#10b981; font-size:30px; font-weight:900; margin:0 0 6px; letter-spacing:-0.5px;">${_formatMoney(totIngresos)}</h2>
+                    <p style="color:rgba(255,255,255,0.5); font-size:12px; margin:0;">${ingresos.length} movimiento${ingresos.length !== 1 ? 's' : ''} de cobro</p>
+                </div>
+
+                <!-- EGRESOS -->
+                <div style="background:linear-gradient(135deg, rgba(239,68,68,0.12), rgba(239,68,68,0.04)); border:1px solid rgba(239,68,68,0.4); border-radius:16px; padding:22px; position:relative; overflow:hidden;">
+                    <div style="position:absolute; top:-20px; right:-20px; font-size:90px; opacity:0.08;">💸</div>
+                    <p style="color:#fca5a5; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1.5px; margin:0 0 10px;">EGRESOS</p>
+                    <h2 style="color:#f87171; font-size:30px; font-weight:900; margin:0 0 6px; letter-spacing:-0.5px;">${_formatMoney(totEgresos)}</h2>
+                    <p style="color:rgba(255,255,255,0.5); font-size:12px; margin:0;">${egresos.length} movimiento${egresos.length !== 1 ? 's' : ''} de gasto</p>
+                </div>
+
+                <!-- SALDO NETO -->
+                <div style="background:linear-gradient(135deg, ${saldo >= 0 ? 'rgba(99,102,241,0.18)' : 'rgba(239,68,68,0.18)'}, rgba(99,102,241,0.04)); border:1px solid ${saldoColor}55; border-radius:16px; padding:22px; position:relative; overflow:hidden;">
+                    <div style="position:absolute; top:-20px; right:-20px; font-size:90px; opacity:0.08;">${saldo >= 0 ? '📊' : '⚠️'}</div>
+                    <p style="color:${saldoColor}; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1.5px; margin:0 0 10px;">SALDO ${saldo >= 0 ? '(UTILIDAD)' : '(PÉRDIDA)'}</p>
+                    <h2 style="color:${saldoColor}; font-size:32px; font-weight:900; margin:0 0 6px; letter-spacing:-0.5px;">${margen}${_formatMoney(saldo)}</h2>
+                    <p style="color:rgba(255,255,255,0.5); font-size:12px; margin:0;">Ingresos − Egresos del periodo</p>
+                </div>
+            </div>
+
+            <!-- BLOQUE INFO: CARGOS PENDIENTES (cuentas por cobrar) -->
+            ${cargosPendientes > 0 ? `
+            <div style="background:rgba(251,191,36,0.06); border:1px solid rgba(251,191,36,0.3); border-radius:12px; padding:14px 18px; margin-bottom:24px; display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;">
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <span style="font-size:24px;">⏳</span>
+                    <div>
+                        <p style="color:#fbbf24; font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:1px; margin:0 0 2px;">Cuentas Por Cobrar Pendientes</p>
+                        <p style="color:rgba(255,255,255,0.55); font-size:12px; margin:0;">Cargos generados que aún no han sido pagados (no afectan el saldo).</p>
+                    </div>
+                </div>
+                <span style="color:#fbbf24; font-size:22px; font-weight:900;">${_formatMoney(cargosPendientes)}</span>
+            </div>` : ''}
+
+            <!-- DESGLOSES: INGRESOS POR MÉTODO y EGRESOS POR CATEGORÍA -->
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-bottom:24px;">
+                <div style="background:rgba(0,0,0,0.2); border:1px solid rgba(16,185,129,0.15); border-radius:14px; padding:18px;">
+                    <h4 style="color:#34d399; font-size:13px; font-weight:800; text-transform:uppercase; letter-spacing:1px; margin:0 0 14px;">💚 Ingresos por Método de Pago</h4>
+                    ${metodoHtml}
+                </div>
+                <div style="background:rgba(0,0,0,0.2); border:1px solid rgba(239,68,68,0.15); border-radius:14px; padding:18px;">
+                    <h4 style="color:#fca5a5; font-size:13px; font-weight:800; text-transform:uppercase; letter-spacing:1px; margin:0 0 14px;">💸 Egresos por Categoría</h4>
+                    ${categoriaHtml}
+                </div>
+            </div>
+
+            <!-- DETALLE COMPLETO DE TRANSACCIONES -->
+            <h4 style="color:white; font-size:14px; font-weight:800; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px;">📋 Detalle de Movimientos (${txs.length})</h4>
+            <div style="border:1px solid rgba(255,255,255,0.06); border-radius:12px; overflow:auto;">
+                <table style="width:100%; border-collapse:collapse;">
+                    <thead style="background:rgba(167,139,250,0.08); position:sticky; top:0;">
+                        <tr>
+                            <th style="padding:11px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Fecha</th>
+                            <th style="padding:11px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Tipo</th>
+                            <th style="padding:11px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Cliente / Proveedor</th>
+                            <th style="padding:11px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Concepto</th>
+                            <th style="padding:11px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Método/Cat.</th>
+                            <th style="padding:11px 12px;text-align:right;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Monto</th>
+                        </tr>
+                    </thead>
+                    <tbody>${txsHtml}</tbody>
+                    <tfoot style="background:rgba(167,139,250,0.06);">
+                        <tr>
+                            <td colspan="5" style="padding:14px 12px; font-weight:800; color:white; font-size:13px;">SALDO NETO DEL PERIODO</td>
+                            <td style="padding:14px 12px; text-align:right; font-weight:900; color:${saldoColor}; font-size:18px;">${margen}${_formatMoney(saldo)}</td>
+                        </tr>
+                    </tfoot>
+                </table>
+            </div>
+
+            <!-- PIE DEL REPORTE -->
+            <p style="text-align:center; color:rgba(255,255,255,0.35); font-size:11px; margin-top:18px; padding-top:14px; border-top:1px solid rgba(255,255,255,0.05);">
+                DR-SISDEL · Reporte Financiero Generado Automáticamente
+            </p>
+        </div>`;
+    };
 
     window._generarEstado = function() {
         const qsl = document.getElementById('fz-estado-qsl')?.value || '';
