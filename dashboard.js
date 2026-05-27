@@ -7934,15 +7934,135 @@ function renderSection(name, data) {
     }
     window.hasPriv = hasPriv;
 
-    function _applyFinanzasSidebarVisibility() {
-        const nav = document.getElementById('nav-finanzas');
-        if (!nav) return;
-        nav.style.display = hasPriv('ver_finanzas') ? '' : 'none';
+    // ============================================================
+    // ===  ENFORCEMENT DE PRIVILEGIOS (SIDEBAR + RUTAS)  =========
+    // ============================================================
+    // Mapa de sección → privilegio requerido para acceder. Si la sección
+    // no está en el mapa, se trata como "solo médicos" (ofocina NO ve).
+    const SECTION_PRIVILEGES = {
+        overview:      'ver_pacientes',
+        consultation:  'realizar_consulta',
+        scheduler:     'ver_agenda',
+        reminders:     'ver_agenda',
+        finanzas:      'ver_finanzas'
+        // settings, configuration, programmer, admin_general → null (solo médicos/master)
+    };
+    // Secciones que SOLO médicos/master pueden ver, sin importar privilegios
+    const OFFICE_FORBIDDEN_SECTIONS = ['settings', 'configuration', 'programmer', 'admin_general'];
+
+    function _isOficinaUser() {
+        if (qslCode === 'MED-MASTER') return false;
+        const docId = localStorage.getItem('current_doctor_id');
+        if (!docId) return false;
+        if (/^OFI-/.test(docId)) return true;
+        try {
+            const list = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            const me = list.find(m => m.id_medico === docId);
+            return !!(me && me.tipo === 'oficina');
+        } catch (e) { return false; }
     }
-    setTimeout(_applyFinanzasSidebarVisibility, 200);
-    setTimeout(_applyFinanzasSidebarVisibility, 1500);
-    setTimeout(_applyFinanzasSidebarVisibility, 4000);
-    window._applyFinanzasSidebarVisibility = _applyFinanzasSidebarVisibility;
+    window._isOficinaUser = _isOficinaUser;
+
+    function canAccessSection(name) {
+        if (qslCode === 'MED-MASTER') return true;
+        if (!_isOficinaUser()) return true; // médicos: acceso total
+        // Oficina: secciones reservadas a médicos están bloqueadas
+        if (OFFICE_FORBIDDEN_SECTIONS.includes(name)) return false;
+        const req = SECTION_PRIVILEGES[name];
+        if (req === undefined) return false; // por defecto deniega
+        if (req === null) return false;
+        return hasPriv(req);
+    }
+    window.canAccessSection = canAccessSection;
+
+    // Oculta items del sidebar según los privilegios del usuario actual.
+    // Reemplaza a _applyFinanzasSidebarVisibility (que solo cubría finanzas).
+    function _applySidebarPrivileges() {
+        // 1) MED-MASTER y admin_general no se ven afectados
+        if (qslCode === 'MED-MASTER') {
+            const nav = document.getElementById('nav-finanzas');
+            if (nav) nav.style.display = '';
+            return;
+        }
+        const isOf = _isOficinaUser();
+        // 2) Sidebar items con data-section
+        document.querySelectorAll('.sidebar li[data-section]').forEach(li => {
+            const section = li.getAttribute('data-section');
+            // Médicos: todo visible
+            if (!isOf) {
+                // Excepción: programmer y admin_general siguen ocultos por defecto
+                if (section === 'programmer' || section === 'admin_general') return;
+                li.style.display = '';
+                return;
+            }
+            // Oficina: aplicar reglas
+            li.style.display = canAccessSection(section) ? '' : 'none';
+        });
+        // 3) Lista de Pacientes (li sin data-section, onclick="showPatientList")
+        document.querySelectorAll('.sidebar li').forEach(li => {
+            const onclick = li.getAttribute('onclick') || '';
+            if (onclick.includes('showPatientList')) {
+                if (qslCode === 'MED-MASTER') { li.style.display = ''; return; }
+                if (!isOf) { li.style.display = ''; return; }
+                li.style.display = hasPriv('ver_pacientes') ? '' : 'none';
+            }
+        });
+        // 4) Botón Cerrar Sesión: siempre visible (no se toca)
+    }
+    setTimeout(_applySidebarPrivileges, 200);
+    setTimeout(_applySidebarPrivileges, 1500);
+    setTimeout(_applySidebarPrivileges, 4000);
+    // Re-aplicar cada vez que cambian los privilegios remotamente
+    setInterval(() => {
+        if (document.visibilityState !== 'hidden') _applySidebarPrivileges();
+    }, 20000);
+    window._applySidebarPrivileges = _applySidebarPrivileges;
+    // Alias retro-compatible para no romper llamadas previas
+    window._applyFinanzasSidebarVisibility = _applySidebarPrivileges;
+
+    // Bloquea acceso por URL/clic a secciones no permitidas.
+    // Envolvemos renderSection para añadir el check antes de delegar al original.
+    const _origRenderSection = (typeof renderSection !== 'undefined') ? renderSection : null;
+    if (_origRenderSection) {
+        renderSection = function(name, data) {
+            if (!canAccessSection(name)) {
+                contentArea.innerHTML = `
+                    <div style="text-align:center;padding:80px 20px;border:2px dashed rgba(239,68,68,0.18);border-radius:20px;background:rgba(239,68,68,0.04);">
+                        <div style="font-size:64px;margin-bottom:18px;">🔒</div>
+                        <h3 style="color:#f87171;font-size:22px;margin-bottom:10px;">Acceso denegado</h3>
+                        <p style="color:rgba(255,255,255,0.65);max-width:520px;margin:0 auto;font-size:14px;line-height:1.5;">
+                            Tu usuario de oficina <b>no tiene privilegios</b> para acceder a esta sección.<br>
+                            Solicita al médico que te los asigne desde <b>Configuración → Privilegios</b>.
+                        </p>
+                    </div>`;
+                return;
+            }
+            return _origRenderSection(name, data);
+        };
+    }
+
+    // Si al cargar el sistema, el usuario está en una sección no permitida,
+    // intentar redirigirlo a la primera permitida o mostrar un mensaje.
+    setTimeout(() => {
+        if (qslCode === 'MED-MASTER' || !_isOficinaUser()) return;
+        const orderedSections = ['overview', 'consultation', 'scheduler', 'finanzas'];
+        const allowed = orderedSections.find(s => canAccessSection(s));
+        if (allowed && typeof loadSection === 'function') {
+            loadSection(allowed);
+        } else {
+            // Sin privilegios para nada → mostrar mensaje persistente
+            contentArea.innerHTML = `
+                <div style="text-align:center;padding:80px 20px;border:2px dashed rgba(251,191,36,0.2);border-radius:20px;background:rgba(251,191,36,0.04);">
+                    <div style="font-size:64px;margin-bottom:18px;">⏳</div>
+                    <h3 style="color:#fbbf24;font-size:22px;margin-bottom:10px;">Esperando privilegios</h3>
+                    <p style="color:rgba(255,255,255,0.65);max-width:520px;margin:0 auto;font-size:14px;line-height:1.5;">
+                        Tu usuario aún no tiene privilegios asignados. Pide al <b>médico (dueño del sistema)</b>
+                        que te los active desde su <b>Configuración → Privilegios</b>.
+                        Cuando los active, podrás ver las opciones correspondientes en el menú lateral.
+                    </p>
+                </div>`;
+        }
+    }, 800);
 
     function _formatMoney(n) {
         const v = parseFloat(n) || 0;
