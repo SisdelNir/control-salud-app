@@ -8701,114 +8701,191 @@ function renderSection(name, data) {
         const qsl = document.getElementById('fz-estado-qsl')?.value || '';
         const desde = document.getElementById('fz-estado-desde')?.value || '';
         const hasta = document.getElementById('fz-estado-hasta')?.value || '';
-        const txs = _getFinanzasCache().filter(t => {
-            if (qsl && t.qsl_code !== qsl) return false;
+        const contenedor = document.getElementById('fz-estado-resultado');
+        if (!contenedor) return;
+
+        // =====================================================================
+        // ESTADO DE CUENTA DE CRÉDITO (Cargo · Abono · Saldo)
+        // =====================================================================
+        // Reglas de negocio:
+        //   - Solo aplica a CLIENTES DE CRÉDITO (los que tienen al menos 1
+        //     cargo histórico). Pacientes que pagan al contado NO tienen estado
+        //     de cuenta — sus pagos aparecen en el Estado General de la Clínica.
+        //   - Columnas únicas: CARGO (deuda generada) · ABONO (pago recibido) · SALDO (acumulado).
+        //   - "Egreso" (gastos operativos de la clínica) NO aparece aquí: es del
+        //     P&L de la clínica, no de la cuenta del paciente.
+        //   - SALDO = saldo_anterior + cargo - abono. Positivo = paciente debe;
+        //     negativo = paciente tiene saldo a favor (pagó de más).
+        //   - SALDO INICIAL: cargos − abonos ANTES de "desde" (si hay rango).
+        // =====================================================================
+
+        // Validación 1: requiere paciente seleccionado
+        if (!qsl) {
+            contenedor.innerHTML = `
+            <div style="text-align:center;color:rgba(251,191,36,0.85);padding:40px;background:rgba(251,191,36,0.05);border:1px dashed rgba(251,191,36,0.3);border-radius:14px;">
+                <div style="font-size:36px;margin-bottom:10px;">👤</div>
+                <p style="font-size:14px;font-weight:700;margin:0 0 6px;">Selecciona un paciente</p>
+                <p style="font-size:12px;color:rgba(255,255,255,0.5);margin:0;">El estado de cuenta es individual y solo aplica a pacientes de crédito (con cargos registrados).</p>
+            </div>`;
+            return;
+        }
+
+        // Validación 2: el paciente debe tener al menos 1 cargo histórico
+        const allTxs = _getFinanzasCache().filter(t => t.qsl_code === qsl);
+        const hasAnyCharge = allTxs.some(t => t.tipo === 'charge');
+        const paciente = _listPacientesParaSelect().find(p => p.qsl === qsl);
+        const tituloNombre = paciente?.nombre || qsl;
+        if (!hasAnyCharge) {
+            contenedor.innerHTML = `
+            <div style="text-align:center;color:rgba(96,165,250,0.85);padding:40px;background:rgba(96,165,250,0.05);border:1px dashed rgba(96,165,250,0.3);border-radius:14px;">
+                <div style="font-size:36px;margin-bottom:10px;">💵</div>
+                <p style="font-size:14px;font-weight:700;margin:0 0 6px;">${tituloNombre} no es cliente de crédito</p>
+                <p style="font-size:12px;color:rgba(255,255,255,0.5);margin:0 0 14px;">No tiene cargos registrados. Los pacientes que pagan al contado aparecen en el <b style="color:#a78bfa;">Estado General de la Clínica</b>.</p>
+                <button onclick="window._generarEstadoGeneral()" style="background:linear-gradient(135deg,#7c3aed,#a78bfa);color:white;border:none;padding:10px 22px;border-radius:10px;cursor:pointer;font-weight:700;font-size:12px;">📈 Ver Estado General</button>
+            </div>`;
+            return;
+        }
+
+        // Saldo inicial: cargos − abonos ANTES de "desde" (si hay rango)
+        let saldoInicial = 0;
+        if (desde) {
+            allTxs.forEach(t => {
+                if ((t.fecha || '') >= desde) return;
+                if (t.tipo !== 'charge' && t.tipo !== 'income') return;
+                const m = parseFloat(t.monto) || 0;
+                if (t.tipo === 'charge') saldoInicial += m;
+                else if (t.tipo === 'income') saldoInicial -= m;
+            });
+        }
+
+        // Filtrar txs en rango — solo cargos y abonos (egresos NO aplican al paciente)
+        const txs = allTxs.filter(t => {
+            if (t.tipo !== 'charge' && t.tipo !== 'income') return false;
             if (desde && (t.fecha || '') < desde) return false;
             if (hasta && (t.fecha || '') > hasta) return false;
             return true;
         }).sort((a, b) => ((a.fecha || '') + 'T' + (a.hora || '00:00')).localeCompare((b.fecha || '') + 'T' + (b.hora || '00:00')));
 
-        // Estilo Excel: una columna por tipo + saldo acumulado (running balance)
-        let saldo = 0;
-        const rows = txs.map(t => {
-            const monto = parseFloat(t.monto) || 0;
-            const ingreso = (t.tipo === 'income') ? monto : 0;
-            const egreso = (t.tipo === 'expense') ? monto : 0;
-            const cargo = (t.tipo === 'charge') ? monto : 0;
-            // Solo ingresos y egresos afectan el saldo realizado.
-            // Los cargos son cuentas por cobrar pendientes (no realizadas aún).
-            saldo += ingreso - egreso;
-            const tipoLabel = t.tipo === 'income' ? '💚 Pago' : (t.tipo === 'expense' ? '💸 Egreso' : '⏳ Cargo');
-            const tipoColor = t.tipo === 'income' ? '#10b981' : (t.tipo === 'expense' ? '#f87171' : '#fbbf24');
-            return `
-                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-                    <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.8);white-space:nowrap;border-right:1px solid rgba(255,255,255,0.03);">${t.fecha || '—'} ${t.hora || ''}</td>
-                    <td style="padding:8px 12px;font-size:11px;color:${tipoColor};font-weight:700;white-space:nowrap;border-right:1px solid rgba(255,255,255,0.03);">${tipoLabel}</td>
-                    <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.7);border-right:1px solid rgba(255,255,255,0.03);">${t.paciente_nombre || t.proveedor || '—'}</td>
-                    <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.7);border-right:1px solid rgba(255,255,255,0.03);">${t.concepto || '—'}</td>
-                    <td style="padding:8px 12px;text-align:right;font-size:12px;border-right:1px solid rgba(255,255,255,0.03);">${ingreso > 0 ? `<span style="color:#10b981;font-weight:800;">${_formatMoney(ingreso)}</span>` : '<span style="color:rgba(255,255,255,0.15);">—</span>'}</td>
-                    <td style="padding:8px 12px;text-align:right;font-size:12px;border-right:1px solid rgba(255,255,255,0.03);">${egreso > 0 ? `<span style="color:#f87171;font-weight:800;">${_formatMoney(egreso)}</span>` : '<span style="color:rgba(255,255,255,0.15);">—</span>'}</td>
-                    <td style="padding:8px 12px;text-align:right;font-size:12px;border-right:1px solid rgba(255,255,255,0.03);">${cargo > 0 ? `<span style="color:#fbbf24;font-weight:800;">${_formatMoney(cargo)}</span>` : '<span style="color:rgba(255,255,255,0.15);">—</span>'}</td>
-                    <td style="padding:8px 12px;text-align:right;font-size:13px;color:${saldo >= 0 ? '#10b981' : '#f87171'};font-weight:800;white-space:nowrap;">${saldo >= 0 ? '+' : ''}${_formatMoney(saldo)}</td>
-                </tr>`;
-        }).join('');
-
-        const totIngreso = txs.filter(t => t.tipo === 'income').reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
-        const totEgreso = txs.filter(t => t.tipo === 'expense').reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
-        const totCharge = txs.filter(t => t.tipo === 'charge').reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
-        const saldoFinal = totIngreso - totEgreso;
-        const saldoFinalColor = saldoFinal >= 0 ? '#10b981' : '#f87171';
-
-        const contenedor = document.getElementById('fz-estado-resultado');
-        if (!contenedor) return;
-        if (txs.length === 0) {
+        if (txs.length === 0 && saldoInicial === 0) {
             contenedor.innerHTML = `<div style="text-align:center;color:rgba(255,255,255,0.4);padding:40px;">Sin movimientos en el rango seleccionado.</div>`;
             return;
         }
-        const titulo = qsl
-            ? (_listPacientesParaSelect().find(p => p.qsl === qsl)?.nombre || qsl)
-            : 'Todos los pacientes';
-        const rango = (desde || '⌖') + ' → ' + (hasta || '⌖');
+
+        // Fila de saldo inicial (si aplica)
+        const saldoInicialRow = saldoInicial !== 0 || desde ? `
+            <tr style="background:rgba(255,255,255,0.04); border-bottom:1px solid rgba(255,255,255,0.08); font-style:italic;">
+                <td style="padding:10px 12px;font-size:12px;color:rgba(255,255,255,0.6);border-right:1px solid rgba(255,255,255,0.03);">${desde || '—'}</td>
+                <td style="padding:10px 12px;font-size:12px;color:rgba(255,255,255,0.6);border-right:1px solid rgba(255,255,255,0.03);" colspan="1">Saldo anterior</td>
+                <td style="padding:10px 12px;text-align:right;font-size:12px;color:rgba(255,255,255,0.25);border-right:1px solid rgba(255,255,255,0.03);">—</td>
+                <td style="padding:10px 12px;text-align:right;font-size:12px;color:rgba(255,255,255,0.25);border-right:1px solid rgba(255,255,255,0.03);">—</td>
+                <td style="padding:10px 12px;text-align:right;font-size:13px;color:${saldoInicial >= 0 ? '#fbbf24' : '#34d399'};font-weight:800;white-space:nowrap;">${saldoInicial >= 0 ? '' : ''}${_formatMoney(saldoInicial)}</td>
+            </tr>` : '';
+
+        // Filas con saldo acumulado: saldo += cargo - abono
+        let saldo = saldoInicial;
+        const rows = txs.map(t => {
+            const monto = parseFloat(t.monto) || 0;
+            const cargo = t.tipo === 'charge' ? monto : 0;
+            const abono = t.tipo === 'income' ? monto : 0;
+            saldo += cargo - abono;
+            const saldoColor = saldo > 0 ? '#fbbf24' : (saldo < 0 ? '#34d399' : 'rgba(255,255,255,0.6)');
+            return `
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
+                    <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.8);white-space:nowrap;border-right:1px solid rgba(255,255,255,0.03);">${t.fecha || '—'} ${t.hora || ''}</td>
+                    <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.75);border-right:1px solid rgba(255,255,255,0.03);">${t.concepto || (t.tipo === 'charge' ? 'Cargo a cuenta' : 'Abono')}</td>
+                    <td style="padding:8px 12px;text-align:right;font-size:13px;border-right:1px solid rgba(255,255,255,0.03);">${cargo > 0 ? `<span style="color:#fbbf24;font-weight:800;">${_formatMoney(cargo)}</span>` : '<span style="color:rgba(255,255,255,0.15);">—</span>'}</td>
+                    <td style="padding:8px 12px;text-align:right;font-size:13px;border-right:1px solid rgba(255,255,255,0.03);">${abono > 0 ? `<span style="color:#34d399;font-weight:800;">${_formatMoney(abono)}</span>` : '<span style="color:rgba(255,255,255,0.15);">—</span>'}</td>
+                    <td style="padding:8px 12px;text-align:right;font-size:13px;color:${saldoColor};font-weight:800;white-space:nowrap;">${_formatMoney(saldo)}</td>
+                </tr>`;
+        }).join('');
+
+        const totCargo = txs.filter(t => t.tipo === 'charge').reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
+        const totAbono = txs.filter(t => t.tipo === 'income').reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
+        const saldoFinal = saldoInicial + totCargo - totAbono;
+        const saldoFinalColor = saldoFinal > 0 ? '#fbbf24' : (saldoFinal < 0 ? '#34d399' : 'rgba(255,255,255,0.85)');
+        const saldoLabel = saldoFinal > 0 ? '⏳ DEBE' : (saldoFinal < 0 ? '💚 Saldo a favor' : '✅ Al día');
+
+        const rango = (desde || '⌖ inicio') + ' → ' + (hasta || _todayISO());
+        const fechaEmision = new Date().toLocaleString('es-GT', { day: '2-digit', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
         contenedor.innerHTML = `
-        <div id="fz-printable" style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:24px;">
-            <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:20px;flex-wrap:wrap;gap:12px;">
+        <div id="fz-printable" style="background:linear-gradient(135deg, rgba(59,130,246,0.04), rgba(59,130,246,0.01)); border:1px solid rgba(59,130,246,0.25); border-radius:16px; padding:24px;">
+
+            <!-- Encabezado -->
+            <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:20px;flex-wrap:wrap;gap:12px;padding-bottom:16px;border-bottom:1px solid rgba(59,130,246,0.2);">
                 <div>
-                    <h3 style="color:white;font-size:18px;margin:0 0 4px;">Estado de Cuenta · ${titulo}</h3>
-                    <p style="color:rgba(255,255,255,0.5);font-size:13px;margin:0;">Rango: ${rango}</p>
+                    <p style="color:#60a5fa; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1.5px; margin:0 0 6px;">📊 Estado de Cuenta de Crédito</p>
+                    <h3 style="color:white;font-size:20px;margin:0 0 4px;font-weight:800;">${tituloNombre}</h3>
+                    <p style="color:rgba(255,255,255,0.55);font-size:12px;margin:0;">
+                        <b>Periodo:</b> ${rango} &nbsp;·&nbsp;
+                        <b>Movimientos:</b> ${txs.length} &nbsp;·&nbsp;
+                        <span style="color:rgba(255,255,255,0.4);">Generado el ${fechaEmision}</span>
+                    </p>
                 </div>
                 ${hasPriv('exportar_estados') ? '<button onclick="window._imprimirEstado()" style="background:linear-gradient(135deg,#1e40af,#3b82f6);color:white;border:none;padding:10px 22px;border-radius:10px;cursor:pointer;font-weight:700;font-size:13px;">🖨️ Imprimir / PDF</button>' : ''}
             </div>
-            <!-- RESUMEN ESTILO EXCEL: tabla compacta con totales por columna -->
+
+            <!-- Resumen estilo Excel: 3 columnas (Cargo · Abono · Saldo) -->
             <div style="border:1px solid rgba(59,130,246,0.25); border-radius:12px; overflow:hidden; margin-bottom:18px;">
                 <table style="width:100%; border-collapse:collapse;">
                     <thead style="background:rgba(59,130,246,0.12);">
                         <tr>
                             <th style="padding:11px 14px; text-align:left; font-size:10px; color:rgba(255,255,255,0.7); text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.05);">Resumen</th>
-                            <th style="padding:11px 14px; text-align:right; font-size:10px; color:#34d399; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.05);">💚 Ingresos</th>
-                            <th style="padding:11px 14px; text-align:right; font-size:10px; color:#fca5a5; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.05);">💸 Egresos</th>
                             <th style="padding:11px 14px; text-align:right; font-size:10px; color:#fbbf24; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.05);">⏳ Cargos</th>
-                            <th style="padding:11px 14px; text-align:right; font-size:10px; color:${saldoFinalColor}; text-transform:uppercase; letter-spacing:1px;">Saldo Final</th>
+                            <th style="padding:11px 14px; text-align:right; font-size:10px; color:#34d399; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.05);">💚 Abonos</th>
+                            <th style="padding:11px 14px; text-align:right; font-size:10px; color:${saldoFinalColor}; text-transform:uppercase; letter-spacing:1px;">${saldoLabel}</th>
                         </tr>
                     </thead>
                     <tbody>
+                        ${desde ? `
+                        <tr>
+                            <td style="padding:10px 14px; font-size:11px; color:rgba(255,255,255,0.5); border-right:1px solid rgba(255,255,255,0.05);">Saldo al ${desde}</td>
+                            <td colspan="2" style="padding:10px 14px; text-align:right; font-size:11px; color:rgba(255,255,255,0.4); border-right:1px solid rgba(255,255,255,0.05);">—</td>
+                            <td style="padding:10px 14px; text-align:right; font-size:13px; color:${saldoInicial >= 0 ? '#fbbf24' : '#34d399'}; font-weight:700;">${_formatMoney(saldoInicial)}</td>
+                        </tr>` : ''}
                         <tr style="background:rgba(0,0,0,0.15);">
-                            <td style="padding:12px 14px; font-size:12px; color:rgba(255,255,255,0.8); font-weight:700; border-right:1px solid rgba(255,255,255,0.05);">Total del periodo</td>
-                            <td style="padding:12px 14px; text-align:right; font-size:16px; color:#10b981; font-weight:900; border-right:1px solid rgba(255,255,255,0.05);">${_formatMoney(totIngreso)}</td>
-                            <td style="padding:12px 14px; text-align:right; font-size:16px; color:#f87171; font-weight:900; border-right:1px solid rgba(255,255,255,0.05);">${_formatMoney(totEgreso)}</td>
-                            <td style="padding:12px 14px; text-align:right; font-size:16px; color:#fbbf24; font-weight:900; border-right:1px solid rgba(255,255,255,0.05);">${_formatMoney(totCharge)}</td>
-                            <td style="padding:12px 14px; text-align:right; font-size:18px; color:${saldoFinalColor}; font-weight:900;">${saldoFinal >= 0 ? '+' : ''}${_formatMoney(saldoFinal)}</td>
+                            <td style="padding:12px 14px; font-size:12px; color:rgba(255,255,255,0.85); font-weight:700; border-right:1px solid rgba(255,255,255,0.05);">Total del periodo</td>
+                            <td style="padding:12px 14px; text-align:right; font-size:16px; color:#fbbf24; font-weight:900; border-right:1px solid rgba(255,255,255,0.05);">${_formatMoney(totCargo)}</td>
+                            <td style="padding:12px 14px; text-align:right; font-size:16px; color:#34d399; font-weight:900; border-right:1px solid rgba(255,255,255,0.05);">${_formatMoney(totAbono)}</td>
+                            <td style="padding:12px 14px; text-align:right; font-size:20px; color:${saldoFinalColor}; font-weight:900;">${_formatMoney(saldoFinal)}</td>
                         </tr>
                     </tbody>
                 </table>
             </div>
 
-            <!-- DETALLE ESTILO EXCEL: columnas separadas Ingreso / Egreso / Cargo + Saldo Acumulado -->
-            <div style="border:1px solid rgba(255,255,255,0.08);border-radius:12px;overflow:auto;">
-                <table style="width:100%;border-collapse:collapse; min-width:850px;">
+            <!-- Detalle estilo Excel: Fecha · Concepto · Cargo · Abono · Saldo -->
+            <div style="border:1px solid rgba(255,255,255,0.08); border-radius:12px; overflow:auto;">
+                <table style="width:100%; border-collapse:collapse; min-width:680px;">
                     <thead style="background:rgba(59,130,246,0.1); position:sticky; top:0;">
                         <tr>
-                            <th style="padding:10px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Fecha</th>
-                            <th style="padding:10px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Tipo</th>
-                            <th style="padding:10px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Cliente/Prov.</th>
-                            <th style="padding:10px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Concepto</th>
-                            <th style="padding:10px 12px;text-align:right;font-size:10px;color:#34d399;text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Ingreso</th>
-                            <th style="padding:10px 12px;text-align:right;font-size:10px;color:#fca5a5;text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Egreso</th>
-                            <th style="padding:10px 12px;text-align:right;font-size:10px;color:#fbbf24;text-transform:uppercase;letter-spacing:1px;border-right:1px solid rgba(255,255,255,0.04);">Cargo</th>
-                            <th style="padding:10px 12px;text-align:right;font-size:10px;color:rgba(255,255,255,0.85);text-transform:uppercase;letter-spacing:1px;">Saldo Acum.</th>
+                            <th style="padding:11px 12px; text-align:left; font-size:10px; color:rgba(255,255,255,0.7); text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.04);">Fecha</th>
+                            <th style="padding:11px 12px; text-align:left; font-size:10px; color:rgba(255,255,255,0.7); text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.04);">Concepto</th>
+                            <th style="padding:11px 12px; text-align:right; font-size:10px; color:#fbbf24; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.04);">Cargo</th>
+                            <th style="padding:11px 12px; text-align:right; font-size:10px; color:#34d399; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.04);">Abono</th>
+                            <th style="padding:11px 12px; text-align:right; font-size:10px; color:rgba(255,255,255,0.85); text-transform:uppercase; letter-spacing:1px;">Saldo</th>
                         </tr>
                     </thead>
-                    <tbody>${rows}</tbody>
+                    <tbody>
+                        ${saldoInicialRow}
+                        ${rows}
+                    </tbody>
                     <tfoot style="background:rgba(59,130,246,0.12); border-top:2px solid rgba(59,130,246,0.3);">
                         <tr>
-                            <td colspan="4" style="padding:14px 12px; font-weight:800; color:white; font-size:12px; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.04);">TOTALES</td>
-                            <td style="padding:14px 12px; text-align:right; font-weight:900; color:#10b981; font-size:14px; border-right:1px solid rgba(255,255,255,0.04);">${_formatMoney(totIngreso)}</td>
-                            <td style="padding:14px 12px; text-align:right; font-weight:900; color:#f87171; font-size:14px; border-right:1px solid rgba(255,255,255,0.04);">${_formatMoney(totEgreso)}</td>
-                            <td style="padding:14px 12px; text-align:right; font-weight:900; color:#fbbf24; font-size:14px; border-right:1px solid rgba(255,255,255,0.04);">${_formatMoney(totCharge)}</td>
-                            <td style="padding:14px 12px; text-align:right; font-weight:900; color:${saldoFinalColor}; font-size:16px;">${saldoFinal >= 0 ? '+' : ''}${_formatMoney(saldoFinal)}</td>
+                            <td colspan="2" style="padding:14px 12px; font-weight:800; color:white; font-size:12px; text-transform:uppercase; letter-spacing:1px; border-right:1px solid rgba(255,255,255,0.04);">TOTALES DEL PERIODO</td>
+                            <td style="padding:14px 12px; text-align:right; font-weight:900; color:#fbbf24; font-size:14px; border-right:1px solid rgba(255,255,255,0.04);">${_formatMoney(totCargo)}</td>
+                            <td style="padding:14px 12px; text-align:right; font-weight:900; color:#34d399; font-size:14px; border-right:1px solid rgba(255,255,255,0.04);">${_formatMoney(totAbono)}</td>
+                            <td style="padding:14px 12px; text-align:right; font-weight:900; color:${saldoFinalColor}; font-size:18px;">${_formatMoney(saldoFinal)}</td>
                         </tr>
                     </tfoot>
                 </table>
             </div>
+
+            <!-- Leyenda -->
+            <p style="text-align:center; color:rgba(255,255,255,0.4); font-size:11px; margin-top:14px;">
+                <span style="color:#fbbf24;">⏳ Saldo positivo</span> = el paciente debe &nbsp;·&nbsp;
+                <span style="color:#34d399;">💚 Saldo negativo</span> = saldo a favor del paciente &nbsp;·&nbsp;
+                <span>✅ Saldo cero</span> = al día
+            </p>
         </div>`;
     };
 
