@@ -1562,7 +1562,7 @@ document.addEventListener('DOMContentLoaded', () => {
     /* End of Scheduler logic */
 
 function renderSection(name, data) {
-        if (userRole === 'medico' && !selectedPatientQSL && name !== 'settings' && name !== 'programmer' && name !== 'scheduler' && name !== 'configuration') {
+        if (userRole === 'medico' && !selectedPatientQSL && name !== 'settings' && name !== 'programmer' && name !== 'scheduler' && name !== 'configuration' && name !== 'finanzas') {
             if (name === 'consultation') {
                 window.renderDoctorHome('search');
                 return;
@@ -1591,6 +1591,9 @@ function renderSection(name, data) {
                 break;
             case 'configuration':
                 renderConfiguration();
+                break;
+            case 'finanzas':
+                renderFinanzas();
                 break;
             case 'programmer':
                 renderProgrammer();
@@ -1768,9 +1771,13 @@ function renderSection(name, data) {
                     { cache: 'no-store' },
                     10000
                 );
-                if (!r.ok) throw new Error('HTTP ' + r.status);
-                const j = await r.json();
-                if (!j.success) throw new Error(j.error || 'Server error');
+                // Intentar leer el body SIEMPRE (incluso en errores HTTP) para mostrar
+                // el mensaje real del backend (ej. "Ruta no implementada: ...") en
+                // vez de un críptico "HTTP 500".
+                let j = null;
+                try { j = await r.json(); } catch (_) { /* respuesta no-JSON */ }
+                if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`);
+                if (!j || !j.success) throw new Error(j?.error || 'Respuesta inválida del servidor');
                 return { ok: true, data: j };
             } catch (e) {
                 return { ok: false, error: e?.message || String(e) };
@@ -6507,6 +6514,17 @@ function renderSection(name, data) {
                 { id: 'gestionar_medicos', label: 'Gestionar médicos', desc: 'Agregar y eliminar cuentas de médicos', sensitive: true },
                 { id: 'ver_estadisticas', label: 'Ver estadísticas', desc: 'Ver reportes y estadísticas del centro' },
             ]
+        },
+        finanzas: {
+            label: '💰 Finanzas', color: '#10b981',
+            items: [
+                { id: 'ver_finanzas', label: 'Ver finanzas', desc: 'Acceder al módulo financiero (solo lectura)' },
+                { id: 'registrar_cobros', label: 'Registrar cobros', desc: 'Cobrar pagos de pacientes (ingresos)' },
+                { id: 'gestionar_deudas', label: 'Gestionar cuentas por cobrar', desc: 'Crear y liquidar deudas de pacientes' },
+                { id: 'registrar_egresos', label: 'Registrar egresos', desc: 'Pagos a proveedores y gastos operativos', sensitive: true },
+                { id: 'eliminar_transacciones', label: 'Eliminar transacciones', desc: 'Borrar registros financieros', sensitive: true },
+                { id: 'exportar_estados', label: 'Exportar estados de cuenta', desc: 'Generar PDFs de estado de cuenta' },
+            ]
         }
     };
 
@@ -7125,6 +7143,7 @@ function renderSection(name, data) {
         if (name === 'programmer') return 'Módulo Programador (Super Admin)';
         if (name === 'admin_general') return 'Administración Central';
         if (name === 'configuration') return 'Configuración del Sistema';
+        if (name === 'finanzas') return 'Gestión Financiera';
         return _origGetSectionTitle(name);
     };
 

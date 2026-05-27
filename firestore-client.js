@@ -20,7 +20,8 @@
         citas: 'citas',
         alertas_sistema: 'alertas_sistema',
         historial_mensajes: 'historial_mensajes',
-        settings: 'settings'
+        settings: 'settings',
+        finanzas_transacciones: 'finanzas_transacciones'
     };
 
     function db() {
@@ -180,6 +181,147 @@
         return { success: true };
     }
 
+    // ----- LISTA DE PACIENTES (Hoy + Mañana) — fuente única de verdad -----
+    // Reglas decididas con el usuario:
+    //   - Scoping: cada médico ve SOLO sus propias citas (doctor_id estricto).
+    //   - Rotación: una cita expira 24h después de su hora (no a medianoche).
+    //   - Horizonte: desde "ahora - 24h grace" hasta "fin de mañana 23:59 MX".
+    // Timezone fija: America/Mexico_City (UTC-6 sin DST desde 2022).
+    const MX_OFFSET_MS = 6 * 3600 * 1000;
+    function nowInMx() {
+        const nowUtc = Date.now();
+        const d = new Date(nowUtc - MX_OFFSET_MS);
+        return { nowUtc, y: d.getUTCFullYear(), m: d.getUTCMonth(), d: d.getUTCDate(), hh: d.getUTCHours(), mm: d.getUTCMinutes() };
+    }
+    function citaToUtcMs(fecha, hora) {
+        if (!fecha) return NaN;
+        const parts = String(fecha).slice(0, 10).split('-');
+        if (parts.length !== 3) return NaN;
+        const [y, m, d] = parts.map(Number);
+        const [hh, mm] = String(hora || '00:00').split(':').map(Number);
+        if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return NaN;
+        return Date.UTC(y, m - 1, d, (hh || 0) + 6, mm || 0, 0);
+    }
+    async function enrichCita(cita, todayMxMidnightUtcMs) {
+        const qsl = cita.qsl_code;
+        let pData = {};
+        try {
+            const pSnap = await db().collection(COLLECTIONS.pacientes).doc(qsl).get();
+            if (pSnap.exists) pData = (pSnap.data().data || {});
+        } catch (_) { /* paciente sin doc → datos vacíos */ }
+        const consults = pData.consultations || [];
+        const lastConsult = consults[consults.length - 1];
+        let lastRx = 'Sin recetas previas';
+        if (pData.meds && pData.meds.length > 0) {
+            lastRx = '🏥 Ver Receta Asignada';
+        } else if (lastConsult) {
+            const rxText = String(lastConsult.referencias || lastConsult.observaciones || lastConsult.notas || '').trim();
+            if (rxText && rxText !== '=' && rxText !== '-') {
+                lastRx = '📝 ' + (rxText.length > 40 ? rxText.slice(0, 40) + '…' : rxText);
+            }
+        }
+        const fparts = String(cita.fecha).slice(0, 10).split('-').map(Number);
+        const citaMidnight = Date.UTC(fparts[0], fparts[1] - 1, fparts[2]);
+        const dayDiff = Math.round((citaMidnight - todayMxMidnightUtcMs) / 86400000);
+        const MESES = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+        const nextAppt = `${String(fparts[2]).padStart(2,'0')} ${MESES[fparts[1]-1]} ${cita.hora}`;
+        return {
+            qsl,
+            name: pData.nombre_completo || cita.paciente_nombre || qsl,
+            telefono: pData.telefono || '—',
+            glucosa: !!pData.glucoseEnabled,
+            presion: !!pData.pressureEnabled,
+            nextAppt,
+            nextApptDays: dayDiff,
+            lastRx,
+            fecha: cita.fecha,
+            hora: cita.hora,
+            motivo: cita.motivo || ''
+        };
+    }
+
+    async function listaPacientesHorizonte(doctor_id) {
+        if (!doctor_id) return { success: false, error: 'doctor_id requerido' };
+        const now = nowInMx();
+        const todayMxMidnightUtcMs = Date.UTC(now.y, now.m, now.d);
+        const endOfTomorrowUtcMs = Date.UTC(now.y, now.m, now.d + 2, 6, 0, 0) - 1;
+
+        const snap = await db().collection(COLLECTIONS.citas)
+            .where('doctor_id', '==', doctor_id)
+            .get();
+
+        const totalCitas = snap.size;
+        const inWindow = [];
+        let expired = 0;
+        let future = 0;
+        snap.docs.forEach(docSnap => {
+            const c = docSnap.data();
+            if (c.deleted) return;
+            const tsMs = citaToUtcMs(c.fecha, c.hora);
+            if (!Number.isFinite(tsMs)) return;
+            const tsPlus24 = tsMs + 24 * 3600 * 1000;
+            if (tsPlus24 <= now.nowUtc) { expired++; return; }
+            if (tsMs > endOfTomorrowUtcMs) { future++; return; }
+            inWindow.push({ id: docSnap.id, data: c, ts: tsMs });
+        });
+        inWindow.sort((a, b) => a.ts - b.ts);
+        const byQsl = new Map();
+        for (const item of inWindow) {
+            if (!item.data.qsl_code) continue;
+            if (!byQsl.has(item.data.qsl_code)) byQsl.set(item.data.qsl_code, item);
+        }
+        const pacientes = await Promise.all(
+            Array.from(byQsl.values()).map(item => enrichCita(item.data, todayMxMidnightUtcMs))
+        );
+        const hoyCount = pacientes.filter(p => p.nextApptDays === 0).length;
+        const mananaCount = pacientes.filter(p => p.nextApptDays === 1).length;
+        return {
+            success: true,
+            ahora_mx: `${now.y}-${String(now.m+1).padStart(2,'0')}-${String(now.d).padStart(2,'0')} ${String(now.hh).padStart(2,'0')}:${String(now.mm).padStart(2,'0')}`,
+            stats: {
+                total_citas_doctor: totalCitas,
+                en_ventana: byQsl.size,
+                expiradas: expired,
+                futuras_fuera_ventana: future,
+                hoy: hoyCount,
+                manana: mananaCount
+            },
+            pacientes
+        };
+    }
+
+    async function listaPacientesHistorial(doctor_id, dias) {
+        if (!doctor_id) return { success: false, error: 'doctor_id requerido' };
+        const N = Math.min(parseInt(dias || '30', 10), 365);
+        const now = nowInMx();
+        const todayMxMidnightUtcMs = Date.UTC(now.y, now.m, now.d);
+        const desdeUtcMs = todayMxMidnightUtcMs - N * 24 * 3600 * 1000;
+        const snap = await db().collection(COLLECTIONS.citas)
+            .where('doctor_id', '==', doctor_id)
+            .get();
+        const expiradas = [];
+        snap.docs.forEach(docSnap => {
+            const c = docSnap.data();
+            if (c.deleted) return;
+            const tsMs = citaToUtcMs(c.fecha, c.hora);
+            if (!Number.isFinite(tsMs)) return;
+            const tsPlus24 = tsMs + 24 * 3600 * 1000;
+            if (tsPlus24 > now.nowUtc) return;
+            if (tsMs < desdeUtcMs) return;
+            expiradas.push({ data: c, ts: tsMs });
+        });
+        expiradas.sort((a, b) => b.ts - a.ts);
+        const pacientes = await Promise.all(
+            expiradas.map(item => enrichCita(item.data, todayMxMidnightUtcMs))
+        );
+        return {
+            success: true,
+            ahora_mx: `${now.y}-${String(now.m+1).padStart(2,'0')}-${String(now.d).padStart(2,'0')}`,
+            stats: { total: pacientes.length, dias_consultados: N },
+            pacientes
+        };
+    }
+
     // ----- CITAS -----
     async function listAppointments(doctor_id) {
         const snap = await db().collection(COLLECTIONS.citas).where('doctor_id', '==', doctor_id).get();
@@ -278,15 +420,115 @@
         return { success: true };
     }
 
+    // ----- FINANZAS (Gestión Financiera) -----
+    // Tipos: income (cobro a paciente), expense (egreso), charge (deuda)
+    // Filtrado por doctor_id; cada médico solo ve sus propias transacciones.
+    async function listFinanzas({ doctor_id, tipo, desde, hasta, qsl_code, estado } = {}) {
+        let q = db().collection(COLLECTIONS.finanzas_transacciones)
+            .where('doctor_id', '==', doctor_id || 'MED-MASTER');
+        if (tipo) q = q.where('tipo', '==', tipo);
+        const snap = await q.get();
+        let txs = snap.docs
+            .filter(d => !d.data().deleted)
+            .map(d => ({ id: d.id, ...d.data() }));
+        if (qsl_code) txs = txs.filter(t => t.qsl_code === qsl_code);
+        if (estado)   txs = txs.filter(t => t.estado === estado);
+        if (desde)    txs = txs.filter(t => (t.fecha || '') >= desde);
+        if (hasta)    txs = txs.filter(t => (t.fecha || '') <= hasta);
+        // Ordenar por fecha+hora ascendente (más antigua primero); el cliente
+        // puede invertir según necesite cada vista.
+        txs.sort((a, b) => {
+            const ka = (a.fecha || '') + 'T' + (a.hora || '00:00');
+            const kb = (b.fecha || '') + 'T' + (b.hora || '00:00');
+            return ka < kb ? -1 : (ka > kb ? 1 : 0);
+        });
+        return { success: true, transacciones: txs };
+    }
+
+    async function saveFinanza(id, payload) {
+        const data = { ...payload, updated_at: serverTimestamp() };
+        // Normalización defensiva
+        if (typeof data.monto === 'string') data.monto = parseFloat(data.monto) || 0;
+        if (!data.moneda) data.moneda = 'GTQ';
+        const ref = id
+            ? db().collection(COLLECTIONS.finanzas_transacciones).doc(id)
+            : db().collection(COLLECTIONS.finanzas_transacciones).doc();
+        const exists = id ? (await ref.get()).exists : false;
+        if (!exists) data.created_at = serverTimestamp();
+        await ref.set(data, { merge: true });
+
+        // Liquidación FIFO: si este es un ingreso con qsl_code, marcar
+        // cargos pendientes del mismo paciente como pagados (orden cronológico).
+        if (data.tipo === 'income' && data.qsl_code && data.monto > 0) {
+            try {
+                await liquidarCargosFIFO(data.doctor_id, data.qsl_code, data.monto, ref.id);
+            } catch (e) { console.warn('FIFO liquidación falló:', e?.message || e); }
+        }
+        return { success: true, id: ref.id };
+    }
+
+    async function deleteFinanza(id) {
+        await db().collection(COLLECTIONS.finanzas_transacciones).doc(id).set(
+            { deleted: true, deleted_at: serverTimestamp() },
+            { merge: true }
+        );
+        return { success: true };
+    }
+
+    async function liquidarCargosFIFO(doctor_id, qsl_code, montoIngreso, ingresoRefId) {
+        if (!qsl_code || !montoIngreso) return;
+        const snap = await db().collection(COLLECTIONS.finanzas_transacciones)
+            .where('doctor_id', '==', doctor_id)
+            .where('qsl_code', '==', qsl_code)
+            .where('tipo', '==', 'charge')
+            .get();
+        const pendings = snap.docs
+            .filter(d => !d.data().deleted && d.data().estado === 'pending')
+            .map(d => ({ id: d.id, ref: d.ref, ...d.data() }))
+            .sort((a, b) => {
+                const ka = (a.fecha || '') + 'T' + (a.hora || '00:00');
+                const kb = (b.fecha || '') + 'T' + (b.hora || '00:00');
+                return ka < kb ? -1 : 1;
+            });
+        let remaining = parseFloat(montoIngreso);
+        const batch = db().batch();
+        for (const ch of pendings) {
+            if (remaining <= 0) break;
+            const monto = parseFloat(ch.monto) || 0;
+            if (remaining >= monto) {
+                batch.set(ch.ref, {
+                    estado: 'paid',
+                    paid_at: serverTimestamp(),
+                    paid_by_income: ingresoRefId || null
+                }, { merge: true });
+                remaining -= monto;
+            } else {
+                // Cubre parcialmente: bajar el monto pendiente y dejar resto.
+                batch.set(ch.ref, {
+                    monto: monto - remaining,
+                    monto_original: ch.monto_original || monto,
+                    partial_payments: [...(ch.partial_payments || []), {
+                        amount: remaining,
+                        income_id: ingresoRefId || null
+                    }]
+                }, { merge: true });
+                remaining = 0;
+            }
+        }
+        await batch.commit();
+    }
+
     window.firestoreClient = {
         verifyPatient, getPatient, savePatient, listPatients, togglePatientAlerts,
         login,
         listMedicos, saveMedico, deleteMedico, updateMedicoPrivileges,
         listCentros, saveCentro, deleteCentro,
         listAppointments, createAppointment, deleteAppointment,
+        listaPacientesHorizonte, listaPacientesHistorial,
         listPatientAlerts, savePatientAlert,
         listMessageHistory, saveMessageHistory,
-        getAppearance, saveAppearance
+        getAppearance, saveAppearance,
+        listFinanzas, saveFinanza, deleteFinanza, liquidarCargosFIFO
     };
 
     // ============================================================
@@ -372,6 +614,14 @@
             if (method === 'POST')   return await createAppointment(body || {});
             if (method === 'DELETE') return await deleteAppointment(body || {});
         }
+        // /api/lista-pacientes/horizonte → fuente única de verdad para Lista (hoy+mañana)
+        if (path === '/api/lista-pacientes/horizonte' && method === 'GET') {
+            return await listaPacientesHorizonte(params.doctor_id);
+        }
+        // /api/lista-pacientes/historial → citas expiradas (+24h después de la hora)
+        if (path === '/api/lista-pacientes/historial' && method === 'GET') {
+            return await listaPacientesHistorial(params.doctor_id, params.dias);
+        }
         // /api/messages/history
         if (path === '/api/messages/history') {
             if (method === 'GET')  return await listMessageHistory(params.doctor_id);
@@ -381,6 +631,17 @@
         if (path === '/api/settings/appearance') {
             if (method === 'GET')  return await getAppearance(params.id_centro);
             if (method === 'POST') return await saveAppearance(body || {});
+        }
+        // /api/finanzas (lista + creación)
+        if (path === '/api/finanzas') {
+            if (method === 'GET')  return await listFinanzas(params);
+            if (method === 'POST') return await saveFinanza(null, body || {});
+        }
+        // /api/finanzas/:id (actualizar | borrar)
+        let mf;
+        if ((mf = path.match(/^\/api\/finanzas\/([^/]+)$/))) {
+            if (method === 'PUT' || method === 'POST') return await saveFinanza(mf[1], body || {});
+            if (method === 'DELETE')                  return await deleteFinanza(mf[1]);
         }
 
         throw new Error(`Ruta no implementada: ${method} ${path}`);
