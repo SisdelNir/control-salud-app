@@ -236,6 +236,51 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (e) { console.warn('backfill error:', e?.message || e); }
     }
 
+    // Empuja al cloud todas las citas locales (recupera citas creadas
+    // antes del fix de sync, o cuando un POST falló silenciosamente).
+    async function backfillLocalAppointmentsToCloud() {
+        try {
+            const key = window.getAppointmentsKey ? window.getAppointmentsKey() : 'appointments_data';
+            const local = JSON.parse(localStorage.getItem(key) || '[]');
+            if (!local.length) return;
+            const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+            // Obtenemos lo que ya está en cloud para no duplicar
+            let cloudKeys = new Set();
+            try {
+                const r = await fetch(`/api/appointments?doctor_id=${encodeURIComponent(doctor_id)}`, { cache: 'no-store' });
+                if (r.ok) {
+                    const j = await r.json();
+                    (j.appointments || []).forEach(a => {
+                        const d = a.fecha ? String(a.fecha).slice(0, 10) : '';
+                        cloudKeys.add(`${a.qsl_code}|${d}|${a.hora}`);
+                    });
+                }
+            } catch (e) {}
+
+            let pushed = 0;
+            for (const a of local) {
+                const k = `${a.qsl}|${a.date}|${a.time}`;
+                if (cloudKeys.has(k)) continue;
+                try {
+                    await fetch('/api/appointments', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            doctor_id,
+                            qsl_code: a.qsl,
+                            paciente_nombre: a.name,
+                            fecha: a.date,
+                            hora: a.time,
+                            motivo: a.motivo || ''
+                        })
+                    });
+                    pushed++;
+                } catch (e) {}
+            }
+            if (pushed > 0) console.log(`[DR-SISDEL] Backfill citas: ${pushed} subidas al cloud`);
+        } catch (e) { console.warn('backfill citas:', e?.message || e); }
+    }
+
     // Helper: re-renderiza la sección activa (programmer/admin_general) si
     // los datos detrás de ella han cambiado en la nube.
     function _refreshAdminViewIfActive() {
@@ -370,7 +415,10 @@ document.addEventListener('DOMContentLoaded', () => {
     window._syncEverythingFromCloud = syncEverythingFromCloud;
     if (!window._cloudSyncInterval) {
         // Backfill + sincronización inicial completa
-        backfillLocalPatientsToCloud().finally(() => syncEverythingFromCloud({ force: true }));
+        Promise.allSettled([
+            backfillLocalPatientsToCloud(),
+            backfillLocalAppointmentsToCloud()
+        ]).finally(() => syncEverythingFromCloud({ force: true }));
         let tickCount = 0;
         window._cloudSyncInterval = setInterval(() => {
             // Solo si la pestaña está visible para no malgastar recursos
@@ -497,7 +545,29 @@ document.addEventListener('DOMContentLoaded', () => {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ doctor_id, qsl_code: appt.qsl, paciente_nombre: appt.name, fecha: appt.date, hora: appt.time, motivo: appt.motivo })
-        }).catch(e => console.error('Cloud sync err', e));
+        })
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            console.log(`[DR-SISDEL] Cita subida al cloud: ${appt.name} · ${appt.date} ${appt.time}`);
+        })
+        .catch(e => {
+            console.error('Cloud sync err (cita):', e);
+            // Reintento automático con backoff exponencial corto
+            let attempt = 0;
+            const retry = () => {
+                attempt++;
+                if (attempt > 5) return;
+                setTimeout(() => {
+                    fetch('/api/appointments', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ doctor_id, qsl_code: appt.qsl, paciente_nombre: appt.name, fecha: appt.date, hora: appt.time, motivo: appt.motivo })
+                    }).then(r => { if (!r.ok) retry(); else console.log(`[DR-SISDEL] Cita reintentada OK (intento ${attempt})`); })
+                      .catch(retry);
+                }, Math.min(1000 * attempt, 5000));
+            };
+            retry();
+        });
         return true;
     };
 
