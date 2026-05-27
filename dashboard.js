@@ -7657,18 +7657,70 @@ function renderSection(name, data) {
     };
 
     function _listPacientesParaSelect() {
-        const key = (typeof getDocPatientsKey === 'function') ? getDocPatientsKey() : 'doctor_patients_list';
-        const registry = JSON.parse(localStorage.getItem(key) || '[]');
-        return registry.map(q => {
-            const qsl = typeof q === 'string' ? q : (q.qsl || q.codigo || q.id || String(q));
-            const d = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}');
+        // Estrategia: descubrir pacientes desde MÚLTIPLES fuentes y deduplicar por QSL.
+        // Resuelve el caso en que el registry está vacío/desactualizado pero sí existen
+        // `patient_data_*` / `patient_name_*` en localStorage (pacientes creados antes
+        // de un sync o que tienen citas sin expediente completo).
+        const qsls = new Set();
+
+        // Fuente 1: registry oficial del médico activo
+        try {
+            const key = (typeof getDocPatientsKey === 'function') ? getDocPatientsKey() : 'doctor_patients_list';
+            const registry = JSON.parse(localStorage.getItem(key) || '[]');
+            registry.forEach(q => {
+                const qsl = typeof q === 'string' ? q : (q.qsl || q.codigo || q.id || String(q));
+                if (qsl) qsls.add(qsl);
+            });
+        } catch(e) {}
+
+        // Fuente 2: registry GLOBAL (por si se cambió de cuenta o existió antes)
+        try {
+            const global = JSON.parse(localStorage.getItem('doctor_patients_list') || '[]');
+            global.forEach(q => {
+                const qsl = typeof q === 'string' ? q : (q.qsl || q.codigo || q.id || String(q));
+                if (qsl) qsls.add(qsl);
+            });
+        } catch(e) {}
+
+        // Fuente 3: todas las claves patient_data_* y patient_name_* de localStorage
+        // (asegura que ningún paciente con datos quede invisible)
+        try {
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (!k) continue;
+                if (k.startsWith('patient_data_')) qsls.add(k.substring('patient_data_'.length));
+                else if (k.startsWith('patient_name_')) qsls.add(k.substring('patient_name_'.length));
+            }
+        } catch(e) {}
+
+        // Fuente 4: citas — pacientes con cita pero sin expediente completo
+        try {
+            const apptKey = (typeof window.getAppointmentsKey === 'function') ? window.getAppointmentsKey() : 'appointments_data';
+            const appts = JSON.parse(localStorage.getItem(apptKey) || '[]');
+            appts.forEach(a => { if (a && a.qsl) qsls.add(a.qsl); });
+        } catch(e) {}
+
+        // Construir la lista final, ordenada por nombre
+        return Array.from(qsls).map(qsl => {
+            let d = {};
+            try { d = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}'); } catch(e) {}
+            // Si no encontramos nombre en patient_data, intentar tomarlo de las citas
+            let nombre = d.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || '';
+            if (!nombre) {
+                try {
+                    const apptKey = (typeof window.getAppointmentsKey === 'function') ? window.getAppointmentsKey() : 'appointments_data';
+                    const appts = JSON.parse(localStorage.getItem(apptKey) || '[]');
+                    const a = appts.find(x => x.qsl === qsl && x.name);
+                    if (a) nombre = a.name;
+                } catch(e) {}
+            }
             return {
                 qsl,
-                nombre: d.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || qsl,
+                nombre: nombre || qsl,
                 telefono: d.telefono || '',
                 id_identificacion: d.id_identificacion || ''
             };
-        });
+        }).sort((a, b) => (a.nombre || '').localeCompare(b.nombre || '', 'es', { sensitivity: 'base' }));
     }
 
     // =====================================================================
