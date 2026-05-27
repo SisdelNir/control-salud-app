@@ -236,6 +236,18 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (e) { console.warn('backfill error:', e?.message || e); }
     }
 
+    // Helper: re-renderiza la sección activa (programmer/admin_general) si
+    // los datos detrás de ella han cambiado en la nube.
+    function _refreshAdminViewIfActive() {
+        const progActive = document.querySelector('.nav-item[data-section="programmer"].active, li[data-section="programmer"].active');
+        const admActive  = document.querySelector('.nav-item[data-section="admin_general"].active, li[data-section="admin_general"].active');
+        if (progActive && typeof window._reloadSection === 'function') {
+            try { window._reloadSection('programmer'); } catch (e) {}
+        } else if (admActive && typeof window._reloadSection === 'function') {
+            try { window._reloadSection('admin_general'); } catch (e) {}
+        }
+    }
+
     // === SINCRONIZACIÓN DE MÉDICOS ===
     async function syncMedicosFromCloud() {
         try {
@@ -247,11 +259,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const prev = localStorage.getItem('tabla_medicos');
             if (prev !== next) {
                 localStorage.setItem('tabla_medicos', next);
-                // Re-renderizar si está abierta la pantalla de médicos
-                if (typeof window.renderMedicosTab === 'function' &&
-                    document.querySelector('[data-tab="medicos"].active, #tab-medicos.active, #medicos-list')) {
-                    try { window.renderMedicosTab(); } catch (e) {}
-                }
+                _refreshAdminViewIfActive();
             }
         } catch (e) { console.warn('syncMedicos:', e?.message || e); }
     }
@@ -267,10 +275,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const prev = localStorage.getItem('tabla_centros');
             if (prev !== next) {
                 localStorage.setItem('tabla_centros', next);
-                if (typeof window.renderCentrosTab === 'function' &&
-                    document.querySelector('[data-tab="centros"].active, #tab-centros.active')) {
-                    try { window.renderCentrosTab(); } catch (e) {}
-                }
+                _refreshAdminViewIfActive();
             }
         } catch (e) { console.warn('syncCentros:', e?.message || e); }
     }
@@ -286,18 +291,29 @@ document.addEventListener('DOMContentLoaded', () => {
             const cloud = (result.appointments || []).map(a => ({
                 qsl: a.qsl_code,
                 name: a.paciente_nombre,
-                date: a.fecha ? a.fecha.slice(0, 10) : '',
+                date: a.fecha ? String(a.fecha).slice(0, 10) : '',
                 time: a.hora,
-                motivo: a.motivo
+                motivo: a.motivo || ''
             }));
             const key = window.getAppointmentsKey ? window.getAppointmentsKey() : 'appointments_data';
-            const prev = localStorage.getItem(key);
-            const next = JSON.stringify(cloud);
+
+            // Merge inteligente: mantener citas locales que aún no llegaron al cloud
+            // (evita perder una cita recién creada localmente si el polling llega antes del POST)
+            const local = JSON.parse(localStorage.getItem(key) || '[]');
+            const keyOf = a => `${a.qsl}|${a.date}|${a.time}`;
+            const cloudKeys = new Set(cloud.map(keyOf));
+            const merged = [...cloud];
+            local.forEach(a => { if (!cloudKeys.has(keyOf(a))) merged.push(a); });
+            merged.sort((a, b) => new Date(a.date + 'T' + (a.time || '00:00')) - new Date(b.date + 'T' + (b.time || '00:00')));
+
+            const prev = JSON.stringify(local);
+            const next = JSON.stringify(merged);
             if (prev !== next) {
                 localStorage.setItem(key, next);
-                if (typeof window.renderAgenda === 'function' &&
-                    document.querySelector('.section-agenda, [data-section="agenda"].active')) {
-                    try { window.renderAgenda(); } catch (e) {}
+                // Re-renderizar la sección Agenda/Recordatorios si está activa
+                const remindersActive = document.querySelector('.nav-item[data-section="reminders"].active, li[data-section="reminders"].active');
+                if (remindersActive && typeof window._reloadSection === 'function') {
+                    try { window._reloadSection('reminders'); } catch (e) {}
                 }
             }
         } catch (e) { console.warn('syncAppointments:', e?.message || e); }
@@ -402,6 +418,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // 3. Motor de Secciones
+    // Expone loadSection para que el motor de sync pueda re-renderizar
+    // la sección activa al detectar cambios desde la nube.
+    window._reloadSection = (s) => loadSection(s);
     async function loadSection(sectionName) {
         if (qslCode === 'MED-MASTER' && (sectionName === 'overview' || sectionName === 'reminders' || sectionName === 'consultation')) {
             sectionName = 'programmer';
@@ -438,7 +457,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     window.getAppointmentsKey = function() {
         const id = localStorage.getItem('current_doctor_id');
-        return id === 'MED-MASTER' ? 'appointments_data' : (id ? `appointments_data_\${id}` : 'appointments_data');
+        return id === 'MED-MASTER' ? 'appointments_data' : (id ? `appointments_data_${id}` : 'appointments_data');
     };
 
     window.getAppointments = function() {
