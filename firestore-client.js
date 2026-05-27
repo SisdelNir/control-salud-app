@@ -183,9 +183,16 @@
     // ----- CITAS -----
     async function listAppointments(doctor_id) {
         const snap = await db().collection(COLLECTIONS.citas).where('doctor_id', '==', doctor_id).get();
-        const appointments = snap.docs
+        const all = snap.docs
             .filter(d => !d.data().deleted)
-            .map(d => ({ id: d.id, ...d.data() }))
+            .map(d => ({ id: d.id, ...d.data() }));
+        // De-duplicación: si hay múltiples docs con el mismo qsl+fecha+hora, conservar uno solo.
+        const seen = new Map();
+        for (const a of all) {
+            const k = `${a.qsl_code}|${a.fecha}|${a.hora}`;
+            if (!seen.has(k)) seen.set(k, a);
+        }
+        const appointments = Array.from(seen.values())
             .sort((a, b) => {
                 if (a.fecha !== b.fecha) return a.fecha < b.fecha ? -1 : 1;
                 return a.hora < b.hora ? -1 : 1;
@@ -195,10 +202,13 @@
 
     async function createAppointment(payload) {
         const { doctor_id, qsl_code, paciente_nombre, fecha, hora, motivo } = payload;
-        await db().collection(COLLECTIONS.citas).add({
+        // ID determinístico evita duplicados: crear la misma cita 2 veces sobrescribe en vez de añadir.
+        const sanitize = s => String(s || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const docId = `${sanitize(doctor_id)}__${sanitize(qsl_code)}__${sanitize(fecha)}__${sanitize(hora)}`;
+        await db().collection(COLLECTIONS.citas).doc(docId).set({
             doctor_id, qsl_code, paciente_nombre, fecha, hora, motivo,
             created_at: serverTimestamp()
-        });
+        }, { merge: true });
         return { success: true };
     }
 

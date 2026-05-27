@@ -377,10 +377,13 @@ document.addEventListener('DOMContentLoaded', () => {
             // (evita perder una cita recién creada localmente si el polling llega antes del POST)
             const local = JSON.parse(localStorage.getItem(key) || '[]');
             const keyOf = a => `${a.qsl}|${a.date}|${a.time}`;
-            const cloudKeys = new Set(cloud.map(keyOf));
-            const merged = [...cloud];
-            local.forEach(a => { if (!cloudKeys.has(keyOf(a))) merged.push(a); });
-            merged.sort((a, b) => new Date(a.date + 'T' + (a.time || '00:00')) - new Date(b.date + 'T' + (b.time || '00:00')));
+            // Dedup garantizado por Map (clave qsl|date|time): si llegan 2 con
+            // misma clave, solo se conserva una (cloud tiene prioridad).
+            const dedupMap = new Map();
+            cloud.forEach(a => dedupMap.set(keyOf(a), a));
+            local.forEach(a => { if (!dedupMap.has(keyOf(a))) dedupMap.set(keyOf(a), a); });
+            const merged = Array.from(dedupMap.values())
+                .sort((a, b) => new Date(a.date + 'T' + (a.time || '00:00')) - new Date(b.date + 'T' + (b.time || '00:00')));
 
             const prev = JSON.stringify(local);
             const next = JSON.stringify(merged);
@@ -504,15 +507,17 @@ document.addEventListener('DOMContentLoaded', () => {
             backfillLocalAppointmentsToCloud()
         ]).finally(() => syncEverythingFromCloud({ force: true }));
         let tickCount = 0;
+        // Polling cada 15 segundos (antes 3s). Conservador con la cuota de
+        // Firestore: 6 reads × 4 polls/min = 24 reads/min ≈ 35k reads/día
+        // dentro del límite gratuito (50k/día). El usuario puede pulsar el
+        // botón "Sincronizar" en la agenda para forzar un sync inmediato.
         window._cloudSyncInterval = setInterval(() => {
-            // Solo si la pestaña está visible para no malgastar recursos
             if (document.visibilityState === 'hidden') return;
             tickCount++;
-            // Cada ~30s hacemos un full-sync de pacientes (detecta eliminados);
-            // el resto, incremental por timestamp.
-            const force = (tickCount % 10) === 0;
+            // Cada ~5 min un full-sync (detecta eliminados); el resto incremental
+            const force = (tickCount % 20) === 0;
             syncEverythingFromCloud({ force });
-        }, 3000);
+        }, 15000);
         // Forzar sync completo al regresar a la pestaña
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') syncEverythingFromCloud({ force: true });
@@ -646,18 +651,9 @@ document.addEventListener('DOMContentLoaded', () => {
             console.log(`[DR-SISDEL] Cita subida al cloud: ${appt.name} · ${appt.date} ${appt.time}`);
         })
         .catch(e => {
-            console.error('Cloud sync err (cita):', e);
-            let attempt = 0;
-            const retry = () => {
-                attempt++;
-                if (attempt > 5) return;
-                setTimeout(() => {
-                    doPost()
-                      .then(r => { if (!r.ok) retry(); else console.log(`[DR-SISDEL] Cita reintentada OK (intento ${attempt})`); })
-                      .catch(retry);
-                }, Math.min(1000 * attempt, 5000));
-            };
-            retry();
+            console.warn('Cita guardada localmente; reintento simple en 10s. Error:', e?.message);
+            // Un único reintento diferido (idempotente, no crea duplicado)
+            setTimeout(() => { doPost().catch(() => {}); }, 10000);
         });
         return true;
     };
@@ -1558,14 +1554,14 @@ function renderSection(name, data) {
                 }
             }).catch(() => {});
 
-        // Mientras el overlay esté abierto, refrescamos cada 3s para captar
-        // citas/datos recién sincronizados desde la nube.
+        // Mientras el overlay esté abierto, refrescamos cada 15s (no toca red,
+        // solo re-lee localStorage que es alimentado por el polling global).
         if (window._patientListInterval) clearInterval(window._patientListInterval);
         window._patientListInterval = setInterval(() => {
             const overlay = document.getElementById('patient-list-overlay');
             if (!overlay) { clearInterval(window._patientListInterval); window._patientListInterval = null; return; }
             renderList(document.getElementById('pl-search')?.value?.toLowerCase() || '');
-        }, 3000);
+        }, 15000);
 
         const overlay = document.createElement('div');
         overlay.id = 'patient-list-overlay';
