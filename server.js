@@ -135,7 +135,9 @@ app.post('/api/patient/:qsl/alerts', async (req, res) => {
 app.get('/api/medicos', async (req, res) => {
     try {
         const snap = await db.collection(COLLECTIONS.medicos).get();
-        const medicos = snap.docs.map(d => ({ id_medico: d.id, ...(d.data().data || {}) }));
+        const medicos = snap.docs
+            .filter(d => !d.data().deleted)  // excluir soft-deleted
+            .map(d => ({ id_medico: d.id, ...(d.data().data || {}) }));
         res.json({ success: true, medicos });
     } catch (err) {
         console.error(err);
@@ -161,7 +163,11 @@ app.post('/api/medico/:id', async (req, res) => {
 app.delete('/api/medico/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        await db.collection(COLLECTIONS.medicos).doc(id).delete();
+        // Soft delete: marcar como eliminado, NO borrar el documento
+        await db.collection(COLLECTIONS.medicos).doc(id).set(
+            { deleted: true, deleted_at: admin.firestore.FieldValue.serverTimestamp() },
+            { merge: true }
+        );
         res.json({ success: true });
     } catch (err) {
         console.error(err);
@@ -173,7 +179,9 @@ app.delete('/api/medico/:id', async (req, res) => {
 app.get('/api/centros', async (req, res) => {
     try {
         const snap = await db.collection(COLLECTIONS.centros_medicos).get();
-        const centros = snap.docs.map(d => d.data());
+        const centros = snap.docs
+            .filter(d => !d.data().deleted)  // excluir soft-deleted
+            .map(d => d.data());
         res.json({ success: true, centros });
     } catch (err) {
         console.error(err);
@@ -211,7 +219,11 @@ app.post('/api/centro/:id', async (req, res) => {
 app.delete('/api/centro/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        await db.collection(COLLECTIONS.centros_medicos).doc(id).delete();
+        // Soft delete: marcar como eliminado, NO borrar el documento
+        await db.collection(COLLECTIONS.centros_medicos).doc(id).set(
+            { deleted: true, deleted_at: admin.firestore.FieldValue.serverTimestamp() },
+            { merge: true }
+        );
         res.json({ success: true });
     } catch (err) {
         console.error(err);
@@ -228,6 +240,7 @@ app.get('/api/appointments', async (req, res) => {
             .where('doctor_id', '==', doctor_id)
             .get();
         const appointments = snap.docs
+            .filter(d => !d.data().deleted)  // excluir soft-deleted
             .map(d => ({ id: d.id, ...d.data() }))
             .sort((a, b) => {
                 if (a.fecha !== b.fecha) return a.fecha < b.fecha ? -1 : 1;
@@ -268,8 +281,12 @@ app.delete('/api/appointments', async (req, res) => {
             .where('fecha', '==', fecha)
             .where('hora', '==', hora)
             .get();
+        // Soft delete: marcar como eliminadas, NO borrar los documentos
         const batch = db.batch();
-        snap.docs.forEach(d => batch.delete(d.ref));
+        snap.docs.forEach(d => batch.update(d.ref, {
+            deleted: true,
+            deleted_at: admin.firestore.FieldValue.serverTimestamp()
+        }));
         await batch.commit();
         res.json({ success: true });
     } catch (err) {
