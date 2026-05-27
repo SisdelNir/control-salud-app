@@ -49,6 +49,11 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
+    // FINANZAS (transacciones: ingresos, egresos, cuentas por cobrar)
+    match /finanzas_transacciones/{trans_id} {
+      allow read, write: if true;
+    }
+
     // Cualquier otra colección: denegar por defecto
     match /{document=**} {
       allow read, write: if false;

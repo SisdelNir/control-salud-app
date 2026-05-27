@@ -7398,4 +7398,707 @@ function renderSection(name, data) {
         } catch (e) {}
     })();
 
+    // ============================================================
+    // ===  MÓDULO GESTIÓN FINANCIERA  ============================
+    // ============================================================
+    function hasPriv(privId) {
+        if (qslCode === 'MED-MASTER') return true;
+        const docId = localStorage.getItem('current_doctor_id');
+        if (!docId) return false;
+        try {
+            const list = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            const me = list.find(m => m.id_medico === docId);
+            if (!me) return false;
+            return !!(me.privileges && me.privileges[privId]);
+        } catch (e) { return false; }
+    }
+    window.hasPriv = hasPriv;
+
+    function _applyFinanzasSidebarVisibility() {
+        const nav = document.getElementById('nav-finanzas');
+        if (!nav) return;
+        nav.style.display = hasPriv('ver_finanzas') ? '' : 'none';
+    }
+    setTimeout(_applyFinanzasSidebarVisibility, 200);
+    setTimeout(_applyFinanzasSidebarVisibility, 1500);
+    setTimeout(_applyFinanzasSidebarVisibility, 4000);
+    window._applyFinanzasSidebarVisibility = _applyFinanzasSidebarVisibility;
+
+    function _formatMoney(n) {
+        const v = parseFloat(n) || 0;
+        return v.toLocaleString('es-GT', { style: 'currency', currency: 'GTQ', minimumFractionDigits: 2 });
+    }
+    function _todayISO() {
+        const d = new Date();
+        return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+    }
+    function _currentTimeHHMM() {
+        const d = new Date();
+        return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+    }
+    function _currentDoctorId() {
+        return localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+    }
+    function _getFinanzasCache() {
+        try {
+            const key = `finanzas_transacciones_${_currentDoctorId()}`;
+            return JSON.parse(localStorage.getItem(key) || '[]');
+        } catch (e) { return []; }
+    }
+    function _setFinanzasCache(arr) {
+        const key = `finanzas_transacciones_${_currentDoctorId()}`;
+        localStorage.setItem(key, JSON.stringify(arr));
+    }
+
+    async function renderFinanzas() {
+        if (!hasPriv('ver_finanzas')) {
+            contentArea.innerHTML = `
+                <div style="text-align:center;padding:80px 20px;border:2px dashed rgba(255,255,255,0.08);border-radius:20px;">
+                    <div style="font-size:64px;margin-bottom:18px;">🔒</div>
+                    <h3 style="color:white;font-size:20px;margin-bottom:8px;">Acceso restringido</h3>
+                    <p style="color:rgba(255,255,255,0.55);max-width:520px;margin:0 auto;font-size:14px;">
+                        No tienes el privilegio <b>"Ver finanzas"</b>. Solicítalo al administrador desde
+                        <b>Configuración → Privilegios</b>.
+                    </p>
+                </div>`;
+            return;
+        }
+        contentArea.innerHTML = `
+            <div class="config-tabs" id="finanzas-tabs-bar" style="margin-bottom:24px;">
+                <button class="config-tab-btn active" onclick="window.switchFinanzasTab('resumen', this)">📊 Resumen</button>
+                <button class="config-tab-btn" onclick="window.switchFinanzasTab('cobros', this)">💵 Cobros</button>
+                <button class="config-tab-btn" onclick="window.switchFinanzasTab('deudas', this)">📋 Cuentas por Cobrar</button>
+                <button class="config-tab-btn" onclick="window.switchFinanzasTab('egresos', this)">💸 Egresos</button>
+                <button class="config-tab-btn" onclick="window.switchFinanzasTab('estado', this)">📄 Estado de Cuenta</button>
+            </div>
+            <div id="finanzas-tab-content">
+                <div class="loading-state"><div class="spinner"></div><p>Cargando finanzas...</p></div>
+            </div>
+        `;
+        try { await _syncFinanzasFromCloud(); } catch (e) {}
+        const c = document.getElementById('finanzas-tab-content');
+        if (c) c.innerHTML = _buildFinanzasResumenTab();
+    }
+
+    window.switchFinanzasTab = async function(tab, btn) {
+        document.querySelectorAll('#finanzas-tabs-bar .config-tab-btn').forEach(b => b.classList.remove('active'));
+        if (btn) btn.classList.add('active');
+        const c = document.getElementById('finanzas-tab-content');
+        if (!c) return;
+        c.innerHTML = `<div class="loading-state"><div class="spinner"></div></div>`;
+        try { await _syncFinanzasFromCloud(); } catch (e) {}
+        if (tab === 'resumen') c.innerHTML = _buildFinanzasResumenTab();
+        else if (tab === 'cobros') c.innerHTML = _buildFinanzasCobrosTab();
+        else if (tab === 'deudas') c.innerHTML = _buildFinanzasDeudasTab();
+        else if (tab === 'egresos') c.innerHTML = _buildFinanzasEgresosTab();
+        else if (tab === 'estado') c.innerHTML = _buildFinanzasEstadoTab();
+    };
+
+    function _listPacientesParaSelect() {
+        const key = (typeof getDocPatientsKey === 'function') ? getDocPatientsKey() : 'doctor_patients_list';
+        const registry = JSON.parse(localStorage.getItem(key) || '[]');
+        return registry.map(q => {
+            const qsl = typeof q === 'string' ? q : (q.qsl || q.codigo || q.id || String(q));
+            const d = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}');
+            return {
+                qsl,
+                nombre: d.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || qsl
+            };
+        });
+    }
+
+    // ---- TAB: RESUMEN ----
+    function _buildFinanzasResumenTab() {
+        const txs = _getFinanzasCache();
+        const now = new Date();
+        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+        const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+        const inRange = t => {
+            const d = new Date((t.fecha || '') + 'T12:00:00');
+            return d >= monthStart && d <= monthEnd;
+        };
+        const ingresosMes = txs.filter(t => t.tipo === 'income' && inRange(t))
+            .reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
+        const egresosMes = txs.filter(t => t.tipo === 'expense' && inRange(t))
+            .reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
+        const saldoMes = ingresosMes - egresosMes;
+        const porCobrar = txs.filter(t => t.tipo === 'charge' && t.estado === 'pending')
+            .reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
+
+        const ingresoColor = '#10b981', egresoColor = '#f87171';
+        const saldoColor = saldoMes >= 0 ? '#10b981' : '#f87171';
+        const cobrarColor = '#fbbf24';
+
+        const days = [];
+        for (let i = 29; i >= 0; i--) {
+            const d = new Date(now);
+            d.setDate(d.getDate() - i);
+            const iso = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+            const ingreso = txs.filter(t => t.tipo === 'income' && t.fecha === iso)
+                .reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
+            const egreso = txs.filter(t => t.tipo === 'expense' && t.fecha === iso)
+                .reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
+            days.push({ iso, ingreso, egreso });
+        }
+        const maxVal = Math.max(1, ...days.map(d => Math.max(d.ingreso, d.egreso)));
+        const barW = 22, gap = 4, h = 140;
+        const svgWidth = days.length * (barW + gap);
+        const bars = days.map((d, i) => {
+            const x = i * (barW + gap);
+            const hi = (d.ingreso / maxVal) * h;
+            const he = (d.egreso / maxVal) * h;
+            return `<g>
+                  <rect x="${x}" y="${h - hi}" width="${barW/2 - 1}" height="${hi}" fill="${ingresoColor}" opacity="0.85" rx="2"><title>${d.iso} · Ingreso: ${_formatMoney(d.ingreso)}</title></rect>
+                  <rect x="${x + barW/2 + 1}" y="${h - he}" width="${barW/2 - 1}" height="${he}" fill="${egresoColor}" opacity="0.85" rx="2"><title>${d.iso} · Egreso: ${_formatMoney(d.egreso)}</title></rect>
+                </g>`;
+        }).join('');
+
+        const cardCss = `background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:24px;`;
+        return `
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:16px; margin-bottom:24px;">
+            <div style="${cardCss} border-left:4px solid ${ingresoColor};">
+                <div style="font-size:12px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">💵 Ingresos del mes</div>
+                <div style="font-size:30px;color:${ingresoColor};font-weight:800;">${_formatMoney(ingresosMes)}</div>
+            </div>
+            <div style="${cardCss} border-left:4px solid ${egresoColor};">
+                <div style="font-size:12px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">💸 Egresos del mes</div>
+                <div style="font-size:30px;color:${egresoColor};font-weight:800;">${_formatMoney(egresosMes)}</div>
+            </div>
+            <div style="${cardCss} border-left:4px solid ${saldoColor};">
+                <div style="font-size:12px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">⚖️ Saldo del mes</div>
+                <div style="font-size:30px;color:${saldoColor};font-weight:800;">${_formatMoney(saldoMes)}</div>
+            </div>
+            <div style="${cardCss} border-left:4px solid ${cobrarColor};">
+                <div style="font-size:12px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">📋 Por cobrar</div>
+                <div style="font-size:30px;color:${cobrarColor};font-weight:800;">${_formatMoney(porCobrar)}</div>
+            </div>
+        </div>
+        <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.06); border-radius:16px; padding:24px;">
+            <h3 style="color:white; font-size:15px; margin:0 0 16px;">📈 Movimiento de los últimos 30 días</h3>
+            <div style="overflow-x:auto;">
+                <svg width="${svgWidth}" height="${h + 30}" style="display:block;">
+                    ${bars}
+                    <line x1="0" y1="${h}" x2="${svgWidth}" y2="${h}" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
+                </svg>
+            </div>
+            <div style="display:flex; gap:18px; margin-top:12px; font-size:12px; color:rgba(255,255,255,0.55);">
+                <span><span style="display:inline-block;width:10px;height:10px;background:${ingresoColor};border-radius:2px;vertical-align:middle;margin-right:6px;"></span>Ingresos</span>
+                <span><span style="display:inline-block;width:10px;height:10px;background:${egresoColor};border-radius:2px;vertical-align:middle;margin-right:6px;"></span>Egresos</span>
+            </div>
+        </div>`;
+    }
+
+    // ---- TAB: COBROS (income) ----
+    function _buildFinanzasCobrosTab() {
+        const canCreate = hasPriv('registrar_cobros');
+        const canDelete = hasPriv('eliminar_transacciones');
+        const txs = _getFinanzasCache().filter(t => t.tipo === 'income')
+            .sort((a, b) => ((b.fecha || '') + 'T' + (b.hora || '00:00')).localeCompare((a.fecha || '') + 'T' + (a.hora || '00:00')));
+        const pacientes = _listPacientesParaSelect();
+        const rows = txs.length === 0
+            ? `<tr><td colspan="6" style="padding:40px;text-align:center;color:rgba(255,255,255,0.35);">Sin cobros registrados.</td></tr>`
+            : txs.map(t => `
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+                    <td style="padding:10px 14px;color:rgba(255,255,255,0.85);font-size:13px;">${t.fecha || '—'} ${t.hora || ''}</td>
+                    <td style="padding:10px 14px;color:white;font-weight:600;font-size:13px;">${t.paciente_nombre || '(general)'}</td>
+                    <td style="padding:10px 14px;color:rgba(255,255,255,0.7);font-size:13px;">${t.concepto || '—'}</td>
+                    <td style="padding:10px 14px;color:#10b981;font-weight:700;font-size:13px;text-align:right;">${_formatMoney(t.monto)}</td>
+                    <td style="padding:10px 14px;color:rgba(255,255,255,0.55);font-size:12px;">${t.metodo_pago || '—'}</td>
+                    <td style="padding:10px 14px;text-align:right;">
+                        ${canDelete ? `<button onclick="window._deleteFinanza('${t.id}')" style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.3);color:#f87171;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;">🗑</button>` : ''}
+                    </td>
+                </tr>`).join('');
+
+        return `
+        <div style="display:grid; grid-template-columns:1fr 360px; gap:24px; align-items:start;">
+            <div>
+                <h3 style="color:white;font-size:17px;margin:0 0 16px;">💵 Cobros registrados (${txs.length})</h3>
+                <div style="border:1px solid rgba(255,255,255,0.06);border-radius:12px;overflow:hidden;">
+                    <table style="width:100%;border-collapse:collapse;">
+                        <thead style="background:rgba(16,185,129,0.06);">
+                            <tr>
+                                <th style="padding:11px 14px;text-align:left;font-size:11px;color:rgba(16,185,129,0.85);text-transform:uppercase;letter-spacing:1px;">Fecha</th>
+                                <th style="padding:11px 14px;text-align:left;font-size:11px;color:rgba(16,185,129,0.85);text-transform:uppercase;letter-spacing:1px;">Paciente</th>
+                                <th style="padding:11px 14px;text-align:left;font-size:11px;color:rgba(16,185,129,0.85);text-transform:uppercase;letter-spacing:1px;">Concepto</th>
+                                <th style="padding:11px 14px;text-align:right;font-size:11px;color:rgba(16,185,129,0.85);text-transform:uppercase;letter-spacing:1px;">Monto</th>
+                                <th style="padding:11px 14px;text-align:left;font-size:11px;color:rgba(16,185,129,0.85);text-transform:uppercase;letter-spacing:1px;">Método</th>
+                                <th style="padding:11px 14px;"></th>
+                            </tr>
+                        </thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="widget-card" style="border:1px solid rgba(16,185,129,0.2);background:rgba(0,0,0,0.3);position:sticky;top:0;">
+                <h3 style="color:#10b981;font-size:16px;margin:0 0 16px;">➕ Registrar Cobro</h3>
+                ${!canCreate ? '<p style="color:rgba(248,113,113,0.85);font-size:12px;margin-bottom:12px;">🔒 Sin privilegio "Registrar cobros".</p>' : ''}
+                <div style="display:grid;gap:12px;">
+                    <div class="input-group"><label>Paciente</label>
+                        <select id="fz-cobro-qsl" ${!canCreate ? 'disabled' : ''}>
+                            <option value="">— (cobro general / sin paciente) —</option>
+                            ${pacientes.map(p => `<option value="${p.qsl}">${p.nombre}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div class="input-group"><label>Concepto</label>
+                        <input type="text" id="fz-cobro-concepto" placeholder="Consulta general" autocomplete="off" ${!canCreate ? 'disabled' : ''}>
+                    </div>
+                    <div class="input-group"><label>Monto (GTQ) *</label>
+                        <input type="number" step="0.01" min="0" id="fz-cobro-monto" placeholder="350.00" autocomplete="off" ${!canCreate ? 'disabled' : ''}>
+                    </div>
+                    <div class="input-group"><label>Método de pago</label>
+                        <select id="fz-cobro-metodo" ${!canCreate ? 'disabled' : ''}>
+                            <option value="efectivo">Efectivo</option>
+                            <option value="tarjeta">Tarjeta</option>
+                            <option value="transferencia">Transferencia</option>
+                            <option value="otro">Otro</option>
+                        </select>
+                    </div>
+                    <div class="input-group"><label>Fecha</label>
+                        <input type="date" id="fz-cobro-fecha" value="${_todayISO()}" ${!canCreate ? 'disabled' : ''}>
+                    </div>
+                    <button onclick="window._saveCobro()" ${!canCreate ? 'disabled' : ''}
+                        style="padding:13px;background:linear-gradient(135deg,#059669,#10b981);color:white;font-weight:800;border-radius:12px;border:none;cursor:${canCreate ? 'pointer' : 'not-allowed'};font-size:14px;opacity:${canCreate ? 1 : 0.5};">
+                        💵 GUARDAR COBRO
+                    </button>
+                </div>
+            </div>
+        </div>`;
+    }
+
+    window._saveCobro = async function() {
+        if (!hasPriv('registrar_cobros')) return;
+        const qsl = document.getElementById('fz-cobro-qsl')?.value || '';
+        const concepto = document.getElementById('fz-cobro-concepto')?.value.trim() || 'Cobro';
+        const monto = parseFloat(document.getElementById('fz-cobro-monto')?.value);
+        const metodo = document.getElementById('fz-cobro-metodo')?.value || 'efectivo';
+        const fecha = document.getElementById('fz-cobro-fecha')?.value || _todayISO();
+        if (!monto || monto <= 0) {
+            window.showElegantAlert('⚠️ Monto inválido', 'Ingrese un monto mayor a cero.', true);
+            return;
+        }
+        const payload = {
+            doctor_id: _currentDoctorId(),
+            tipo: 'income',
+            concepto, monto, moneda: 'GTQ',
+            fecha, hora: _currentTimeHHMM(),
+            qsl_code: qsl || null,
+            paciente_nombre: qsl ? (_listPacientesParaSelect().find(p => p.qsl === qsl)?.nombre || '') : '',
+            metodo_pago: metodo,
+            deleted: false
+        };
+        try {
+            await fetch('/api/finanzas', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+            await _syncFinanzasFromCloud();
+            const c = document.getElementById('finanzas-tab-content');
+            if (c) c.innerHTML = _buildFinanzasCobrosTab();
+            window.showElegantAlert('✅ Cobro registrado', `Se registró ${_formatMoney(monto)} correctamente.`);
+        } catch (e) { console.error(e); window.showElegantAlert('❌ Error', 'No se pudo guardar el cobro.'); }
+    };
+
+    window._deleteFinanza = async function(id) {
+        if (!hasPriv('eliminar_transacciones')) return;
+        if (!confirm('¿Eliminar esta transacción?')) return;
+        try {
+            await fetch(`/api/finanzas/${id}`, { method: 'DELETE' });
+            await _syncFinanzasFromCloud();
+            const activeTab = document.querySelector('#finanzas-tabs-bar .config-tab-btn.active');
+            if (activeTab) activeTab.click();
+        } catch (e) { window.showElegantAlert('❌ Error', 'No se pudo eliminar.'); }
+    };
+
+    // ---- TAB: CUENTAS POR COBRAR (charge) ----
+    function _buildFinanzasDeudasTab() {
+        const canCreate = hasPriv('gestionar_deudas');
+        const canDelete = hasPriv('eliminar_transacciones');
+        const charges = _getFinanzasCache().filter(t => t.tipo === 'charge')
+            .sort((a, b) => ((b.fecha || '') + 'T' + (b.hora || '00:00')).localeCompare((a.fecha || '') + 'T' + (a.hora || '00:00')));
+        const pendientes = charges.filter(c => c.estado === 'pending');
+        const pacientes = _listPacientesParaSelect();
+        const totalPendiente = pendientes.reduce((s, c) => s + (parseFloat(c.monto) || 0), 0);
+
+        const groupMap = new Map();
+        pendientes.forEach(c => {
+            const k = c.qsl_code || '(otro)';
+            if (!groupMap.has(k)) groupMap.set(k, { qsl: c.qsl_code, nombre: c.paciente_nombre || k, total: 0, items: [] });
+            const g = groupMap.get(k);
+            g.total += parseFloat(c.monto) || 0;
+            g.items.push(c);
+        });
+        const groups = Array.from(groupMap.values()).sort((a, b) => b.total - a.total);
+
+        const groupsHtml = groups.length === 0
+            ? `<div style="text-align:center;padding:40px;color:rgba(255,255,255,0.4);">No hay cuentas por cobrar pendientes.</div>`
+            : groups.map(g => `
+                <div style="background:rgba(251,191,36,0.04);border:1px solid rgba(251,191,36,0.2);border-radius:12px;padding:14px 18px;margin-bottom:10px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                        <strong style="color:white;font-size:15px;">${g.nombre}</strong>
+                        <span style="color:#fbbf24;font-weight:800;font-size:16px;">${_formatMoney(g.total)}</span>
+                    </div>
+                    <div style="display:grid;gap:6px;">
+                        ${g.items.map(c => `
+                            <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:rgba(255,255,255,0.7);background:rgba(0,0,0,0.2);padding:8px 12px;border-radius:8px;">
+                                <span>${c.fecha || '—'} · ${c.concepto || '—'}</span>
+                                <span style="display:flex;gap:8px;align-items:center;">
+                                    <span style="color:#fbbf24;">${_formatMoney(c.monto)}</span>
+                                    ${canCreate ? `<button onclick="window._marcarPagado('${c.id}')" style="background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.4);color:#34d399;padding:3px 8px;border-radius:6px;cursor:pointer;font-size:11px;">✓ Pagar</button>` : ''}
+                                    ${canDelete ? `<button onclick="window._deleteFinanza('${c.id}')" style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.25);color:#f87171;padding:3px 8px;border-radius:6px;cursor:pointer;font-size:11px;">🗑</button>` : ''}
+                                </span>
+                            </div>`).join('')}
+                    </div>
+                </div>`).join('');
+
+        return `
+        <div style="display:grid; grid-template-columns:1fr 360px; gap:24px; align-items:start;">
+            <div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                    <h3 style="color:white;font-size:17px;margin:0;">📋 Cuentas por Cobrar</h3>
+                    <span style="background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.3);border-radius:10px;padding:6px 14px;font-size:13px;color:#fbbf24;font-weight:700;">
+                        Total pendiente: ${_formatMoney(totalPendiente)}
+                    </span>
+                </div>
+                ${groupsHtml}
+            </div>
+            <div class="widget-card" style="border:1px solid rgba(251,191,36,0.2);background:rgba(0,0,0,0.3);position:sticky;top:0;">
+                <h3 style="color:#fbbf24;font-size:16px;margin:0 0 16px;">➕ Crear Cargo (Deuda)</h3>
+                ${!canCreate ? '<p style="color:rgba(248,113,113,0.85);font-size:12px;margin-bottom:12px;">🔒 Sin privilegio "Gestionar cuentas por cobrar".</p>' : ''}
+                <div style="display:grid;gap:12px;">
+                    <div class="input-group"><label>Paciente *</label>
+                        <select id="fz-deuda-qsl" ${!canCreate ? 'disabled' : ''}>
+                            <option value="">— Selecciona —</option>
+                            ${pacientes.map(p => `<option value="${p.qsl}">${p.nombre}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div class="input-group"><label>Concepto</label>
+                        <input type="text" id="fz-deuda-concepto" placeholder="Consulta sin pagar" autocomplete="off" ${!canCreate ? 'disabled' : ''}>
+                    </div>
+                    <div class="input-group"><label>Monto (GTQ) *</label>
+                        <input type="number" step="0.01" min="0" id="fz-deuda-monto" placeholder="350.00" autocomplete="off" ${!canCreate ? 'disabled' : ''}>
+                    </div>
+                    <div class="input-group"><label>Fecha</label>
+                        <input type="date" id="fz-deuda-fecha" value="${_todayISO()}" ${!canCreate ? 'disabled' : ''}>
+                    </div>
+                    <button onclick="window._saveDeuda()" ${!canCreate ? 'disabled' : ''}
+                        style="padding:13px;background:linear-gradient(135deg,#d97706,#fbbf24);color:#1f2937;font-weight:800;border-radius:12px;border:none;cursor:${canCreate ? 'pointer' : 'not-allowed'};font-size:14px;opacity:${canCreate ? 1 : 0.5};">
+                        📋 GUARDAR DEUDA
+                    </button>
+                </div>
+            </div>
+        </div>`;
+    }
+
+    window._saveDeuda = async function() {
+        if (!hasPriv('gestionar_deudas')) return;
+        const qsl = document.getElementById('fz-deuda-qsl')?.value;
+        const concepto = document.getElementById('fz-deuda-concepto')?.value.trim() || 'Cargo';
+        const monto = parseFloat(document.getElementById('fz-deuda-monto')?.value);
+        const fecha = document.getElementById('fz-deuda-fecha')?.value || _todayISO();
+        if (!qsl) { window.showElegantAlert('⚠️ Sin paciente', 'Selecciona un paciente.', true); return; }
+        if (!monto || monto <= 0) { window.showElegantAlert('⚠️ Monto inválido', 'Ingrese un monto válido.', true); return; }
+        const pacienteNombre = _listPacientesParaSelect().find(p => p.qsl === qsl)?.nombre || '';
+        const payload = {
+            doctor_id: _currentDoctorId(),
+            tipo: 'charge',
+            concepto, monto, moneda: 'GTQ', fecha, hora: _currentTimeHHMM(),
+            qsl_code: qsl,
+            paciente_nombre: pacienteNombre,
+            estado: 'pending',
+            deleted: false
+        };
+        try {
+            await fetch('/api/finanzas', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+            await _syncFinanzasFromCloud();
+            const c = document.getElementById('finanzas-tab-content');
+            if (c) c.innerHTML = _buildFinanzasDeudasTab();
+            window.showElegantAlert('✅ Cargo registrado', `Se creó cargo de ${_formatMoney(monto)} para ${pacienteNombre}.`);
+        } catch (e) { window.showElegantAlert('❌ Error', 'No se pudo guardar el cargo.'); }
+    };
+
+    window._marcarPagado = async function(chargeId) {
+        if (!hasPriv('gestionar_deudas')) return;
+        const tx = _getFinanzasCache().find(t => t.id === chargeId);
+        if (!tx) return;
+        if (!confirm(`Crear cobro de ${_formatMoney(tx.monto)} para liquidar este cargo de ${tx.paciente_nombre}?`)) return;
+        const payload = {
+            doctor_id: _currentDoctorId(),
+            tipo: 'income',
+            concepto: 'Pago de deuda · ' + (tx.concepto || ''),
+            monto: tx.monto, moneda: tx.moneda || 'GTQ',
+            fecha: _todayISO(), hora: _currentTimeHHMM(),
+            qsl_code: tx.qsl_code,
+            paciente_nombre: tx.paciente_nombre,
+            metodo_pago: 'efectivo',
+            deleted: false
+        };
+        try {
+            await fetch('/api/finanzas', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+            await _syncFinanzasFromCloud();
+            const c = document.getElementById('finanzas-tab-content');
+            if (c) c.innerHTML = _buildFinanzasDeudasTab();
+            window.showElegantAlert('✅ Pago aplicado', `Cargo liquidado por ${_formatMoney(tx.monto)}.`);
+        } catch (e) { window.showElegantAlert('❌ Error', 'No se pudo aplicar el pago.'); }
+    };
+
+    // ---- TAB: EGRESOS (expense) ----
+    function _buildFinanzasEgresosTab() {
+        const canCreate = hasPriv('registrar_egresos');
+        const canDelete = hasPriv('eliminar_transacciones');
+        const txs = _getFinanzasCache().filter(t => t.tipo === 'expense')
+            .sort((a, b) => ((b.fecha || '') + 'T' + (b.hora || '00:00')).localeCompare((a.fecha || '') + 'T' + (a.hora || '00:00')));
+
+        const rows = txs.length === 0
+            ? `<tr><td colspan="6" style="padding:40px;text-align:center;color:rgba(255,255,255,0.35);">Sin egresos registrados.</td></tr>`
+            : txs.map(t => `
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+                    <td style="padding:10px 14px;color:rgba(255,255,255,0.85);font-size:13px;">${t.fecha || '—'}</td>
+                    <td style="padding:10px 14px;color:white;font-weight:600;font-size:13px;">${t.proveedor || '—'}</td>
+                    <td style="padding:10px 14px;color:rgba(255,255,255,0.7);font-size:13px;">${t.concepto || '—'}</td>
+                    <td style="padding:10px 14px;color:#f87171;font-weight:700;font-size:13px;text-align:right;">${_formatMoney(t.monto)}</td>
+                    <td style="padding:10px 14px;color:rgba(255,255,255,0.55);font-size:12px;">${t.metodo_pago || '—'}</td>
+                    <td style="padding:10px 14px;text-align:right;">
+                        ${canDelete ? `<button onclick="window._deleteFinanza('${t.id}')" style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.3);color:#f87171;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;">🗑</button>` : ''}
+                    </td>
+                </tr>`).join('');
+
+        return `
+        <div style="display:grid; grid-template-columns:1fr 360px; gap:24px; align-items:start;">
+            <div>
+                <h3 style="color:white;font-size:17px;margin:0 0 16px;">💸 Egresos registrados (${txs.length})</h3>
+                <div style="border:1px solid rgba(255,255,255,0.06);border-radius:12px;overflow:hidden;">
+                    <table style="width:100%;border-collapse:collapse;">
+                        <thead style="background:rgba(239,68,68,0.06);">
+                            <tr>
+                                <th style="padding:11px 14px;text-align:left;font-size:11px;color:rgba(248,113,113,0.85);text-transform:uppercase;letter-spacing:1px;">Fecha</th>
+                                <th style="padding:11px 14px;text-align:left;font-size:11px;color:rgba(248,113,113,0.85);text-transform:uppercase;letter-spacing:1px;">Proveedor</th>
+                                <th style="padding:11px 14px;text-align:left;font-size:11px;color:rgba(248,113,113,0.85);text-transform:uppercase;letter-spacing:1px;">Concepto</th>
+                                <th style="padding:11px 14px;text-align:right;font-size:11px;color:rgba(248,113,113,0.85);text-transform:uppercase;letter-spacing:1px;">Monto</th>
+                                <th style="padding:11px 14px;text-align:left;font-size:11px;color:rgba(248,113,113,0.85);text-transform:uppercase;letter-spacing:1px;">Método</th>
+                                <th style="padding:11px 14px;"></th>
+                            </tr>
+                        </thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="widget-card" style="border:1px solid rgba(239,68,68,0.2);background:rgba(0,0,0,0.3);position:sticky;top:0;">
+                <h3 style="color:#f87171;font-size:16px;margin:0 0 16px;">➕ Registrar Egreso</h3>
+                ${!canCreate ? '<p style="color:rgba(248,113,113,0.85);font-size:12px;margin-bottom:12px;">🔒 Sin privilegio "Registrar egresos".</p>' : ''}
+                <div style="display:grid;gap:12px;">
+                    <div class="input-group"><label>Proveedor / Beneficiario</label>
+                        <input type="text" id="fz-egreso-proveedor" placeholder="Farmacia ABC" autocomplete="off" ${!canCreate ? 'disabled' : ''}>
+                    </div>
+                    <div class="input-group"><label>Concepto</label>
+                        <input type="text" id="fz-egreso-concepto" placeholder="Compra de insumos" autocomplete="off" ${!canCreate ? 'disabled' : ''}>
+                    </div>
+                    <div class="input-group"><label>Monto (GTQ) *</label>
+                        <input type="number" step="0.01" min="0" id="fz-egreso-monto" placeholder="500.00" autocomplete="off" ${!canCreate ? 'disabled' : ''}>
+                    </div>
+                    <div class="input-group"><label>Método de pago</label>
+                        <select id="fz-egreso-metodo" ${!canCreate ? 'disabled' : ''}>
+                            <option value="efectivo">Efectivo</option>
+                            <option value="tarjeta">Tarjeta</option>
+                            <option value="transferencia">Transferencia</option>
+                            <option value="otro">Otro</option>
+                        </select>
+                    </div>
+                    <div class="input-group"><label>Fecha</label>
+                        <input type="date" id="fz-egreso-fecha" value="${_todayISO()}" ${!canCreate ? 'disabled' : ''}>
+                    </div>
+                    <button onclick="window._saveEgreso()" ${!canCreate ? 'disabled' : ''}
+                        style="padding:13px;background:linear-gradient(135deg,#dc2626,#f87171);color:white;font-weight:800;border-radius:12px;border:none;cursor:${canCreate ? 'pointer' : 'not-allowed'};font-size:14px;opacity:${canCreate ? 1 : 0.5};">
+                        💸 GUARDAR EGRESO
+                    </button>
+                </div>
+            </div>
+        </div>`;
+    }
+
+    window._saveEgreso = async function() {
+        if (!hasPriv('registrar_egresos')) return;
+        const proveedor = document.getElementById('fz-egreso-proveedor')?.value.trim() || '';
+        const concepto = document.getElementById('fz-egreso-concepto')?.value.trim() || 'Egreso';
+        const monto = parseFloat(document.getElementById('fz-egreso-monto')?.value);
+        const metodo = document.getElementById('fz-egreso-metodo')?.value || 'efectivo';
+        const fecha = document.getElementById('fz-egreso-fecha')?.value || _todayISO();
+        if (!monto || monto <= 0) { window.showElegantAlert('⚠️ Monto inválido', 'Ingrese un monto válido.', true); return; }
+        const payload = {
+            doctor_id: _currentDoctorId(),
+            tipo: 'expense',
+            proveedor, concepto, monto, moneda: 'GTQ',
+            fecha, hora: _currentTimeHHMM(),
+            metodo_pago: metodo,
+            deleted: false
+        };
+        try {
+            await fetch('/api/finanzas', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+            await _syncFinanzasFromCloud();
+            const c = document.getElementById('finanzas-tab-content');
+            if (c) c.innerHTML = _buildFinanzasEgresosTab();
+            window.showElegantAlert('✅ Egreso registrado', `${_formatMoney(monto)} a ${proveedor || 'beneficiario'}.`);
+        } catch (e) { window.showElegantAlert('❌ Error', 'No se pudo guardar el egreso.'); }
+    };
+
+    // ---- TAB: ESTADO DE CUENTA ----
+    function _buildFinanzasEstadoTab() {
+        const pacientes = _listPacientesParaSelect();
+        const canExport = hasPriv('exportar_estados');
+        return `
+        <div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:24px;margin-bottom:16px;">
+            <h3 style="color:white;font-size:17px;margin:0 0 16px;">📄 Generar Estado de Cuenta</h3>
+            <div style="display:grid; grid-template-columns:1fr 180px 180px auto; gap:14px; align-items:end;">
+                <div class="input-group"><label>Paciente</label>
+                    <select id="fz-estado-qsl">
+                        <option value="">— Todos —</option>
+                        ${pacientes.map(p => `<option value="${p.qsl}">${p.nombre}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="input-group"><label>Desde</label>
+                    <input type="date" id="fz-estado-desde">
+                </div>
+                <div class="input-group"><label>Hasta</label>
+                    <input type="date" id="fz-estado-hasta" value="${_todayISO()}">
+                </div>
+                <button onclick="window._generarEstado()" style="padding:12px 22px;background:linear-gradient(135deg,#3b82f6,#60a5fa);color:white;font-weight:800;border-radius:12px;border:none;cursor:pointer;font-size:14px;">
+                    📊 Generar
+                </button>
+            </div>
+        </div>
+        <div id="fz-estado-resultado">
+            <div style="text-align:center;color:rgba(255,255,255,0.4);padding:40px;font-size:14px;">
+                Selecciona los filtros y pulsa <b>Generar</b>.
+                ${canExport ? '' : '<br><br>🔒 Sin privilegio "Exportar estados de cuenta" — solo lectura en pantalla.'}
+            </div>
+        </div>`;
+    }
+
+    window._generarEstado = function() {
+        const qsl = document.getElementById('fz-estado-qsl')?.value || '';
+        const desde = document.getElementById('fz-estado-desde')?.value || '';
+        const hasta = document.getElementById('fz-estado-hasta')?.value || '';
+        const txs = _getFinanzasCache().filter(t => {
+            if (qsl && t.qsl_code !== qsl) return false;
+            if (desde && (t.fecha || '') < desde) return false;
+            if (hasta && (t.fecha || '') > hasta) return false;
+            return true;
+        }).sort((a, b) => ((a.fecha || '') + 'T' + (a.hora || '00:00')).localeCompare((b.fecha || '') + 'T' + (b.hora || '00:00')));
+
+        let saldo = 0;
+        const rows = txs.map(t => {
+            const ingreso = (t.tipo === 'income') ? (parseFloat(t.monto) || 0) : 0;
+            const egreso = (t.tipo === 'expense' || t.tipo === 'charge') ? (parseFloat(t.monto) || 0) : 0;
+            saldo += ingreso - egreso;
+            const tipoLabel = t.tipo === 'income' ? '✓ Pago' : (t.tipo === 'expense' ? '↑ Egreso' : '○ Cargo');
+            const color = t.tipo === 'income' ? '#10b981' : '#f87171';
+            return `
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
+                    <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.8);">${t.fecha || '—'}</td>
+                    <td style="padding:8px 12px;font-size:12px;color:${color};font-weight:600;">${tipoLabel}</td>
+                    <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.7);">${t.paciente_nombre || t.proveedor || '—'}</td>
+                    <td style="padding:8px 12px;font-size:12px;color:rgba(255,255,255,0.7);">${t.concepto || '—'}</td>
+                    <td style="padding:8px 12px;text-align:right;font-size:12px;color:${color};font-weight:700;">${_formatMoney(t.monto)}</td>
+                    <td style="padding:8px 12px;text-align:right;font-size:12px;color:${saldo >= 0 ? '#10b981' : '#f87171'};font-weight:700;">${_formatMoney(saldo)}</td>
+                </tr>`;
+        }).join('');
+
+        const totIngreso = txs.filter(t => t.tipo === 'income').reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
+        const totEgreso = txs.filter(t => t.tipo === 'expense').reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
+        const totCharge = txs.filter(t => t.tipo === 'charge').reduce((s, t) => s + (parseFloat(t.monto) || 0), 0);
+
+        const contenedor = document.getElementById('fz-estado-resultado');
+        if (!contenedor) return;
+        if (txs.length === 0) {
+            contenedor.innerHTML = `<div style="text-align:center;color:rgba(255,255,255,0.4);padding:40px;">Sin movimientos en el rango seleccionado.</div>`;
+            return;
+        }
+        const titulo = qsl
+            ? (_listPacientesParaSelect().find(p => p.qsl === qsl)?.nombre || qsl)
+            : 'Todos los pacientes';
+        const rango = (desde || '⌖') + ' → ' + (hasta || '⌖');
+        contenedor.innerHTML = `
+        <div id="fz-printable" style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:24px;">
+            <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:20px;flex-wrap:wrap;gap:12px;">
+                <div>
+                    <h3 style="color:white;font-size:18px;margin:0 0 4px;">Estado de Cuenta · ${titulo}</h3>
+                    <p style="color:rgba(255,255,255,0.5);font-size:13px;margin:0;">Rango: ${rango}</p>
+                </div>
+                ${hasPriv('exportar_estados') ? '<button onclick="window._imprimirEstado()" style="background:linear-gradient(135deg,#1e40af,#3b82f6);color:white;border:none;padding:10px 22px;border-radius:10px;cursor:pointer;font-weight:700;font-size:13px;">🖨️ Imprimir / PDF</button>' : ''}
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:16px;">
+                <div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);border-radius:10px;padding:12px;">
+                    <div style="font-size:10px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;">Total ingresos</div>
+                    <div style="font-size:18px;color:#10b981;font-weight:800;">${_formatMoney(totIngreso)}</div>
+                </div>
+                <div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.25);border-radius:10px;padding:12px;">
+                    <div style="font-size:10px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;">Total egresos</div>
+                    <div style="font-size:18px;color:#f87171;font-weight:800;">${_formatMoney(totEgreso)}</div>
+                </div>
+                <div style="background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);border-radius:10px;padding:12px;">
+                    <div style="font-size:10px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;">Cargos generados</div>
+                    <div style="font-size:18px;color:#fbbf24;font-weight:800;">${_formatMoney(totCharge)}</div>
+                </div>
+                <div style="background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.25);border-radius:10px;padding:12px;">
+                    <div style="font-size:10px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px;">Saldo final</div>
+                    <div style="font-size:18px;color:${saldo >= 0 ? '#10b981' : '#f87171'};font-weight:800;">${_formatMoney(saldo)}</div>
+                </div>
+            </div>
+            <div style="border:1px solid rgba(255,255,255,0.06);border-radius:10px;overflow:auto;">
+                <table style="width:100%;border-collapse:collapse;">
+                    <thead style="background:rgba(255,255,255,0.04);">
+                        <tr>
+                            <th style="padding:10px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Fecha</th>
+                            <th style="padding:10px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Tipo</th>
+                            <th style="padding:10px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Cliente/Prov.</th>
+                            <th style="padding:10px 12px;text-align:left;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Concepto</th>
+                            <th style="padding:10px 12px;text-align:right;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Monto</th>
+                            <th style="padding:10px 12px;text-align:right;font-size:10px;color:rgba(255,255,255,0.6);text-transform:uppercase;letter-spacing:1px;">Saldo</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+        </div>`;
+    };
+
+    window._imprimirEstado = function() {
+        if (!hasPriv('exportar_estados')) return;
+        const node = document.getElementById('fz-printable');
+        if (!node) return;
+        const w = window.open('', '_blank', 'width=900,height=720');
+        w.document.write(`
+            <!DOCTYPE html><html><head><title>Estado de Cuenta - DR-SISDEL</title>
+            <style>
+                body { font-family: system-ui, -apple-system, sans-serif; background: white; color: #111; padding: 24px; }
+                h3 { margin: 0 0 6px; color: #1e3a8a; }
+                table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+                th, td { padding: 8px 10px; text-align: left; font-size: 12px; border-bottom: 1px solid #e5e7eb; color: #111; }
+                th { background: #f3f4f6; text-transform: uppercase; font-size: 10px; color: #4b5563; letter-spacing: 1px; }
+                @media print { button { display:none; } }
+            </style></head><body>
+            ${node.innerHTML.replace(/color:rgba\\(255,255,255[^\\)]+\\)/g, 'color:#111').replace(/background:rgba\\(255,255,255[^\\)]+\\)/g, 'background:#f9fafb')}
+            <p style="margin-top:24px;font-size:11px;color:#6b7280;text-align:center;">DR-SISDEL · Generado el ${new Date().toLocaleString('es-GT')}</p>
+            <script>window.onload = () => setTimeout(() => window.print(), 200);</` + `script>
+            </body></html>
+        `);
+        w.document.close();
+    };
+
+    // ---- SYNC FINANZAS ----
+    async function _syncFinanzasFromCloud() {
+        try {
+            const doctor_id = _currentDoctorId();
+            const r = await fetch(`/api/finanzas?doctor_id=${encodeURIComponent(doctor_id)}`, { cache: 'no-store' });
+            if (!r.ok) return;
+            const j = await r.json();
+            if (!j.success) return;
+            _setFinanzasCache(j.transacciones || []);
+        } catch (e) { /* offline OK */ }
+    }
+    window._syncFinanzasFromCloud = _syncFinanzasFromCloud;
+
+    if (!window._finanzasPollTimer) {
+        window._finanzasPollTimer = setInterval(() => {
+            if (document.visibilityState === 'hidden') return;
+            if (document.getElementById('finanzas-tabs-bar')) _syncFinanzasFromCloud();
+        }, 15000);
+    }
+
 });

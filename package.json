@@ -18,7 +18,8 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.0",
-    "pptxgenjs": "^4.0.1"
+    "pptxgenjs": "^4.0.1",
+    "puppeteer": "^25.1.0"
   },
   "keywords": [],
   "author": "",
