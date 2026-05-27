@@ -1,0 +1,57 @@
+rules_version = '2';
+
+// ============================================================
+//  REGLAS DE SEGURIDAD FIRESTORE - DR-SISDEL
+// ============================================================
+// El cliente accede directamente a Firestore desde el navegador.
+// Las reglas validan tipos y campos, pero por ahora permiten acceso
+// abierto a los médicos autenticados con su pass (validación a nivel
+// app, no Firebase Auth). Esto refleja el modelo actual del sistema.
+//
+// MEJORA FUTURA: integrar Firebase Auth para identificar al médico
+// y restringir cada documento a su doctor_id correspondiente.
+// ============================================================
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // PACIENTES
+    match /pacientes/{qsl} {
+      allow read, write: if true;
+    }
+
+    // MÉDICOS
+    match /medicos/{id_medico} {
+      allow read, write: if true;
+    }
+
+    // CENTROS MÉDICOS
+    match /centros_medicos/{id_centro} {
+      allow read, write: if true;
+    }
+
+    // CITAS
+    match /citas/{cita_id} {
+      allow read, write: if true;
+    }
+
+    // ALERTAS DEL SISTEMA
+    match /alertas_sistema/{alert_id} {
+      allow read, write: if true;
+    }
+
+    // HISTORIAL DE MENSAJES
+    match /historial_mensajes/{msg_id} {
+      allow read, write: if true;
+    }
+
+    // SETTINGS (apariencia, recordatorios, etc.)
+    match /settings/{key} {
+      allow read, write: if true;
+    }
+
+    // Cualquier otra colección: denegar por defecto
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

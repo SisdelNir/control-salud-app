@@ -1,0 +1,55 @@
+{
+  "hosting": {
+    "public": ".",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**",
+      "server.js",
+      "db.js",
+      "backup-firestore.js",
+      "setup-backup-cron.sh",
+      "package.json",
+      "package-lock.json",
+      "serviceAccountKey.json",
+      ".env*",
+      "FIREBASE_SETUP.md",
+      "TAREAS PENDIENTES.txt",
+      "DR-SISDEL.zip*",
+      "DR-SISDEL*.zip",
+      "**/*.zip",
+      "**/*.pptx",
+      "evaluate_storage.js",
+      "test*.js",
+      "patch*.js",
+      "patch*.py",
+      "crop.*",
+      "make_presentation.js",
+      "backups/**",
+      "firestore.rules",
+      "firestore.indexes.json"
+    ],
+    "rewrites": [
+      { "source": "/dashboard", "destination": "/dashboard.html" },
+      { "source": "/", "destination": "/index.html" }
+    ],
+    "headers": [
+      {
+        "source": "**/*.@(js|css)",
+        "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
+      },
+      {
+        "source": "**/*.@(png|jpg|jpeg|gif|svg|webp)",
+        "headers": [{ "key": "Cache-Control", "value": "public, max-age=86400" }]
+      },
+      {
+        "source": "**/*.html",
+        "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
+      }
+    ]
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  }
+}
