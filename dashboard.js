@@ -6778,6 +6778,9 @@ function renderSection(name, data) {
     };
 
     window.crearNuevoMedico = async function() {
+        // Guard contra doble-click: si ya hay una creación en vuelo, ignorar.
+        if (window._crearNuevoMedicoInFlight) return;
+
         const nombre = document.getElementById('nm-nombre')?.value.trim();
         const dpi = document.getElementById('nm-dpi')?.value.trim();
         const telefono = document.getElementById('nm-telefono')?.value.trim();
@@ -6792,9 +6795,32 @@ function renderSection(name, data) {
             return;
         }
 
+        // Validar que el código NO esté ya en uso por otro usuario (defensivo).
+        try {
+            const resp = await fetch('/api/medicos');
+            const result = await resp.json();
+            const exists = (result.medicos || []).some(m =>
+                (m.usuario || '').toUpperCase() === codigo.toUpperCase()
+            );
+            if (exists) {
+                window.showElegantAlert('⚠️ Código duplicado', 'Ese código ya está en uso. Pulsa "Regenerar" para obtener uno nuevo.', true);
+                return;
+            }
+        } catch(e) { /* si falla la verificación, continuamos */ }
+
+        // Marcar como "en vuelo" y deshabilitar el botón visualmente
+        window._crearNuevoMedicoInFlight = true;
+        const btn = document.querySelector('#medico-form-card button[onclick*="crearNuevoMedico"]');
+        const originalBtnHTML = btn ? btn.innerHTML : null;
+        if (btn) {
+            btn.disabled = true;
+            btn.style.opacity = '0.6';
+            btn.style.cursor = 'not-allowed';
+            btn.innerHTML = '⏳ Creando...';
+        }
+
         const isOffice = window._privilegeContext === 'office';
         const id_medico = (isOffice ? 'OFI-' : 'MED-') + Date.now();
-        // El usuario inicia sesión escribiendo el código de 6 caracteres.
         const medData = {
             nombre_completo: nombre,
             id_identificacion: dpi,
@@ -6807,16 +6833,17 @@ function renderSection(name, data) {
 
         try {
             await fetch(`/api/medico/${id_medico}`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(medData) });
-            // También guardar en localStorage como caché
+            // Caché en localStorage
             const local = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
             local.push({ id_medico, ...medData });
             localStorage.setItem('tabla_medicos', JSON.stringify(local));
 
-            // Escape básico del nombre para evitar inyección HTML accidental
+            // Invalidar el código generado para que cualquier re-click no pueda reusarlo
+            window._codigoGenerado = null;
+
             const nombreSafe = nombre.replace(/[<>&"']/g, c => ({
                 '<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'
             }[c]));
-            // Mostrar el código generado con opción de copiar — el admin debe entregarlo al usuario
             window.showElegantAlert(
                 '✅ Usuario Creado',
                 `<div style="text-align:center;">` +
@@ -6831,7 +6858,59 @@ function renderSection(name, data) {
             );
             window.switchConfigurationTab('usuarios', document.querySelector('#config-tabs-bar .config-tab-btn'));
         } catch(e) {
+            // Restaurar botón si falló
+            if (btn) {
+                btn.disabled = false;
+                btn.style.opacity = '1';
+                btn.style.cursor = 'pointer';
+                if (originalBtnHTML) btn.innerHTML = originalBtnHTML;
+            }
             window.showElegantAlert('❌ Error', 'No se pudo guardar el usuario. Revisa la conexión.');
+        } finally {
+            // Liberar el guard pase lo que pase
+            window._crearNuevoMedicoInFlight = false;
+        }
+    };
+
+    // Limpia usuarios duplicados (mismo `usuario` = mismo código de acceso):
+    // conserva el documento creado primero (created_at más antiguo) y marca
+    // los demás como deleted=true en Firestore.
+    window.limpiarUsuariosDuplicados = async function() {
+        try {
+            const resp = await fetch('/api/medicos');
+            const result = await resp.json();
+            const medicos = result.medicos || [];
+            const byCodigo = new Map();
+            // Agrupar por código (usuario)
+            for (const m of medicos) {
+                const k = (m.usuario || '').toUpperCase();
+                if (!k) continue;
+                if (!byCodigo.has(k)) byCodigo.set(k, []);
+                byCodigo.get(k).push(m);
+            }
+            let removed = 0;
+            for (const [codigo, arr] of byCodigo.entries()) {
+                if (arr.length <= 1) continue;
+                // Conservar el primero (created_at más antiguo); eliminar los demás
+                arr.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+                for (let i = 1; i < arr.length; i++) {
+                    await fetch(`/api/medico/${arr[i].id_medico}`, { method: 'DELETE' });
+                    removed++;
+                }
+            }
+            if (removed > 0) {
+                window.showElegantAlert('🧹 Limpieza completada', `Se eliminaron ${removed} usuarios duplicados.`);
+            } else {
+                window.showElegantAlert('✅ Sin duplicados', 'No se encontraron usuarios duplicados.');
+            }
+            // Refrescar el tab actual
+            const tabContent = document.getElementById('config-tab-content');
+            if (tabContent) {
+                tabContent.innerHTML = `<div class="loading-state"><div class="spinner"></div></div>`;
+                tabContent.innerHTML = await buildMedicosTab();
+            }
+        } catch(e) {
+            window.showElegantAlert('❌ Error', 'No se pudo ejecutar la limpieza.');
         }
     };
 
