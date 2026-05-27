@@ -6388,6 +6388,13 @@ function renderSection(name, data) {
     // ============================================================
 
     // Catálogo de privilegios de DR-SISDEL
+    // === RESTRICCIONES PARA USUARIOS DE OFICINA ===
+    // Los usuarios de tipo 'oficina' (creados desde Configuración por un médico)
+    // NO pueden tener estos privilegios, ya que su acceso está limitado a tareas
+    // administrativas (no clínicas).
+    const OFFICE_DISALLOWED_CATEGORIES = ['consultas'];          // categoría entera vetada
+    const OFFICE_DISALLOWED_PRIVILEGES = ['gestionar_medicos'];  // privilegios sueltos vetados
+
     const SISDEL_PRIVILEGES = {
         pacientes: {
             label: '👤 Pacientes', color: '#22d3ee',
@@ -6429,6 +6436,20 @@ function renderSection(name, data) {
         }
     };
 
+    // Helper: devuelve los privilegios disponibles según el contexto.
+    // - context 'office' → quita categoría 'consultas' y privilegio 'gestionar_medicos'
+    // - context 'admin' (default) → devuelve todos los privilegios
+    function _getFilteredPrivileges() {
+        if (window._privilegeContext !== 'office') return SISDEL_PRIVILEGES;
+        const result = {};
+        for (const [catKey, cat] of Object.entries(SISDEL_PRIVILEGES)) {
+            if (OFFICE_DISALLOWED_CATEGORIES.includes(catKey)) continue;
+            const items = cat.items.filter(it => !OFFICE_DISALLOWED_PRIVILEGES.includes(it.id));
+            if (items.length) result[catKey] = { ...cat, items };
+        }
+        return result;
+    }
+
     // Catálogo de temas visuales
     const SISDEL_THEMES = [
         { id: 'tema-oscuro', name: 'Oscuro', desc: 'Tema predeterminado', primary: '#4f46e5', accent: '#22d3ee', bg: '#0f172a' },
@@ -6467,9 +6488,9 @@ function renderSection(name, data) {
     // ---- RENDER TABS MÓDULO PROGRAMADOR (con Configuración) ----
     const _originalRenderProgrammer = renderProgrammer;
     renderProgrammer = async function() {
-        // Llamar al original para cargar datos de centros
+        // Contexto ADMIN: gestiona médicos con TODOS los privilegios disponibles
+        window._privilegeContext = 'admin';
         await _originalRenderProgrammer();
-        // Agregar tabs encima del contenido existente
         injectConfigTabs('programmer');
     };
 
@@ -6489,6 +6510,8 @@ function renderSection(name, data) {
     }
 
     window.switchConfigTab = async function(tab, btn) {
+        // Contexto ADMIN dentro del Módulo Programador / Admin Central
+        window._privilegeContext = 'admin';
         document.querySelectorAll('.config-tab-btn').forEach(b => b.classList.remove('active'));
         if (btn) btn.classList.add('active');
         const tabContent = document.getElementById('config-tab-content');
@@ -6541,6 +6564,11 @@ function renderSection(name, data) {
     }
 
     async function buildMedicosTab() {
+        const isOffice = window._privilegeContext === 'office';
+        const userLabel = isOffice ? 'Usuario de Oficina' : 'Médico';
+        const userLabelPlural = isOffice ? 'Usuarios de Oficina' : 'Médicos';
+        const placeholder = isOffice ? 'Ana Pérez (Recepción)' : 'Dr. Juan Pérez';
+
         let medicos = [];
         try {
             const resp = await fetch('/api/medicos');
@@ -6549,6 +6577,11 @@ function renderSection(name, data) {
         } catch(e) {
             medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
         }
+
+        // Filtrar por tipo según contexto:
+        //   - office: solo tipo === 'oficina'
+        //   - admin : todos los que NO son oficina (médicos)
+        medicos = medicos.filter(m => isOffice ? m.tipo === 'oficina' : m.tipo !== 'oficina');
 
         const medicosHtml = medicos.length > 0 ? medicos.map(m => {
             const codigo = m.usuario || '——————';
@@ -6576,18 +6609,20 @@ function renderSection(name, data) {
         // Guarda el código generado para que crearNuevoMedico lo use
         window._codigoGenerado = codigoInicial;
 
+        const icon = isOffice ? '🧑‍💼' : '👨‍⚕️';
         return `
         <div style="display:grid; grid-template-columns:1fr 380px; gap:24px; align-items:start;">
             <div>
-                <h3 style="color:#60a5fa; font-size:18px; font-weight:700; margin-bottom:20px;">👨‍⚕️ Usuarios Registrados (${medicos.length})</h3>
+                <h3 style="color:#60a5fa; font-size:18px; font-weight:700; margin-bottom:20px;">${icon} ${userLabelPlural} Registrados (${medicos.length})</h3>
+                ${isOffice ? '<p style="color:rgba(255,255,255,0.5);font-size:12px;margin-top:-12px;margin-bottom:16px;">Personal administrativo. NO podrán acceder a consultas médicas ni crear nuevos médicos.</p>' : ''}
                 <div style="display:grid; gap:14px;">${medicosHtml}</div>
             </div>
             <div class="widget-card" style="border:1px solid rgba(96,165,250,0.2); background:rgba(0,0,0,0.3); position:sticky; top:0;" id="medico-form-card">
-                <h3 class="widget-title" style="color:#60a5fa; font-size:16px; margin-bottom:20px;">➕ Nuevo Usuario</h3>
+                <h3 class="widget-title" style="color:#60a5fa; font-size:16px; margin-bottom:20px;">➕ Nuevo ${userLabel}</h3>
                 <div style="display:grid; gap:14px;">
                     <div class="input-group">
                         <label>Nombre Completo *</label>
-                        <input type="text" id="nm-nombre" placeholder="Dr. Juan Pérez" autocomplete="off">
+                        <input type="text" id="nm-nombre" placeholder="${placeholder}" autocomplete="off">
                     </div>
                     <div class="input-group">
                         <label>Número de Identificación *</label>
@@ -6608,7 +6643,7 @@ function renderSection(name, data) {
                         <p style="font-size:11px; color:rgba(255,255,255,0.45); margin:0; text-align:center;">El usuario inicia sesión escribiendo este código</p>
                     </div>
 
-                    <button onclick="window.crearNuevoMedico()" style="width:100%; padding:14px; background:linear-gradient(135deg,#1d4ed8,#60a5fa); color:white; font-weight:800; border-radius:12px; border:none; cursor:pointer; font-size:15px; margin-top:6px;">CREAR USUARIO</button>
+                    <button onclick="window.crearNuevoMedico()" style="width:100%; padding:14px; background:linear-gradient(135deg,#1d4ed8,#60a5fa); color:white; font-weight:800; border-radius:12px; border:none; cursor:pointer; font-size:15px; margin-top:6px;">CREAR ${userLabel.toUpperCase()}</button>
                 </div>
             </div>
         </div>`;
@@ -6644,15 +6679,16 @@ function renderSection(name, data) {
             return;
         }
 
-        const id_medico = 'MED-' + Date.now();
+        const isOffice = window._privilegeContext === 'office';
+        const id_medico = (isOffice ? 'OFI-' : 'MED-') + Date.now();
         // El usuario inicia sesión escribiendo el código de 6 caracteres.
-        // Lo guardamos como `usuario` (campo que la función login() ya consulta).
         const medData = {
             nombre_completo: nombre,
             id_identificacion: dpi,
             telefono: telefono,
             usuario: codigo,
             password_hash: btoa(codigo),
+            tipo: isOffice ? 'oficina' : 'medico',
             created_at: new Date().toISOString()
         };
 
@@ -6698,6 +6734,11 @@ function renderSection(name, data) {
 
     // ---- TAB: PRIVILEGIOS (visual estilo MULTISYS) ----
     async function buildPrivilegiosTab() {
+        const isOffice = window._privilegeContext === 'office';
+        const emptyMsg = isOffice
+            ? 'No hay usuarios de oficina creados. Ve a la pestaña "Usuarios de Oficina" para crear uno.'
+            : 'No hay médicos registrados. Crea un acceso primero.';
+
         let medicos = [];
         try {
             const resp = await fetch('/api/medicos');
@@ -6707,19 +6748,23 @@ function renderSection(name, data) {
             medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
         }
 
+        // Filtrar por contexto: oficina solo ve oficina, admin solo ve médicos
+        medicos = medicos.filter(m => isOffice ? m.tipo === 'oficina' : m.tipo !== 'oficina');
+
         if (medicos.length === 0) {
-            return `<div style="text-align:center; padding:80px; border:2px dashed rgba(255,255,255,0.06); border-radius:20px;"><div style="font-size:48px; margin-bottom:16px;">🔐</div><p style="color:var(--text-muted); font-size:16px;">No hay médicos registrados. Crea un acceso primero.</p></div>`;
+            return `<div style="text-align:center; padding:80px; border:2px dashed rgba(255,255,255,0.06); border-radius:20px;"><div style="font-size:48px; margin-bottom:16px;">🔐</div><p style="color:var(--text-muted); font-size:16px;">${emptyMsg}</p></div>`;
         }
 
         const firstMed = medicos[0];
         const userListHtml = medicos.map((m, i) => {
             const privCount = Object.values(m.privileges || {}).filter(Boolean).length;
+            const subtitle = isOffice ? 'Personal de oficina' : (m.especialidad || 'Médico');
             return `
             <div class="privilege-user-item ${i === 0 ? 'selected' : ''}" onclick="window.selectPrivilegeUser('${m.id_medico}', this)" id="puser-${m.id_medico}">
                 <div class="privilege-user-avatar">${(m.nombre_completo||m.usuario||'?').charAt(0).toUpperCase()}</div>
                 <div class="privilege-user-info">
                     <h4>${m.nombre_completo || m.usuario || m.id_medico}</h4>
-                    <p>${m.especialidad || 'Médico'}</p>
+                    <p>${subtitle}</p>
                 </div>
                 <span class="privilege-badge">${privCount}</span>
             </div>`;
@@ -6743,10 +6788,14 @@ function renderSection(name, data) {
 
     function buildPrivilegeMatrix(medico) {
         const privs = medico.privileges || {};
-        const totalPrivs = Object.keys(SISDEL_PRIVILEGES).reduce((a, c) => a + SISDEL_PRIVILEGES[c].items.length, 0);
-        const activePrivs = Object.values(privs).filter(Boolean).length;
+        // Filtrado por contexto: en modo 'office' se ocultan consultas y gestionar_medicos
+        const PRIVS = _getFilteredPrivileges();
+        const totalPrivs = Object.keys(PRIVS).reduce((a, c) => a + PRIVS[c].items.length, 0);
+        // Solo contamos privilegios visibles activos (no los ocultos por filtro)
+        const visibleIds = new Set(Object.values(PRIVS).flatMap(c => c.items.map(i => i.id)));
+        const activePrivs = Object.entries(privs).filter(([k, v]) => v && visibleIds.has(k)).length;
 
-        const categoriesHtml = Object.entries(SISDEL_PRIVILEGES).map(([catKey, cat]) => {
+        const categoriesHtml = Object.entries(PRIVS).map(([catKey, cat]) => {
             const catActiveCount = cat.items.filter(item => privs[item.id]).length;
             const itemsHtml = cat.items.map(item => `
                 <div class="privilege-item">
@@ -6840,8 +6889,18 @@ function renderSection(name, data) {
     };
 
     window.marcarTodosPrivilegios = async function(medicoId, valor) {
-        const allPrivs = {};
-        Object.values(SISDEL_PRIVILEGES).forEach(cat => cat.items.forEach(item => { allPrivs[item.id] = valor; }));
+        // Conservar privilegios previos para NO desmarcar los ocultos por filtro
+        let prev = {};
+        try {
+            const local = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            const m = local.find(x => x.id_medico === medicoId);
+            if (m) prev = m.privileges || {};
+        } catch(e) {}
+        const allPrivs = { ...prev };
+        // Solo aplicar a los visibles según el contexto actual
+        Object.values(_getFilteredPrivileges()).forEach(cat =>
+            cat.items.forEach(item => { allPrivs[item.id] = valor; })
+        );
         try {
             await fetch(`/api/medico/${medicoId}/privileges`, {
                 method: 'PATCH', headers: {'Content-Type':'application/json'},
@@ -6980,9 +7039,11 @@ function renderSection(name, data) {
     }
 
     async function renderConfiguration() {
+        // Contexto OFICINA: solo gestiona usuarios de oficina con privilegios limitados.
+        window._privilegeContext = 'office';
         contentArea.innerHTML = `
             <div class="config-tabs" id="config-tabs-bar" style="margin-bottom:24px;">
-                <button class="config-tab-btn active" onclick="window.switchConfigurationTab('usuarios', this)">👨‍⚕️ Usuarios del Sistema</button>
+                <button class="config-tab-btn active" onclick="window.switchConfigurationTab('usuarios', this)">🧑‍💼 Usuarios de Oficina</button>
                 <button class="config-tab-btn" onclick="window.switchConfigurationTab('privilegios', this)">🔐 Privilegios</button>
                 <button class="config-tab-btn" onclick="window.switchConfigurationTab('recordatorios', this)">🔔 Recordatorios</button>
                 <button class="config-tab-btn" onclick="window.switchConfigurationTab('apariencia', this)">🎨 Apariencia</button>
@@ -7001,6 +7062,8 @@ function renderSection(name, data) {
     }
 
     window.switchConfigurationTab = async function(tab, btn) {
+        // Aseguramos contexto OFICINA en cada cambio de pestaña dentro de Configuración
+        window._privilegeContext = 'office';
         document.querySelectorAll('#config-tabs-bar .config-tab-btn').forEach(b => b.classList.remove('active'));
         if (btn) btn.classList.add('active');
         const tabContent = document.getElementById('config-tab-content');
