@@ -1265,59 +1265,58 @@ function renderSection(name, data) {
     // --- LISTA DE PACIENTES ---
     window.showPatientList = function() {
         const key = getDocPatientsKey();
-        const registry = JSON.parse(localStorage.getItem(key) || '[]');
-        const allAppts = window.getAppointments ? window.getAppointments() : [];
-        const now = new Date();
 
-        // Registry is an array of QSL strings — map each string directly
-        const patients = registry.slice(-50).reverse().map(qsl => {
-            qsl = typeof qsl === 'string' ? qsl : (qsl.qsl || qsl.codigo || qsl.id || String(qsl));
-            const data = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}');
-            const name = data.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || qsl;
+        // Construye SIEMPRE el array de pacientes desde el localStorage actual,
+        // así cada re-render usa los datos más frescos (citas, recetas, etc.).
+        function buildPatientsArray() {
+            const registry = JSON.parse(localStorage.getItem(key) || '[]');
+            const allAppts = window.getAppointments ? window.getAppointments() : [];
+            const now = new Date();
+            return registry.slice(-50).reverse().map(qsl => {
+                qsl = typeof qsl === 'string' ? qsl : (qsl.qsl || qsl.codigo || qsl.id || String(qsl));
+                const data = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}');
+                const name = data.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || qsl;
 
-            // Next upcoming appointment — match by qsl OR by name
-            const upcoming = allAppts
-                .filter(a => (a.qsl === qsl || a.name === name) && new Date(a.date + 'T' + (a.time || '00:00')) >= now)
-                .sort((a,b) => new Date(a.date+'T'+(a.time||'00:00')) - new Date(b.date+'T'+(b.time||'00:00')))[0];
-            
-            let nextAppt = '—';
-            let nextApptDays = null;
-            if (upcoming) {
-                const apptDate = new Date(upcoming.date + 'T12:00:00');
-                const diffDays = Math.ceil((apptDate - now) / 86400000);
-                const label = new Date(upcoming.date+'T12:00:00').toLocaleDateString('es-ES',{day:'2-digit',month:'short'});
-                nextAppt = `${label} ${upcoming.time}`;
-                nextApptDays = diffDays;
-            }
+                const upcoming = allAppts
+                    .filter(a => (a.qsl === qsl || a.name === name) && new Date(a.date + 'T' + (a.time || '00:00')) >= now)
+                    .sort((a,b) => new Date(a.date+'T'+(a.time||'00:00')) - new Date(b.date+'T'+(b.time||'00:00')))[0];
 
-            // Last consultation note/prescription
-            const consults = data.consultations || [];
-            const lastConsult = consults[consults.length - 1];
-            
-            let lastRxShort = '—';
-            if (data.meds && data.meds.length > 0) {
-                lastRxShort = `🏥 Ver Receta Asignada`;
-            } else {
-                const lastRx = (lastConsult?.referencias || lastConsult?.observaciones || lastConsult?.notas || '').trim();
-                if (lastRx && lastRx !== '=' && lastRx !== '-') {
-                    lastRxShort = lastRx.length > 40 ? lastRx.slice(0, 40) + '…' : lastRx;
-                    lastRxShort = '📝 ' + lastRxShort;
-                } else {
-                    lastRxShort = 'Sin recetas previas';
+                let nextAppt = '—';
+                let nextApptDays = null;
+                if (upcoming) {
+                    const apptDate = new Date(upcoming.date + 'T12:00:00');
+                    const diffDays = Math.ceil((apptDate - now) / 86400000);
+                    const label = new Date(upcoming.date+'T12:00:00').toLocaleDateString('es-ES',{day:'2-digit',month:'short'});
+                    nextAppt = `${label} ${upcoming.time}`;
+                    nextApptDays = diffDays;
                 }
-            }
 
-            return {
-                qsl, name,
-                telefono: data.telefono || '—',
-                glucosa:  !!data.glucoseEnabled,
-                presion:  !!data.pressureEnabled,
-                nextAppt, nextApptDays,
-                lastRx: lastRxShort
-            };
-        });
+                const consults = data.consultations || [];
+                const lastConsult = consults[consults.length - 1];
+                let lastRxShort = '—';
+                if (data.meds && data.meds.length > 0) {
+                    lastRxShort = `🏥 Ver Receta Asignada`;
+                } else {
+                    const lastRx = (lastConsult?.referencias || lastConsult?.observaciones || lastConsult?.notas || '').trim();
+                    if (lastRx && lastRx !== '=' && lastRx !== '-') {
+                        lastRxShort = lastRx.length > 40 ? lastRx.slice(0, 40) + '…' : lastRx;
+                        lastRxShort = '📝 ' + lastRxShort;
+                    } else {
+                        lastRxShort = 'Sin recetas previas';
+                    }
+                }
+                return {
+                    qsl, name,
+                    telefono: data.telefono || '—',
+                    glucosa:  !!data.glucoseEnabled,
+                    presion:  !!data.pressureEnabled,
+                    nextAppt, nextApptDays,
+                    lastRx: lastRxShort
+                };
+            });
+        }
 
-        // Sync citas from cloud to enrich nextAppt
+        // Trae citas del cloud al abrir (refuerza el polling) y re-renderiza
         const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
         fetch(`/api/appointments?doctor_id=${encodeURIComponent(doctor_id)}`)
             .then(r => r.json())
@@ -1327,7 +1326,6 @@ function renderSection(name, data) {
                         qsl: a.qsl_code, name: a.paciente_nombre,
                         date: a.fecha ? a.fecha.slice(0,10) : '', time: a.hora, motivo: a.motivo
                     }));
-                    // Merge into localStorage
                     const key2 = window.getAppointmentsKey ? window.getAppointmentsKey() : 'appointments_data';
                     const local = JSON.parse(localStorage.getItem(key2) || '[]');
                     const merged = [...local];
@@ -1335,16 +1333,27 @@ function renderSection(name, data) {
                         if (!merged.find(m => m.qsl === c.qsl && m.date === c.date && m.time === c.time)) merged.push(c);
                     });
                     localStorage.setItem(key2, JSON.stringify(merged));
-                    // Re-render list with updated data
                     if (document.getElementById('patient-list-overlay')) renderList(document.getElementById('pl-search')?.value?.toLowerCase() || '');
                 }
             }).catch(() => {});
+
+        // Mientras el overlay esté abierto, refrescamos cada 3s para captar
+        // citas/datos recién sincronizados desde la nube.
+        if (window._patientListInterval) clearInterval(window._patientListInterval);
+        window._patientListInterval = setInterval(() => {
+            const overlay = document.getElementById('patient-list-overlay');
+            if (!overlay) { clearInterval(window._patientListInterval); window._patientListInterval = null; return; }
+            renderList(document.getElementById('pl-search')?.value?.toLowerCase() || '');
+        }, 3000);
 
         const overlay = document.createElement('div');
         overlay.id = 'patient-list-overlay';
         overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.92);z-index:99999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(8px);padding:12px;box-sizing:border-box;';
 
         const renderList = (q) => {
+            // Reconstruimos el array desde localStorage cada vez, así
+            // los datos (citas, recetas) reflejan el sync más reciente.
+            const patients = buildPatientsArray();
             const filtered = patients.filter(p =>
                 !q ||
                 p.name.toLowerCase().includes(q) ||
