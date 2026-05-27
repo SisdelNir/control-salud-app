@@ -7024,14 +7024,27 @@ function renderSection(name, data) {
         const userListHtml = medicos.map((m, i) => {
             const privCount = Object.values(m.privileges || {}).filter(Boolean).length;
             const subtitle = isOffice ? 'Personal de oficina' : (m.especialidad || 'Médico');
+            const safeName = (m.nombre_completo || m.usuario || m.id_medico).replace(/'/g, "\\'");
             return `
-            <div class="privilege-user-item ${i === 0 ? 'selected' : ''}" onclick="window.selectPrivilegeUser('${m.id_medico}', this)" id="puser-${m.id_medico}">
-                <div class="privilege-user-avatar">${(m.nombre_completo||m.usuario||'?').charAt(0).toUpperCase()}</div>
-                <div class="privilege-user-info">
-                    <h4>${m.nombre_completo || m.usuario || m.id_medico}</h4>
-                    <p>${subtitle}</p>
+            <div class="privilege-user-item ${i === 0 ? 'selected' : ''}" id="puser-${m.id_medico}" style="display:flex; align-items:center; padding:10px 12px; gap:8px;">
+                <div onclick="window.selectPrivilegeUser('${m.id_medico}', this.parentElement)" style="display:flex; align-items:center; gap:12px; cursor:pointer; flex:1; min-width:0;">
+                    <div class="privilege-user-avatar">${(m.nombre_completo||m.usuario||'?').charAt(0).toUpperCase()}</div>
+                    <div class="privilege-user-info" style="flex:1; min-width:0;">
+                        <h4 style="margin:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${m.nombre_completo || m.usuario || m.id_medico}</h4>
+                        <p style="margin:2px 0 0;">${subtitle}</p>
+                    </div>
+                    <span class="privilege-badge">${privCount}</span>
                 </div>
-                <span class="privilege-badge">${privCount}</span>
+                <div style="display:flex; gap:5px; flex-shrink:0;">
+                    <button title="Editar usuario" onclick="event.stopPropagation(); window.pmEditUser('${m.id_medico}')"
+                        style="background:rgba(96,165,250,0.12); border:1px solid rgba(96,165,250,0.35); color:#60a5fa; padding:6px 9px; border-radius:8px; cursor:pointer; font-size:13px; font-weight:600;">
+                        ✏️
+                    </button>
+                    <button title="Eliminar usuario" onclick="event.stopPropagation(); window.pmDeleteUser('${m.id_medico}', '${safeName}')"
+                        style="background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); color:#f87171; padding:6px 9px; border-radius:8px; cursor:pointer; font-size:13px; font-weight:600;">
+                        🗑
+                    </button>
+                </div>
             </div>`;
         }).join('');
 
@@ -7300,6 +7313,146 @@ function renderSection(name, data) {
                 btn.textContent = '❌ Reintentar';
             }
             window.showElegantAlert('❌ Error', 'No se pudieron guardar los privilegios. Revisa la conexión.');
+        }
+    };
+
+    // ===== EDITAR / ELIMINAR USUARIOS desde la lista de Privilegios =====
+    window.pmDeleteUser = async function(medicoId, nombre) {
+        if (!confirm(`¿Eliminar al usuario "${nombre}"?\n\nEsta acción es reversible (soft delete) pero el usuario dejará de poder iniciar sesión.`)) return;
+        try {
+            await fetch(`/api/medico/${medicoId}`, { method: 'DELETE' });
+            const local = JSON.parse(localStorage.getItem('tabla_medicos') || '[]').filter(m => m.id_medico !== medicoId);
+            localStorage.setItem('tabla_medicos', JSON.stringify(local));
+            // Recargar la pestaña de privilegios
+            const tabContent = document.getElementById('config-tab-content');
+            if (tabContent) {
+                tabContent.innerHTML = `<div class="loading-state"><div class="spinner"></div></div>`;
+                tabContent.innerHTML = await buildPrivilegiosTab();
+            }
+            window.showElegantAlert('✅ Eliminado', `El usuario "${nombre}" fue eliminado correctamente.`);
+        } catch (e) {
+            console.error(e);
+            window.showElegantAlert('❌ Error', 'No se pudo eliminar el usuario. Revisa la conexión.');
+        }
+    };
+
+    window.pmEditUser = async function(medicoId) {
+        // Obtener datos actuales
+        let medico = null;
+        try {
+            const list = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            medico = list.find(m => m.id_medico === medicoId);
+        } catch (e) {}
+        if (!medico) {
+            try {
+                const r = await fetch('/api/medicos');
+                const j = await r.json();
+                medico = (j.medicos || []).find(m => m.id_medico === medicoId);
+            } catch (e) {}
+        }
+        if (!medico) {
+            window.showElegantAlert('❌ Error', 'No se encontró el usuario.');
+            return;
+        }
+
+        // Modal de edición
+        const overlay = document.createElement('div');
+        overlay.id = 'pm-edit-overlay';
+        overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.85); z-index:99999; display:flex; align-items:center; justify-content:center; backdrop-filter:blur(8px); padding:20px;';
+        overlay.innerHTML = `
+            <div style="background:linear-gradient(145deg,#0f172a,#1a2540); border:1px solid rgba(96,165,250,0.35); border-radius:18px; padding:28px; width:100%; max-width:480px; box-shadow:0 30px 80px rgba(0,0,0,0.6);">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+                    <h3 style="color:#60a5fa; font-size:18px; margin:0; display:flex; align-items:center; gap:8px;">✏️ Editar Usuario</h3>
+                    <button onclick="document.getElementById('pm-edit-overlay').remove()" style="background:transparent; border:none; color:white; font-size:20px; cursor:pointer; padding:4px 8px;">✕</button>
+                </div>
+                <div style="display:grid; gap:14px;">
+                    <div class="input-group"><label>Nombre Completo *</label>
+                        <input type="text" id="pm-edit-nombre" value="${(medico.nombre_completo || '').replace(/"/g, '&quot;')}" autocomplete="off">
+                    </div>
+                    <div class="input-group"><label>Número de Identificación</label>
+                        <input type="text" id="pm-edit-dpi" value="${(medico.id_identificacion || medico.dpi || '').replace(/"/g, '&quot;')}" autocomplete="off">
+                    </div>
+                    <div class="input-group"><label>Teléfono</label>
+                        <input type="text" id="pm-edit-telefono" value="${(medico.telefono || '').replace(/"/g, '&quot;')}" autocomplete="off">
+                    </div>
+                    <div class="input-group"><label>Código de Acceso</label>
+                        <div style="display:flex; gap:8px;">
+                            <input type="text" id="pm-edit-codigo" value="${(medico.usuario || '').replace(/"/g, '&quot;')}"
+                                autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                                data-lpignore="true" data-1p-ignore="true" data-form-type="other"
+                                style="font-family:'Courier New',monospace; letter-spacing:3px; font-weight:800;">
+                            <button onclick="window._pmRegenerarCodigo()" style="background:rgba(34,211,238,0.12); border:1px solid rgba(34,211,238,0.35); color:#22d3ee; padding:0 14px; border-radius:8px; cursor:pointer; font-size:12px; font-weight:700;">🔄</button>
+                        </div>
+                        <p style="font-size:11px; color:rgba(255,255,255,0.45); margin:6px 0 0;">Con este código el usuario inicia sesión.</p>
+                    </div>
+                </div>
+                <div style="display:flex; gap:10px; margin-top:22px;">
+                    <button onclick="document.getElementById('pm-edit-overlay').remove()" style="flex:1; padding:12px; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:white; border-radius:10px; cursor:pointer; font-size:14px; font-weight:600;">Cancelar</button>
+                    <button onclick="window._pmGuardarEdicion('${medicoId}')" style="flex:2; padding:12px; background:linear-gradient(135deg,#1d4ed8,#60a5fa); color:white; border:none; border-radius:10px; cursor:pointer; font-size:14px; font-weight:800;">💾 GUARDAR CAMBIOS</button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+    };
+
+    window._pmRegenerarCodigo = function() {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        let codigo = '';
+        for (let i = 0; i < 6; i++) codigo += chars.charAt(Math.floor(Math.random() * chars.length));
+        const inp = document.getElementById('pm-edit-codigo');
+        if (inp) inp.value = codigo;
+    };
+
+    window._pmGuardarEdicion = async function(medicoId) {
+        const nombre = document.getElementById('pm-edit-nombre')?.value.trim() || '';
+        const dpi = document.getElementById('pm-edit-dpi')?.value.trim() || '';
+        const telefono = document.getElementById('pm-edit-telefono')?.value.trim() || '';
+        const codigo = document.getElementById('pm-edit-codigo')?.value.trim() || '';
+        if (!nombre) {
+            window.showElegantAlert('⚠️ Datos incompletos', 'El nombre es obligatorio.', true);
+            return;
+        }
+        // Obtener el doc actual para preservar campos como tipo, especialidad, etc.
+        let current = null;
+        try {
+            const list = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            current = list.find(m => m.id_medico === medicoId) || {};
+        } catch (e) { current = {}; }
+        const updated = {
+            ...current,
+            nombre_completo: nombre,
+            id_identificacion: dpi,
+            telefono: telefono,
+            usuario: codigo || current.usuario,
+            password_hash: codigo ? btoa(codigo) : current.password_hash
+        };
+        // Limpieza de campos transitorios para que no se guarden
+        delete updated.privileges;
+        delete updated.id_medico;
+
+        try {
+            await fetch(`/api/medico/${medicoId}`, {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify(updated)
+            });
+            // Actualizar cache local
+            const list = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            const idx = list.findIndex(m => m.id_medico === medicoId);
+            if (idx >= 0) {
+                list[idx] = { ...list[idx], ...updated };
+                localStorage.setItem('tabla_medicos', JSON.stringify(list));
+            }
+            document.getElementById('pm-edit-overlay')?.remove();
+            // Refrescar lista
+            const tabContent = document.getElementById('config-tab-content');
+            if (tabContent) {
+                tabContent.innerHTML = `<div class="loading-state"><div class="spinner"></div></div>`;
+                tabContent.innerHTML = await buildPrivilegiosTab();
+            }
+            window.showElegantAlert('✅ Guardado', `Datos de "${nombre}" actualizados.`);
+        } catch (e) {
+            console.error(e);
+            window.showElegantAlert('❌ Error', 'No se pudo guardar. Revisa la conexión.');
         }
     };
 
