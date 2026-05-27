@@ -599,8 +599,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
     window.getAppointments = function() {
         const data = localStorage.getItem(window.getAppointmentsKey());
-        return data ? JSON.parse(data) : [];
+        const list = data ? JSON.parse(data) : [];
+        // Dedupe defensivo: eliminar registros duplicados (mismo qsl + fecha + hora)
+        // Si alguna sincronización vieja dejó duplicados en localStorage, los limpiamos
+        // automáticamente cada vez que se leen las citas.
+        const seen = new Set();
+        const clean = [];
+        let dupsFound = false;
+        for (const a of list) {
+            if (!a || !a.qsl) continue;
+            const key = `${a.qsl}|${a.date}|${a.time}`;
+            if (seen.has(key)) { dupsFound = true; continue; }
+            seen.add(key);
+            clean.push(a);
+        }
+        if (dupsFound) {
+            try {
+                localStorage.setItem(window.getAppointmentsKey(), JSON.stringify(clean));
+                console.log(`[DR-SISDEL] Citas duplicadas removidas: ${list.length - clean.length}`);
+            } catch (e) { /* noop */ }
+        }
+        return clean;
     };
+
 
     // Devuelve true si la fecha+hora ya pasó respecto al reloj actual.
     window.isPastSlot = function(dateStr, timeStr) {
@@ -687,18 +708,35 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!res.ok) return null;
             const data = await res.json();
             if (!data.success) return null;
-            const cloud = (data.appointments || []).map(a => ({
-                qsl: a.qsl_code,
-                name: a.paciente_nombre,
-                date: a.fecha ? String(a.fecha).slice(0, 10) : '',
-                time: a.hora,
-                motivo: a.motivo || ''
-            }));
+            // Deduplicar la lista de la nube ANTES de procesar (puede contener
+            // registros repetidos por re-uploads previos antes del fix).
+            const seenCloud = new Set();
+            const cloud = [];
+            for (const a of (data.appointments || [])) {
+                const date = a.fecha ? String(a.fecha).slice(0, 10) : '';
+                const k = `${a.qsl_code}|${date}|${a.hora}`;
+                if (seenCloud.has(k)) continue;
+                seenCloud.add(k);
+                cloud.push({
+                    qsl: a.qsl_code,
+                    name: a.paciente_nombre,
+                    date,
+                    time: a.hora,
+                    motivo: a.motivo || ''
+                });
+            }
             const local = JSON.parse(localStorage.getItem(key) || '[]');
             const keyOf = a => `${a.qsl}|${a.date}|${a.time}`;
             const cloudKeys = new Set(cloud.map(keyOf));
             const merged = [...cloud];
-            local.forEach(a => { if (!cloudKeys.has(keyOf(a))) merged.push(a); });
+            // Solo agregar locales si NO existen en la nube ni en lo ya añadido
+            const mergedKeys = new Set(cloudKeys);
+            local.forEach(a => {
+                const k = keyOf(a);
+                if (mergedKeys.has(k)) return;
+                mergedKeys.add(k);
+                merged.push(a);
+            });
             merged.sort((a, b) => new Date(a.date + 'T' + (a.time || '00:00')) - new Date(b.date + 'T' + (b.time || '00:00')));
             localStorage.setItem(key, JSON.stringify(merged));
             return merged.length;
@@ -798,7 +836,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Generate upcoming list (Top 10)
         const todayStr = new Date().toISOString().slice(0,10);
-        const upcoming = appointments.filter(a => a.date >= todayStr).sort((a,b) => new Date(a.date + 'T' + a.time) - new Date(b.date + 'T' + b.time)).slice(0, 10);
+        // Deduplicar por paciente: un paciente = un turno en la lista (su cita más próxima)
+        const _upcomingRaw = appointments
+            .filter(a => a.date >= todayStr)
+            .sort((a,b) => new Date(a.date + 'T' + a.time) - new Date(b.date + 'T' + b.time));
+        const _seenQsl = new Set();
+        const upcoming = _upcomingRaw.filter(a => {
+            if (_seenQsl.has(a.qsl)) return false;
+            _seenQsl.add(a.qsl);
+            return true;
+        }).slice(0, 10);
         let upcomingHtml = '';
         if(upcoming.length === 0) {
             upcomingHtml = '<div style="text-align:center; opacity:0.5; margin-top:20px;">No hay citas agendadas próximas.</div>';
@@ -1453,30 +1500,34 @@ function renderSection(name, data) {
         // Construye SIEMPRE el array de pacientes desde el localStorage actual,
         // así cada re-render usa los datos más frescos (citas, recetas, etc.).
         //
-        // REGLA DE FILTRO (Lista = SOLO HOY):
+        // REGLA DE FILTRO (Lista = HOY + MAÑANA):
         //   Un paciente aparece en Lista si:
-        //   (a) tiene una cita programada para HOY (cualquier hora), o
-        //   (b) fue atendido HOY (consulta registrada con fecha de hoy).
-        //   Cualquier otro caso (cita futura de otro día, sin cita, citas
-        //   pasadas, sin atender) → va al Historial.
-        //   Al cambiar el día, los pacientes de "hoy" pasan automáticamente
-        //   al Historial.
+        //   (a) tiene cita programada para HOY (24h, atendida o no), o
+        //   (b) tiene cita programada para MAÑANA (día inmediato siguiente), o
+        //   (c) fue atendido HOY (consulta registrada con fecha de hoy).
+        //   Otros casos (cita en 2+ días, citas pasadas, sin cita) → Historial.
+        //   La lista se ordena cronológicamente por fecha+hora ascendente.
         function buildPatientsArray() {
             const registry = JSON.parse(localStorage.getItem(key) || '[]');
             const allAppts = window.getAppointments ? window.getAppointments() : [];
             const now = new Date();
-            const todayISO = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0');
+            const fmtISO = (d) => d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+            const todayISO = fmtISO(now);
             const todayES = now.toLocaleDateString('es-ES');
+            const tomorrow = new Date(now);
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            const tomorrowISO = fmtISO(tomorrow);
             const archived = []; // pacientes movidos al historial (info para el header)
 
-            const active = registry.slice(-100).reverse().map(qsl => {
+            const active = registry.slice(-200).reverse().map(qsl => {
                 qsl = typeof qsl === 'string' ? qsl : (qsl.qsl || qsl.codigo || qsl.id || String(qsl));
                 const data = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}');
                 const name = data.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || qsl;
 
-                // Citas DE HOY (cualquier hora del día)
-                const todayAppts = allAppts.filter(a =>
-                    (a.qsl === qsl || a.name === name) && a.date === todayISO
+                // Citas para HOY o MAÑANA
+                const relevantAppts = allAppts.filter(a =>
+                    (a.qsl === qsl || a.name === name) &&
+                    (a.date === todayISO || a.date === tomorrowISO)
                 );
                 // Atendido HOY (cualquier consulta con date de hoy)
                 const attendedToday = (data.consultations || []).some(c =>
@@ -1484,14 +1535,14 @@ function renderSection(name, data) {
                     (c.date.includes(todayES) || c.date.startsWith(todayISO))
                 );
 
-                // Si NO tiene cita de hoy NI fue atendido hoy → archivar
-                if (todayAppts.length === 0 && !attendedToday) {
+                // Sin cita hoy/mañana NI atendido hoy → archivar
+                if (relevantAppts.length === 0 && !attendedToday) {
                     archived.push({ qsl, name });
                     return null;
                 }
 
-                // La "próxima cita" mostrada en la columna es la primera de hoy
-                const upcoming = todayAppts
+                // Próxima cita mostrada = la más cercana cronológicamente
+                const upcoming = relevantAppts
                     .sort((a,b) => new Date(a.date+'T'+(a.time||'00:00')) - new Date(b.date+'T'+(b.time||'00:00')))[0];
 
                 let nextAppt = '—';
@@ -1527,6 +1578,19 @@ function renderSection(name, data) {
                     lastRx: lastRxShort
                 };
             }).filter(Boolean);
+
+            // Orden cronológico ASC por próxima cita (hoy primero, luego mañana, por hora).
+            active.sort((a, b) => {
+                const ka = a.nextAppt && a.nextApptDays !== null ? a.nextApptDays * 10000 : 999999;
+                const kb = b.nextAppt && b.nextApptDays !== null ? b.nextApptDays * 10000 : 999999;
+                // Si igual día, comparar hora HH:MM
+                if (ka === kb) {
+                    const ta = (a.nextAppt || '').split(' ').pop() || '99:99';
+                    const tb = (b.nextAppt || '').split(' ').pop() || '99:99';
+                    return ta < tb ? -1 : (ta > tb ? 1 : 0);
+                }
+                return ka - kb;
+            });
 
             // Expone el conteo de archivados para que renderList lo muestre
             active._archived = archived;
@@ -1603,7 +1667,7 @@ function renderSection(name, data) {
                         <div>
                             <h3 style="color:#60a5fa;margin:0;font-size:20px;display:flex;align-items:center;gap:8px;">👥 Lista de Pacientes</h3>
                             <p style="color:rgba(255,255,255,0.35);margin:4px 0 0;font-size:12px;">
-                                <b style="color:#60a5fa;">${patients.length}</b> de hoy ${(()=>{const d=new Date();return `(${d.toLocaleDateString('es-ES',{weekday:'short',day:'2-digit',month:'short'})})`;})()}${patients._archived && patients._archived.length ? ` &nbsp;·&nbsp; <span style="color:#c4b5fd;">${patients._archived.length} en Historial</span>` : ''}
+                                <b style="color:#60a5fa;">${patients.length}</b> hoy + mañana ${(()=>{const d=new Date();const t=new Date(d);t.setDate(t.getDate()+1);const f={weekday:'short',day:'2-digit',month:'short'};return `(${d.toLocaleDateString('es-ES',f)} → ${t.toLocaleDateString('es-ES',f)})`;})()}${patients._archived && patients._archived.length ? ` &nbsp;·&nbsp; <span style="color:#c4b5fd;">${patients._archived.length} en Historial</span>` : ''}
                             </p>
                         </div>
                         <div style="display:flex; gap:12px;">
@@ -2644,15 +2708,23 @@ function renderSection(name, data) {
                     
                     const appts = window.getAppointments ? window.getAppointments() : [];
                     
-                    const upcoming = appts.filter(a => {
+                    const upcomingRaw = appts.filter(a => {
                         if (a.date !== today) return false;
                         const pData = getPatientDataFallback(a.qsl);
                         const hasConsultedToday = (pData.consultations || []).some(c => typeof c.date === 'string' && (c.date.includes(todayStrES) || c.date.startsWith(todayStrES)));
                         const hasMedsToday = (pData.meds || []).some(m => m.id && new Date(parseInt(m.id)).toLocaleDateString('es-ES') === todayStrES);
                         return !(hasConsultedToday || hasMedsToday);
                     })
-                    .sort((a,b) => new Date(a.date + 'T' + a.time) - new Date(b.date + 'T' + b.time))
-                    .slice(0, 10);
+                    .sort((a,b) => new Date(a.date + 'T' + a.time) - new Date(b.date + 'T' + b.time));
+
+                    // Deduplicar por paciente (qsl): un paciente = un turno en la lista,
+                    // mostrando solo su cita más temprana del día.
+                    const seenQsl = new Set();
+                    const upcoming = upcomingRaw.filter(a => {
+                        if (seenQsl.has(a.qsl)) return false;
+                        seenQsl.add(a.qsl);
+                        return true;
+                    }).slice(0, 10);
 
                     // Render que SIEMPRE muestra ambas secciones (si aplica):
                     //   1. Próximas Citas para Hoy
