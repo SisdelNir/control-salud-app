@@ -283,13 +283,41 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Helper: re-renderiza la sección activa (programmer/admin_general) si
     // los datos detrás de ella han cambiado en la nube.
+    //
+    // GUARDA: nunca recargar si el usuario está escribiendo en un input,
+    // textarea o select — perdería su entrada en proceso.
     function _refreshAdminViewIfActive() {
+        const ae = document.activeElement;
+        if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) {
+            // Diferir hasta que el usuario deje de editar
+            return;
+        }
         const progActive = document.querySelector('.nav-item[data-section="programmer"].active, li[data-section="programmer"].active');
         const admActive  = document.querySelector('.nav-item[data-section="admin_general"].active, li[data-section="admin_general"].active');
         if (progActive && typeof window._reloadSection === 'function') {
             try { window._reloadSection('programmer'); } catch (e) {}
         } else if (admActive && typeof window._reloadSection === 'function') {
             try { window._reloadSection('admin_general'); } catch (e) {}
+        }
+    }
+
+    // Crea una "firma" estable de un array de objetos ignorando timestamps
+    // y campos volátiles que serializan diferente entre Admin SDK y Web SDK.
+    function _stableFingerprint(arr) {
+        try {
+            return JSON.stringify((arr || []).map(o => {
+                const clean = {};
+                for (const k of Object.keys(o || {})) {
+                    if (['created_at','updated_at','deleted_at','last_login','timestamp'].includes(k)) continue;
+                    const v = o[k];
+                    // Saltar objetos de Timestamp (tienen .seconds/.nanoseconds o .toMillis)
+                    if (v && typeof v === 'object' && (typeof v.toMillis === 'function' || ('seconds' in v && 'nanoseconds' in v))) continue;
+                    clean[k] = v;
+                }
+                return clean;
+            }));
+        } catch (e) {
+            return JSON.stringify(arr || []);
         }
     }
 
@@ -300,11 +328,18 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!resp.ok) return;
             const result = await resp.json();
             if (!result.success) return;
-            const next = JSON.stringify(result.medicos || []);
+            const nextRaw = result.medicos || [];
+            const next = JSON.stringify(nextRaw);
             const prev = localStorage.getItem('tabla_medicos');
+            // Siempre guardamos la versión más reciente (para coherencia con
+            // otras vistas), pero solo re-renderizamos cuando el contenido
+            // significativo cambió (no por simples timestamps refrescados).
             if (prev !== next) {
                 localStorage.setItem('tabla_medicos', next);
-                _refreshAdminViewIfActive();
+                const prevArr = (() => { try { return JSON.parse(prev || '[]'); } catch (e) { return []; } })();
+                if (_stableFingerprint(prevArr) !== _stableFingerprint(nextRaw)) {
+                    _refreshAdminViewIfActive();
+                }
             }
         } catch (e) { console.warn('syncMedicos:', e?.message || e); }
     }
@@ -316,11 +351,15 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!resp.ok) return;
             const result = await resp.json();
             if (!result.success) return;
-            const next = JSON.stringify(result.centros || []);
+            const nextRaw = result.centros || [];
+            const next = JSON.stringify(nextRaw);
             const prev = localStorage.getItem('tabla_centros');
             if (prev !== next) {
                 localStorage.setItem('tabla_centros', next);
-                _refreshAdminViewIfActive();
+                const prevArr = (() => { try { return JSON.parse(prev || '[]'); } catch (e) { return []; } })();
+                if (_stableFingerprint(prevArr) !== _stableFingerprint(nextRaw)) {
+                    _refreshAdminViewIfActive();
+                }
             }
         } catch (e) { console.warn('syncCentros:', e?.message || e); }
     }
