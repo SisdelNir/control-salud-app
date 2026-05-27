@@ -549,3 +549,138 @@
     font-size: 16px;
     font-weight: 600;
 }
+
+/* ========================================
+   SISTEMA DE TEMAS - DR-SISDEL
+   ======================================== */
+
+body.tema-oscuro {
+    --primary: #4f46e5; --accent: #22d3ee;
+    --bg: #0f172a; --card-bg: rgba(30,41,59,0.6);
+    --card-border: rgba(255,255,255,0.06); --text-main: #f1f5f9; --text-muted: #94a3b8;
+}
+body.tema-claro {
+    --primary: #4f46e5; --accent: #0ea5e9;
+    --bg: #f1f5f9; --card-bg: rgba(255,255,255,0.85);
+    --card-border: rgba(0,0,0,0.08); --text-main: #0f172a; --text-muted: #64748b;
+    background: var(--bg); color: var(--text-main);
+}
+body.tema-claro .sidebar { background: rgba(255,255,255,0.9); border-color: rgba(0,0,0,0.08); }
+body.tema-claro .nav-links a { color: #475569; }
+body.tema-claro .nav-links li.active a, body.tema-claro .nav-links a:hover { background: rgba(79,70,229,0.08); color: #1e1b4b; }
+body.tema-claro .top-bar h2 { background: linear-gradient(to right, #0f172a, #475569); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+body.tema-claro .main-content { background: var(--bg); }
+
+body.tema-premium {
+    --primary: #7c3aed; --accent: #f59e0b;
+    --bg: #0f0a1a; --card-bg: rgba(20,10,40,0.8);
+    --card-border: rgba(124,58,237,0.2); --text-main: #faf5ff; --text-muted: #c4b5fd;
+}
+body.tema-medico-azul {
+    --primary: #1d4ed8; --accent: #38bdf8;
+    --bg: #0c1a2e; --card-bg: rgba(15,30,60,0.7);
+    --card-border: rgba(56,189,248,0.1); --text-main: #e0f2fe; --text-muted: #7dd3fc;
+}
+body.tema-medico-verde {
+    --primary: #059669; --accent: #34d399;
+    --bg: #071a0e; --card-bg: rgba(10,30,18,0.8);
+    --card-border: rgba(52,211,153,0.1); --text-main: #d1fae5; --text-muted: #6ee7b7;
+}
+body.tema-suave {
+    --primary: #6366f1; --accent: #a78bfa;
+    --bg: #1e1b2e; --card-bg: rgba(30,27,46,0.8);
+    --card-border: rgba(167,139,250,0.15); --text-main: #ede9fe; --text-muted: #c4b5fd;
+}
+
+/* ========================================
+   TABS DE CONFIGURACIÓN
+   ======================================== */
+.config-tabs {
+    display: flex; gap: 4px; border-bottom: 2px solid rgba(255,255,255,0.08);
+    margin-bottom: 28px; padding-bottom: 0; overflow-x: auto;
+}
+.config-tab-btn {
+    background: transparent; border: none; color: var(--text-muted);
+    font-size: 15px; font-weight: 700; padding: 12px 22px; cursor: pointer;
+    transition: all 0.2s; border-bottom: 3px solid transparent; margin-bottom: -2px;
+    white-space: nowrap; border-radius: 8px 8px 0 0;
+}
+.config-tab-btn:hover { color: var(--text-main); background: rgba(255,255,255,0.04); }
+.config-tab-btn.active { color: #fbbf24; border-bottom-color: #fbbf24; background: rgba(251,191,36,0.05); }
+.config-tab-btn.active.azul { color: #60a5fa; border-bottom-color: #60a5fa; background: rgba(96,165,250,0.05); }
+
+/* ========================================
+   TOGGLE SWITCH
+   ======================================== */
+.toggle-switch { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-slider {
+    position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(255,255,255,0.12); transition: 0.3s; border-radius: 24px;
+}
+.toggle-slider:before {
+    position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px;
+    background: white; transition: 0.3s; border-radius: 50%;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+}
+.toggle-switch input:checked + .toggle-slider { background: var(--accent); }
+.toggle-switch input:checked + .toggle-slider:before { transform: translateX(20px); }
+
+/* ========================================
+   TARJETAS DE PRIVILEGIOS (estilo MULTISYS)
+   ======================================== */
+.privilege-layout { display: grid; grid-template-columns: 260px 1fr; gap: 24px; min-height: 500px; }
+.privilege-user-list { background: rgba(0,0,0,0.25); border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.06); }
+.privilege-user-item {
+    display: flex; align-items: center; gap: 12px; padding: 14px 18px; cursor: pointer;
+    transition: background 0.2s; border-bottom: 1px solid rgba(255,255,255,0.04); position: relative;
+}
+.privilege-user-item:hover { background: rgba(255,255,255,0.05); }
+.privilege-user-item.selected { background: rgba(96,165,250,0.1); border-left: 3px solid #60a5fa; }
+.privilege-user-avatar {
+    width: 38px; height: 38px; border-radius: 50%; background: var(--primary);
+    display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; color: white; flex-shrink: 0;
+}
+.privilege-user-info h4 { font-size: 13px; font-weight: 700; color: var(--text-main); margin-bottom: 2px; }
+.privilege-user-info p { font-size: 11px; color: var(--text-muted); }
+.privilege-badge { background: rgba(96,165,250,0.2); color: #60a5fa; font-size: 10px; padding: 2px 6px; border-radius: 8px; font-weight: 700; }
+
+.privilege-matrix { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; align-content: start; }
+.privilege-category-card {
+    background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 16px; overflow: hidden;
+}
+.privilege-category-header {
+    padding: 14px 18px; font-size: 12px; font-weight: 800; text-transform: uppercase;
+    letter-spacing: 1px; display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.privilege-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 12px 18px; border-bottom: 1px solid rgba(255,255,255,0.03); transition: background 0.15s;
+}
+.privilege-item:last-child { border-bottom: none; }
+.privilege-item:hover { background: rgba(255,255,255,0.03); }
+.privilege-item-info { flex: 1; min-width: 0; }
+.privilege-item-info strong { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-main); font-weight: 600; }
+.privilege-item-info p { font-size: 11px; color: var(--text-muted); margin-top: 2px; line-height: 1.4; }
+.sensitive-tag { background: rgba(251,146,60,0.15); color: #fb923c; font-size: 9px; padding: 2px 6px; border-radius: 4px; font-weight: 700; text-transform: uppercase; }
+
+/* ========================================
+   SWATCHES DE APARIENCIA
+   ======================================== */
+.theme-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 16px; }
+.theme-swatch {
+    border-radius: 16px; padding: 20px; cursor: pointer; transition: all 0.2s;
+    border: 2px solid transparent; position: relative; overflow: hidden;
+}
+.theme-swatch:hover { transform: translateY(-3px); box-shadow: 0 12px 30px rgba(0,0,0,0.4); }
+.theme-swatch.active { border-color: white; box-shadow: 0 0 0 4px rgba(255,255,255,0.15); }
+.theme-swatch .swatch-preview {
+    display: flex; gap: 6px; margin-bottom: 12px;
+}
+.swatch-circle { width: 24px; height: 24px; border-radius: 50%; }
+.theme-swatch h4 { font-size: 14px; font-weight: 700; color: white; margin-bottom: 2px; }
+.theme-swatch p { font-size: 11px; color: rgba(255,255,255,0.6); }
+.theme-active-check { position: absolute; top: 10px; right: 10px; background: white; border-radius: 50%; width: 22px; height: 22px; display: none; align-items: center; justify-content: center; font-size: 12px; }
+.theme-swatch.active .theme-active-check { display: flex; }

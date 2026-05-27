@@ -53,12 +53,49 @@ app.get('/api/patient/:qsl', async (req, res) => {
 app.post('/api/patient/:qsl', async (req, res) => {
     try {
         const { qsl } = req.params;
-        const { data } = req.body;
-        await db.collection(COLLECTIONS.pacientes).doc(qsl).set(
-            { data, created_at: admin.firestore.FieldValue.serverTimestamp() },
-            { merge: true }
-        );
+        const { data, doctor_id } = req.body;
+        const update = {
+            data,
+            updated_at: admin.firestore.FieldValue.serverTimestamp()
+        };
+        if (doctor_id) update.doctor_id = doctor_id;
+        if (data && data.nombre_completo) update.nombre = data.nombre_completo;
+        const docRef = db.collection(COLLECTIONS.pacientes).doc(qsl);
+        const existing = await docRef.get();
+        if (!existing.exists) update.created_at = admin.firestore.FieldValue.serverTimestamp();
+        await docRef.set(update, { merge: true });
         res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, error: 'Database error' });
+    }
+});
+
+// List all patients (optionally filtered by doctor_id) for cross-device sync
+app.get('/api/patients/list', async (req, res) => {
+    try {
+        const { doctor_id, since } = req.query;
+        let query = db.collection(COLLECTIONS.pacientes);
+        if (doctor_id && doctor_id !== 'MED-MASTER') {
+            query = query.where('doctor_id', '==', doctor_id);
+        }
+        const snap = await query.get();
+        const sinceMs = since ? Number(since) : 0;
+        const patients = snap.docs
+            .filter(d => !d.data().deleted)
+            .map(d => {
+                const docData = d.data();
+                return {
+                    qsl: d.id,
+                    doctor_id: docData.doctor_id || null,
+                    nombre: docData.nombre || (docData.data && docData.data.nombre_completo) || null,
+                    data: docData.data || {},
+                    alerts_enabled: !!docData.alerts_enabled,
+                    updated_at: docData.updated_at?.toMillis?.() || docData.created_at?.toMillis?.() || 0
+                };
+            })
+            .filter(p => p.updated_at >= sinceMs);
+        res.json({ success: true, patients, server_time: Date.now() });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, error: 'Database error' });
@@ -375,6 +412,51 @@ app.post('/api/messages/history', async (req, res) => {
     }
 });
 
+
+// === PRIVILEGIOS DE MÉDICO ===
+app.patch('/api/medico/:id/privileges', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { privileges } = req.body;
+        await db.collection(COLLECTIONS.medicos).doc(id).set(
+            { privileges: privileges || {} },
+            { merge: true }
+        );
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, error: 'Database error' });
+    }
+});
+
+// === APARIENCIA DEL SISTEMA ===
+app.get('/api/settings/appearance', async (req, res) => {
+    try {
+        const { id_centro } = req.query;
+        const key = id_centro || 'global';
+        const doc = await db.collection('settings').doc(key).get();
+        if (!doc.exists) return res.json({ success: true, appearance: {} });
+        res.json({ success: true, appearance: doc.data().appearance || {} });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, error: 'Database error' });
+    }
+});
+
+app.post('/api/settings/appearance', async (req, res) => {
+    try {
+        const { id_centro, appearance } = req.body;
+        const key = id_centro || 'global';
+        await db.collection('settings').doc(key).set(
+            { appearance, updated_at: admin.firestore.FieldValue.serverTimestamp() },
+            { merge: true }
+        );
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, error: 'Database error' });
+    }
+});
 
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));

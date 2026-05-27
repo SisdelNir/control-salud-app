@@ -36,9 +36,7 @@ document.addEventListener('DOMContentLoaded', () => {
         contentArea.style.maxWidth = '650px';
 
         navItems.forEach(n => n.classList.remove('active'));
-        const targetNav = Array.from(navItems).find(n => n.getAttribute('data-section') === 'reminders');
-        if (targetNav) targetNav.classList.add('active');
-        loadSection('reminders');
+        loadSection('patient_portal');
 
         // Iniciar detector de alertas automático
         setInterval(checkAndShowAlerts, 10000);
@@ -156,11 +154,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function savePatientData(qsl, data) {
         localStorage.setItem(`patient_data_${qsl}`, JSON.stringify(data));
+        const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
         try {
             await fetch(`/api/patient/${qsl}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ data })
+                body: JSON.stringify({ data, doctor_id })
             });
         } catch (e) { console.error(e); }
 
@@ -195,7 +194,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (activeNav) activeNav.classList.add('active');
 
         let data = null;
-        if (selectedPatientQSL && (sectionName === 'overview' || sectionName === 'reminders' || sectionName === 'consultation')) {
+        if (selectedPatientQSL && (sectionName === 'overview' || sectionName === 'reminders' || sectionName === 'consultation' || sectionName === 'patient_portal')) {
             // Wait for remote sync only when loading sections to ensure patient has up to date initial data
             data = await fetchPatientDataAsync(selectedPatientQSL);
         }
@@ -374,7 +373,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 const unreadSysAlerts = data.alerts.filter(a => !a.leido);
                 
                 if (unreadSysAlerts.length > 0) {
+                    // ── Guardar en bandeja persistente antes de marcar como leído ──
+                    const inboxKey = `patient_inbox_${myQsl}`;
+                    const inbox = JSON.parse(localStorage.getItem(inboxKey) || '[]');
+                    
                     unreadSysAlerts.forEach(a => {
+                        // Agregar a bandeja local si no existe ya
+                        if (!inbox.find(m => m.id === String(a.id))) {
+                            inbox.unshift({
+                                id: String(a.id),
+                                mensaje: a.mensaje,
+                                fecha: a.created_at ? new Date(a.created_at).toLocaleString('es-ES') : new Date().toLocaleString('es-ES'),
+                                leido: false,
+                                tipo: 'clinica'
+                            });
+                        }
+                        
                         // Mark as read in DB instantaneously
                         fetch(`/api/patient/${myQsl}/alerts/messages`, {
                             method: 'POST',
@@ -426,70 +440,178 @@ document.addEventListener('DOMContentLoaded', () => {
                         
                         document.getElementById(`btn-close-sysalert-${a.id}`).onclick = () => fsAlert.remove();
                     });
+                    
+                    // Guardar inbox actualizado (máx 30 mensajes)
+                    localStorage.setItem(inboxKey, JSON.stringify(inbox.slice(0, 30)));
+                    
+                    // Actualizar badge del portal si está visible
+                    const badge = document.getElementById('portal-inbox-badge');
+                    if (badge) {
+                        const unreadCount = inbox.filter(m => !m.leido).length;
+                        badge.textContent = unreadCount;
+                        badge.style.display = unreadCount > 0 ? 'flex' : 'none';
+                    }
                 }
             }
         } catch(e) { console.error('Cloud Sync Error', e); }
 
-        // 2. Mostrar mensajes de turnos (Ej: Faltan 4 pacientes)
+        // 2. Mostrar mensajes de turnos (Ej: Faltan 4 pacientes) y guardar en bandeja
         const notifKey = `patient_notifications_${myQsl}`;
         const queueObj = JSON.parse(localStorage.getItem(notifKey) || '[]');
         const unread = queueObj.filter(q => !q.read);
         if (unread.length > 0) {
+            const inboxKey2 = `patient_inbox_${myQsl}`;
+            const inbox2 = JSON.parse(localStorage.getItem(inboxKey2) || '[]');
             unread.forEach(u => {
                 u.read = true;
                 window.showElegantAlert('🏥 Sala de Espera', u.msg);
                 if(navigator.vibrate) navigator.vibrate(300);
+                // Guardar aviso de turno en bandeja
+                const qId = `queue_${u.time}`;
+                if (!inbox2.find(m => m.id === qId)) {
+                    inbox2.unshift({ id: qId, mensaje: u.msg, fecha: new Date(u.time || Date.now()).toLocaleString('es-ES'), leido: false, tipo: 'turno' });
+                }
             });
             localStorage.setItem(notifKey, JSON.stringify(queueObj));
+            localStorage.setItem(inboxKey2, JSON.stringify(inbox2.slice(0, 30)));
         }
 
-        // 3. Revisar si quedan exactamente 15 minutos para su cita programada
+        // 3. Sistema Inteligente de Recordatorios de Cita
         const appointments = window.getAppointments ? window.getAppointments() : [];
         const todayStr = new Date().toISOString().slice(0, 10);
-        
         const myAppt = appointments.find(a => a.qsl === myQsl && a.date === todayStr);
+
         if (myAppt) {
             const now = new Date();
             const [apptH, apptM] = myAppt.time.split(':').map(Number);
-            const apptDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), apptH, apptM, 0);
-            
-            const diffMs = apptDate - now;
+            const apptDateTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), apptH, apptM, 0);
+            const diffMs = apptDateTime - now;
             const diffMins = Math.floor(diffMs / 60000);
-            
-            const alertedKey = `alerted_15min_today_${myQsl}`;
-            const alreadyAlertedDate = localStorage.getItem(alertedKey);
-            
-            if (diffMins === 15 && alreadyAlertedDate !== todayStr) {
-                localStorage.setItem(alertedKey, todayStr);
-                
-                const fsAlert = document.createElement('div');
-                fsAlert.style.position = 'fixed';
-                fsAlert.style.top = '0';
-                fsAlert.style.left = '0';
-                fsAlert.style.width = '100vw';
-                fsAlert.style.height = '100vh';
-                fsAlert.style.backgroundColor = '#dc2626'; 
-                fsAlert.style.color = '#ffffff';
-                fsAlert.style.zIndex = '9999999';
-                fsAlert.style.display = 'flex';
-                fsAlert.style.flexDirection = 'column';
-                fsAlert.style.justifyContent = 'center';
-                fsAlert.style.alignItems = 'center';
-                fsAlert.style.textAlign = 'center';
-                fsAlert.style.padding = '40px';
-                
-                fsAlert.innerHTML = `
-                    <div style="font-size: 100px; margin-bottom:20px; animation: pulse 1s infinite;">⏰</div>
-                    <h1 style="font-size: 44px; font-weight: 900; line-height: 1.2; text-transform: uppercase;">SU TURNO SERÁ EN 15 MINUTOS</h1>
-                    <p style="font-size: 22px; font-weight: normal; margin-top:25px; opacity:0.9;">Aproxímese al área de consulta.</p>
-                    <button class="btn-primary" id="btn-close-15min" style="margin-top: 50px; background: rgba(0,0,0,0.3); color: white; border: 2px solid rgba(255,255,255,0.5); padding: 20px 40px; font-size: 22px; border-radius: 16px; cursor: pointer; font-weight:bold;">ENTENDIDO</button>
-                `;
-                document.body.appendChild(fsAlert);
-                
-                document.getElementById('btn-close-15min').onclick = () => fsAlert.remove();
-                
-                if(navigator.vibrate) {
-                    navigator.vibrate([1000, 500, 1000, 500, 1000]);
+
+            // ── Helper: guardar mensaje en bandeja del paciente ───────────
+            function _saveApptMsgToInbox(msg) {
+                const key = `patient_inbox_${myQsl}`;
+                const inbox = JSON.parse(localStorage.getItem(key) || '[]');
+                const msgId = `appt_${myQsl}_${Date.now()}`;
+                if (!inbox.find(m => m.mensaje === msg)) {
+                    inbox.unshift({ id: msgId, mensaje: msg, fecha: now.toLocaleString('es-ES'), leido: false, tipo: 'cita' });
+                    localStorage.setItem(key, JSON.stringify(inbox.slice(0, 30)));
+                    // Actualizar badge del portal
+                    const badge = document.getElementById('portal-inbox-badge');
+                    if (badge) { const uc = inbox.filter(m=>!m.leido).length; badge.textContent=uc; badge.style.display=uc>0?'flex':'none'; }
+                }
+            }
+
+            // ── Contar pacientes con cita ANTES que la mía hoy ────────────
+            const patientsBefore = appointments.filter(a => a.date === todayStr && a.time < myAppt.time).length;
+
+            // ════════════════════════════════════════════════════
+            // MODO A: Paciente único/primero — Recordatorio por hora
+            // ════════════════════════════════════════════════════
+            if (patientsBefore === 0 && diffMs > 0) {
+                const currentH = now.getHours();
+                const currentMin = now.getMinutes();
+
+                // Solo entre las 6 AM y la hora de la cita, en los primeros 2 min de cada hora
+                if (currentH >= 6 && currentH < apptH && currentMin < 3) {
+                    const hourKey = `appt_hour_${myQsl}_${todayStr}_${currentH}`;
+                    if (!localStorage.getItem(hourKey)) {
+                        localStorage.setItem(hourKey, '1');
+
+                        const hoursLeft = apptH - currentH;
+                        let emoji, msg;
+                        if (currentH === 6) {
+                            emoji = '🌅';
+                            msg = `${emoji} Buenos días. Recuerde que hoy tiene una cita médica a las ${myAppt.time} hrs. Faltan ${hoursLeft} horas.`;
+                        } else if (hoursLeft === 1) {
+                            emoji = '🚨';
+                            msg = `${emoji} ¡Última hora! Su cita médica es en 1 hora (${myAppt.time} hrs). Por favor aproxímese al área de consulta.`;
+                        } else if (hoursLeft <= 2) {
+                            emoji = '⏰';
+                            msg = `${emoji} Atención: su cita médica es hoy a las ${myAppt.time} hrs. Faltan ${hoursLeft} horas. Esté preparado.`;
+                        } else {
+                            emoji = '📅';
+                            msg = `${emoji} Recordatorio: tiene una cita médica hoy a las ${myAppt.time} hrs. Faltan ${hoursLeft} horas.`;
+                        }
+
+                        _saveApptMsgToInbox(msg);
+                        if (navigator.vibrate) navigator.vibrate([300, 100, 300]);
+
+                        // Mostrar alerta visual suave (no fullscreen, no bloquea)
+                        const toast = document.createElement('div');
+                        toast.style.cssText = `position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,rgba(15,23,42,0.97),rgba(30,41,59,0.97));border:1px solid rgba(34,211,238,0.4);border-radius:16px;padding:18px 24px;color:white;font-family:inherit;z-index:99999;max-width:380px;width:90%;box-shadow:0 10px 40px rgba(0,0,0,0.5);backdrop-filter:blur(10px);animation:slideUp 0.4s ease;text-align:center;`;
+                        toast.innerHTML = `
+                            <div style="font-size:32px;margin-bottom:8px;">${emoji}</div>
+                            <p style="font-size:15px;line-height:1.5;margin:0 0 14px 0;color:#f8fafc;">${msg}</p>
+                            <button onclick="this.parentElement.remove()" style="background:rgba(34,211,238,0.15);border:1px solid rgba(34,211,238,0.3);color:var(--accent,#22d3ee);padding:8px 20px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;">ENTENDIDO</button>
+                        `;
+                        document.body.appendChild(toast);
+                        setTimeout(() => { if (toast.parentElement) toast.remove(); }, 15000);
+                    }
+                }
+            }
+
+            // ════════════════════════════════════════════════════
+            // MODO B: Paciente en cola — Aviso de respaldo 4 horas antes
+            // ════════════════════════════════════════════════════
+            if (patientsBefore > 0 && diffMs > 0) {
+                const diffHours = diffMs / 3600000;
+
+                // Aviso de "4 horas antes" — una sola vez
+                if (diffHours <= 4 && diffHours > 3) {
+                    const key4h = `appt_4h_${myQsl}_${todayStr}`;
+                    if (!localStorage.getItem(key4h)) {
+                        localStorage.setItem(key4h, '1');
+                        const msg = `🏥 Aviso: Su médico comenzará las consultas en breve. Su cita es a las ${myAppt.time} hrs con ${patientsBefore} paciente(s) antes. Esté atento a los avisos de turno.`;
+                        _saveApptMsgToInbox(msg);
+                        if (navigator.vibrate) navigator.vibrate([300, 100, 300]);
+
+                        const toast = document.createElement('div');
+                        toast.style.cssText = `position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,rgba(15,23,42,0.97),rgba(30,41,59,0.97));border:1px solid rgba(16,185,129,0.4);border-radius:16px;padding:18px 24px;color:white;font-family:inherit;z-index:99999;max-width:380px;width:90%;box-shadow:0 10px 40px rgba(0,0,0,0.5);backdrop-filter:blur(10px);animation:slideUp 0.4s ease;text-align:center;`;
+                        toast.innerHTML = `
+                            <div style="font-size:32px;margin-bottom:8px;">🏥</div>
+                            <p style="font-size:15px;line-height:1.5;margin:0 0 14px 0;color:#f8fafc;">${msg}</p>
+                            <button onclick="this.parentElement.remove()" style="background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.3);color:#10b981;padding:8px 20px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;">ENTENDIDO</button>
+                        `;
+                        document.body.appendChild(toast);
+                        setTimeout(() => { if (toast.parentElement) toast.remove(); }, 15000);
+                    }
+                }
+
+                // Aviso "2 horas antes" — segunda llamada de atención
+                if (diffHours <= 2 && diffHours > 1.75) {
+                    const key2h = `appt_2h_${myQsl}_${todayStr}`;
+                    if (!localStorage.getItem(key2h)) {
+                        localStorage.setItem(key2h, '1');
+                        const msg = `⏰ Recuerdo: su cita médica es en aproximadamente 2 horas (${myAppt.time} hrs). Esté listo para los avisos de turno.`;
+                        _saveApptMsgToInbox(msg);
+                        if (navigator.vibrate) navigator.vibrate([300, 100, 300]);
+                    }
+                }
+            }
+
+            // ════════════════════════════════════════════════════
+            // AMBOS MODOS: Alerta fullscreen 15 minutos antes
+            // ════════════════════════════════════════════════════
+            if (diffMins >= 14 && diffMins <= 16) {
+                const alertedKey = `alerted_15min_today_${myQsl}`;
+                if (localStorage.getItem(alertedKey) !== todayStr) {
+                    localStorage.setItem(alertedKey, todayStr);
+
+                    const msg15 = `⏰ Su turno será en aproximadamente 15 minutos (${myAppt.time} hrs). Aproxímese al área de consulta.`;
+                    _saveApptMsgToInbox(msg15);
+
+                    const fsAlert = document.createElement('div');
+                    fsAlert.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;background:#dc2626;color:#fff;z-index:9999999;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:40px;box-sizing:border-box;';
+                    fsAlert.innerHTML = `
+                        <div style="font-size:100px;margin-bottom:20px;animation:pulse 1s infinite;">⏰</div>
+                        <h1 style="font-size:44px;font-weight:900;line-height:1.2;text-transform:uppercase;">SU TURNO SERÁ EN 15 MINUTOS</h1>
+                        <p style="font-size:22px;font-weight:normal;margin-top:25px;opacity:0.9;">Aproxímese al área de consulta.</p>
+                        <button id="btn-close-15min" style="margin-top:50px;background:rgba(0,0,0,0.3);color:white;border:2px solid rgba(255,255,255,0.5);padding:20px 40px;font-size:22px;border-radius:16px;cursor:pointer;font-weight:bold;">ENTENDIDO</button>
+                    `;
+                    document.body.appendChild(fsAlert);
+                    document.getElementById('btn-close-15min').onclick = () => fsAlert.remove();
+                    if (navigator.vibrate) navigator.vibrate([1000, 500, 1000, 500, 1000]);
                 }
             }
         }
@@ -507,15 +629,16 @@ document.addEventListener('DOMContentLoaded', () => {
             
         remainingAppts.forEach((appt, index) => {
             const turnosFaltantes = index + 1; // index 0 (the immediate next) is "faltan 1 paciente"
-            if (turnosFaltantes <= 5) {
+            if (turnosFaltantes <= 6) {
                 const msjs = {
-                    1: '¡Prepárese! Es su turno en la siguiente consulta.',
-                    2: 'Faltan 2 pacientes para su turno.',
-                    3: 'Faltan 3 pacientes para su turno.',
-                    4: 'Faltan 4 pacientes para su turno.',
-                    5: 'Faltan 5 pacientes para su turno.'
+                    1: '⚡ ¡Es su turno! Diríjase al consultorio ahora.',
+                    2: '🏃 Faltan 2 pacientes. Por favor preséntese en recepción.',
+                    3: '⏳ Faltan 3 pacientes para su turno. Vaya preparándose.',
+                    4: '🔔 Faltan 4 pacientes para su turno. Esté atento.',
+                    5: '📋 Faltan 5 pacientes para su turno.',
+                    6: '📢 Aviso temprano: faltan 6 turnos. Comience a desplazarse para llegar puntual a su cita.'
                 };
-                const customMsg = msjs[turnosFaltantes] || `Faltan ${turnosFaltantes} pacientes`;
+                const customMsg = msjs[turnosFaltantes] || `Faltan ${turnosFaltantes} turnos para su consulta.`;
 
                 if (pref === 'whatsapp') {
                     console.log(`[API Meta WhatsApp] Simulando envío a ${appt.name} (QSL: ${appt.qsl}): ${customMsg}`);
@@ -564,15 +687,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 const apptBlock = dayAppts.find(a => a.time === timeStr);
                 
                 if(apptBlock) {
+                    const _name   = apptBlock.name   || 'Paciente';
+                    const _qsl    = apptBlock.qsl    || '';
+                    const _motivo = apptBlock.motivo ? ' · ' + apptBlock.motivo : '';
                     timeslotsHtml += `
                         <div class="time-slot">
-                            <div class="time-label">\${timeStr}</div>
-                            <div class="time-content booked" style="display: flex; justify-content: space-between; align-items: center;">
-                                <div onclick="window.showAppointmentPreview('\\${apptBlock.qsl}', '\\${dateStr}', '\\${timeStr}')" style="cursor:pointer; flex: 1;">
-                                    <b>\${apptBlock.name}</b> &mdash; Cita Programada (Clic para iniciar)
+                            <div class="time-label" style="color:#22d3ee;font-weight:700;">${timeStr}</div>
+                            <div class="time-content booked" style="display:flex;justify-content:space-between;align-items:center;background:linear-gradient(90deg,rgba(16,185,129,0.18),rgba(16,185,129,0.08));border:1px solid rgba(16,185,129,0.4);border-left:4px solid #10b981;border-radius:10px;padding:10px 14px;">
+                                <div onclick="window.showAppointmentPreview('${_qsl}','${dateStr}','${timeStr}')" style="cursor:pointer;flex:1;display:flex;align-items:center;gap:12px;">
+                                    <div style="background:rgba(16,185,129,0.2);border-radius:50%;width:34px;height:34px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;">👤</div>
+                                    <div>
+                                        <div style="color:white;font-weight:700;font-size:14px;">${_name}</div>
+                                        <div style="color:rgba(52,211,153,0.8);font-size:11px;margin-top:2px;">📅 ${dateStr} · ⏰ ${timeStr}${_motivo}</div>
+                                    </div>
                                 </div>
-                                <button onclick="window.deleteAppointment('\\${apptBlock.qsl}', '\\${dateStr}', '\\${timeStr}')" style="background: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid #ef4444; border-radius: 8px; padding: 4px 10px; font-size: 11px; cursor: pointer; text-transform: uppercase; font-weight: bold;">
-                                    Anular
+                                <button onclick="window.deleteAppointment('${_qsl}','${dateStr}','${timeStr}')" style="background:rgba(239,68,68,0.15);color:#f87171;border:1px solid rgba(239,68,68,0.35);border-radius:8px;padding:6px 12px;font-size:11px;cursor:pointer;font-weight:700;" onmouseover="this.style.background='rgba(239,68,68,0.3)'" onmouseout="this.style.background='rgba(239,68,68,0.15)'">
+                                    ANULAR
                                 </button>
                             </div>
                         </div>
@@ -736,6 +866,9 @@ function renderSection(name, data) {
         const patientData = data || (selectedPatientQSL ? getPatientDataFallback(selectedPatientQSL) : null);
 
         switch (name) {
+            case 'patient_portal':
+                renderPatientPortal(patientData);
+                break;
             case 'overview':
                 renderOverview(patientData);
                 break;
@@ -780,13 +913,20 @@ function renderSection(name, data) {
             const data = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}');
             const name = data.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || qsl;
 
-            // Next upcoming appointment
+            // Next upcoming appointment — match by qsl OR by name
             const upcoming = allAppts
-                .filter(a => a.qsl === qsl && new Date(a.date + 'T' + (a.time || '00:00')) >= now)
+                .filter(a => (a.qsl === qsl || a.name === name) && new Date(a.date + 'T' + (a.time || '00:00')) >= now)
                 .sort((a,b) => new Date(a.date+'T'+(a.time||'00:00')) - new Date(b.date+'T'+(b.time||'00:00')))[0];
-            const nextAppt = upcoming
-                ? `${new Date(upcoming.date+'T12:00:00').toLocaleDateString('es-ES',{day:'2-digit',month:'short'})} ${upcoming.time}`
-                : '—';
+            
+            let nextAppt = '—';
+            let nextApptDays = null;
+            if (upcoming) {
+                const apptDate = new Date(upcoming.date + 'T12:00:00');
+                const diffDays = Math.ceil((apptDate - now) / 86400000);
+                const label = new Date(upcoming.date+'T12:00:00').toLocaleDateString('es-ES',{day:'2-digit',month:'short'});
+                nextAppt = `${label} ${upcoming.time}`;
+                nextApptDays = diffDays;
+            }
 
             // Last consultation note/prescription
             const consults = data.consultations || [];
@@ -810,10 +950,33 @@ function renderSection(name, data) {
                 telefono: data.telefono || '—',
                 glucosa:  !!data.glucoseEnabled,
                 presion:  !!data.pressureEnabled,
-                nextAppt,
+                nextAppt, nextApptDays,
                 lastRx: lastRxShort
             };
         });
+
+        // Sync citas from cloud to enrich nextAppt
+        const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+        fetch(`/api/appointments?doctor_id=${encodeURIComponent(doctor_id)}`)
+            .then(r => r.json())
+            .then(result => {
+                if (result.appointments && result.appointments.length > 0) {
+                    const cloud = result.appointments.map(a => ({
+                        qsl: a.qsl_code, name: a.paciente_nombre,
+                        date: a.fecha ? a.fecha.slice(0,10) : '', time: a.hora, motivo: a.motivo
+                    }));
+                    // Merge into localStorage
+                    const key2 = window.getAppointmentsKey ? window.getAppointmentsKey() : 'appointments_data';
+                    const local = JSON.parse(localStorage.getItem(key2) || '[]');
+                    const merged = [...local];
+                    cloud.forEach(c => {
+                        if (!merged.find(m => m.qsl === c.qsl && m.date === c.date && m.time === c.time)) merged.push(c);
+                    });
+                    localStorage.setItem(key2, JSON.stringify(merged));
+                    // Re-render list with updated data
+                    if (document.getElementById('patient-list-overlay')) renderList(document.getElementById('pl-search')?.value?.toLowerCase() || '');
+                }
+            }).catch(() => {});
 
         const overlay = document.createElement('div');
         overlay.id = 'patient-list-overlay';
@@ -835,7 +998,11 @@ function renderSection(name, data) {
                         <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; cursor:pointer;"><span style="background:rgba(34,211,238,0.1);color:#22d3ee;border:1px solid rgba(34,211,238,0.25);border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;">${p.qsl}</span></td>
                         <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; text-align:center; font-size:15px; cursor:pointer;">${p.glucosa ? '🟢' : '⚫'}</td>
                         <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; text-align:center; font-size:15px; cursor:pointer;">${p.presion ? '🟢' : '⚫'}</td>
-                        <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; color:#fbbf24; font-size:12px; cursor:pointer;">${p.nextAppt}</td>
+                        <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; cursor:pointer;">
+                            ${p.nextApptDays !== null
+                                ? `<span style="display:inline-flex;align-items:center;gap:6px;background:${p.nextApptDays <= 1 ? 'rgba(239,68,68,0.15)' : p.nextApptDays <= 7 ? 'rgba(251,191,36,0.15)' : 'rgba(16,185,129,0.1)'};border:1px solid ${p.nextApptDays <= 1 ? 'rgba(239,68,68,0.4)' : p.nextApptDays <= 7 ? 'rgba(251,191,36,0.4)' : 'rgba(16,185,129,0.3)'};color:${p.nextApptDays <= 1 ? '#f87171' : p.nextApptDays <= 7 ? '#fbbf24' : '#34d399'};border-radius:8px;padding:4px 10px;font-size:11px;font-weight:700;">📅 ${p.nextAppt} <span style="opacity:0.7;font-weight:400;">(${p.nextApptDays === 0 ? 'Hoy' : p.nextApptDays === 1 ? 'Mañana' : 'en ' + p.nextApptDays + 'd'})</span></span>`
+                                : '<span style="color:rgba(255,255,255,0.25);font-size:12px;">—</span>'}
+                        </td>
                         <td onclick="window.showPatientLastRx('${p.qsl}')" title="Ver receta en detalle" style="padding:11px 14px; color:#60a5fa; font-size:12px; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; text-decoration:underline;">${p.lastRx}</td>
                     </tr>`).join('')
                 : `<tr><td colspan="7" style="padding:30px; text-align:center; color:rgba(255,255,255,0.3); font-size:14px;">No se encontraron pacientes.</td></tr>`;
@@ -2711,6 +2878,268 @@ function renderSection(name, data) {
         modal.style.display = 'flex';
     };
 
+    // ═══════════════════════════════════════════════════════════
+    //  PORTAL DEL PACIENTE — Vista unificada con 3 tabs
+    // ═══════════════════════════════════════════════════════════
+    function renderPatientPortal(data) {
+        data = data || {};
+        data.meds = data.meds || [];
+        const pQsl  = selectedPatientQSL;
+        const pName = localStorage.getItem(`patient_name_${pQsl}`) || localStorage.getItem('user_real_name') || pQsl;
+        const isActivated = localStorage.getItem(`active_qsl_${pQsl}`) === 'true';
+
+        // ── Próxima cita ──────────────────────────────────────
+        const allAppts = window.getAppointments ? window.getAppointments() : [];
+        const now = new Date();
+        const nextAppt = allAppts
+            .filter(a => a.qsl === pQsl && new Date(a.date + 'T' + (a.time || '00:00')) >= now)
+            .sort((a, b) => new Date(a.date + 'T' + (a.time || '00:00')) - new Date(b.date + 'T' + (b.time || '00:00')))[0];
+
+        const todayStr = now.toISOString().slice(0, 10);
+        const isToday = nextAppt && nextAppt.date === todayStr;
+
+        let apptCard = '';
+        if (nextAppt) {
+            const apptDate = new Date(nextAppt.date + 'T12:00:00').toLocaleDateString('es-ES', { weekday: 'long', day: '2-digit', month: 'long' });
+            const diffMs = new Date(nextAppt.date + 'T' + nextAppt.time) - now;
+            const diffH  = Math.floor(diffMs / 3600000);
+            const diffM  = Math.floor((diffMs % 3600000) / 60000);
+            const countdown = diffMs > 0 ? (diffH > 0 ? `En ${diffH}h ${diffM}min` : `En ${diffM} minutos`) : 'Ahora';
+            apptCard = `
+                <div style="background:linear-gradient(135deg,rgba(16,185,129,0.15),rgba(5,150,105,0.08)); border:1px solid rgba(16,185,129,0.4); border-radius:20px; padding:20px; margin-bottom:18px; position:relative; overflow:hidden;">
+                    <div style="position:absolute;top:0;right:0;width:80px;height:80px;background:radial-gradient(circle,rgba(16,185,129,0.2),transparent);border-radius:50%;transform:translate(20px,-20px);"></div>
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+                        <div>
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                                <span style="color:#10b981;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;">Próxima Cita${isToday ? ' • HOY' : ''}</span>
+                            </div>
+                            <p style="color:#fff;font-size:17px;font-weight:600;margin:0 0 4px 0;text-transform:capitalize;">${apptDate}</p>
+                            <p style="color:rgba(255,255,255,0.6);font-size:14px;margin:0;">⏰ ${nextAppt.time} hrs</p>
+                        </div>
+                        <div style="text-align:center;background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.3);border-radius:14px;padding:10px 14px;flex-shrink:0;">
+                            <div style="color:#10b981;font-size:13px;font-weight:700;">${countdown}</div>
+                        </div>
+                    </div>
+                </div>`;
+        } else {
+            apptCard = `<div style="text-align:center;padding:20px;background:rgba(0,0,0,0.15);border-radius:16px;margin-bottom:18px;border:1px dashed rgba(255,255,255,0.08);">
+                <p style="color:rgba(255,255,255,0.4);font-size:14px;">No hay citas agendadas próximamente.</p>
+            </div>`;
+        }
+
+        // ── Bandeja de mensajes ───────────────────────────────
+        const inbox = JSON.parse(localStorage.getItem(`patient_inbox_${pQsl}`) || '[]');
+        const unreadCount = inbox.filter(m => !m.leido).length;
+
+        let inboxHtml = '';
+        if (inbox.length === 0) {
+            inboxHtml = `<div style="text-align:center;padding:30px 20px;opacity:0.5;">
+                <div style="font-size:40px;margin-bottom:12px;">📭</div>
+                <p style="font-size:14px;">No hay mensajes en su bandeja.</p>
+            </div>`;
+        } else {
+            inboxHtml = inbox.map((msg, idx) => {
+                const icon = msg.tipo === 'turno' ? '🏥' : '💬';
+                const color = msg.leido ? 'rgba(255,255,255,0.05)' : 'rgba(59,130,246,0.1)';
+                const border = msg.leido ? 'rgba(255,255,255,0.08)' : 'rgba(59,130,246,0.35)';
+                return `<div style="background:${color};border:1px solid ${border};border-radius:14px;padding:15px;margin-bottom:10px;transition:all 0.2s;">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px;">
+                        <span style="font-size:13px;font-weight:700;color:${msg.leido ? 'rgba(255,255,255,0.5)' : '#60a5fa'};">${icon} ${msg.tipo === 'turno' ? 'Aviso de Turno' : 'Mensaje Clínica'}</span>
+                        <span style="font-size:11px;color:rgba(255,255,255,0.35);white-space:nowrap;">${msg.fecha}</span>
+                    </div>
+                    <p style="color:${msg.leido ? 'rgba(255,255,255,0.5)' : '#f8fafc'};font-size:14px;line-height:1.5;margin:0 0 10px 0;">${msg.mensaje}</p>
+                    ${!msg.leido ? `<button onclick="window.markInboxRead('${pQsl}',${idx})" style="background:none;border:1px solid rgba(255,255,255,0.15);color:rgba(255,255,255,0.5);font-size:11px;padding:4px 10px;border-radius:8px;cursor:pointer;">Marcar leído</button>` : ''}
+                </div>`;
+            }).join('');
+        }
+
+        // ── Medicamentos pendientes (resumen) ─────────────────
+        const dueMeds = data.meds.filter(m => isDoseDue(m.id, m.startTime, m.frequency));
+        let medsAlert = '';
+        if (dueMeds.length > 0) {
+            medsAlert = `<div style="background:rgba(34,211,238,0.1);border:1px solid rgba(34,211,238,0.4);border-radius:16px;padding:16px;margin-bottom:18px;animation:pulse 2s infinite;">
+                <p style="color:var(--accent);font-weight:700;font-size:15px;margin-bottom:8px;">🔔 ¡Hay ${dueMeds.length} medicamento(s) que tomar ahora!</p>
+                <p style="color:rgba(255,255,255,0.7);font-size:13px;">${dueMeds.map(m => m.name).join(', ')}</p>
+                <button onclick="window.switchPortalTab('recetas')" style="margin-top:10px;background:var(--accent);color:#000;border:none;padding:8px 18px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;">Ver Recetas →</button>
+            </div>`;
+        }
+
+        // ── Datos del paciente (read-only) ───────────────────
+        const fields = [
+            ['Nombre completo', data.nombre_completo || pName],
+            ['Fecha de nacimiento', data.fecha_nacimiento || '—'],
+            ['Edad', data.edad ? data.edad + ' años' : '—'],
+            ['Género', data.genero || '—'],
+            ['DPI / Identificación', data.id_identificacion || '—'],
+            ['Estado civil', data.estado_civil || '—'],
+            ['Teléfono', data.telefono || '—'],
+            ['Correo electrónico', data.email || '—'],
+            ['Dirección', data.direccion || '—'],
+            ['Tipo de sangre', data.tipo_sangre || '—'],
+            ['Alergias', data.alergias || '—'],
+            ['Seguro médico', data.seguro_medico || '—'],
+        ];
+        const datosHtml = `
+            <div style="margin-bottom:20px;background:rgba(34,211,238,0.06);border:1px solid rgba(34,211,238,0.2);border-radius:16px;padding:16px;display:flex;justify-content:space-between;align-items:center;">
+                <div>
+                    <p style="color:rgba(255,255,255,0.5);font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Código de Acceso</p>
+                    <p id="qsl-display-portal" style="color:var(--accent);font-size:22px;font-weight:700;letter-spacing:2px;">${pQsl}</p>
+                </div>
+                <button onclick="navigator.clipboard.writeText('${pQsl}').then(()=>window.showElegantAlert('Copiado','Su código ${pQsl} ha sido copiado.'))" style="background:rgba(34,211,238,0.1);border:1px solid rgba(34,211,238,0.3);color:var(--accent);padding:8px 14px;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;">Copiar</button>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                ${fields.map(([label, val]) => `
+                    <div style="background:rgba(0,0,0,0.2);border-radius:12px;padding:12px 14px;">
+                        <p style="color:rgba(255,255,255,0.4);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">${label}</p>
+                        <p style="color:#f8fafc;font-size:14px;font-weight:600;word-break:break-word;">${val}</p>
+                    </div>`).join('')}
+            </div>
+            ${data.illness ? `<div style="margin-top:14px;background:rgba(34,211,238,0.05);border:1px solid rgba(34,211,238,0.15);border-radius:12px;padding:14px;">
+                <p style="color:rgba(255,255,255,0.4);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">Motivo de Consulta / Evolución</p>
+                <p style="color:#f8fafc;font-size:14px;line-height:1.5;">${data.illness}</p>
+            </div>` : ''}`;
+
+        // ── HTML Principal ────────────────────────────────────
+        contentArea.innerHTML = `
+        <div style="width:100%;max-width:520px;margin:0 auto;box-sizing:border-box;padding-bottom:30px;">
+
+            <!-- HEADER DEL PACIENTE -->
+            <div style="text-align:center;margin-bottom:24px;">
+                <div style="width:70px;height:70px;border-radius:50%;background:linear-gradient(135deg,rgba(79,70,229,0.3),rgba(34,211,238,0.3));border:2px solid rgba(34,211,238,0.4);display:flex;align-items:center;justify-content:center;margin:0 auto 14px;font-size:28px;">
+                    ${pName ? pName.charAt(0).toUpperCase() : '👤'}
+                </div>
+                <h2 style="color:#f8fafc;font-size:22px;font-weight:700;margin-bottom:6px;">${pName}</h2>
+                <div style="display:inline-flex;align-items:center;gap:6px;background:${isActivated ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.1)'};padding:5px 14px;border-radius:100px;border:1px solid ${isActivated ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.2)'};">
+                    <div style="width:7px;height:7px;border-radius:50%;background:${isActivated ? '#10b981' : '#ef4444'};box-shadow:0 0 6px ${isActivated ? '#10b981' : '#ef4444'};"></div>
+                    <span style="color:${isActivated ? '#10b981' : '#ef4444'};font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;">${isActivated ? 'Alertas Activas' : 'Alertas Pausadas'}</span>
+                </div>
+            </div>
+
+            <!-- TABS DE NAVEGACIÓN -->
+            <div style="display:flex;gap:8px;margin-bottom:22px;background:rgba(0,0,0,0.3);padding:6px;border-radius:16px;border:1px solid rgba(255,255,255,0.06);">
+                <button id="tab-btn-alertas" onclick="window.switchPortalTab('alertas')" style="flex:1;padding:10px 6px;border-radius:12px;border:none;font-size:13px;font-weight:700;cursor:pointer;transition:all 0.2s;background:rgba(34,211,238,0.15);color:var(--accent);display:flex;align-items:center;justify-content:center;gap:5px;position:relative;">
+                    🔔 Alertas
+                    <span id="portal-inbox-badge" style="display:${unreadCount > 0 ? 'flex' : 'none'};align-items:center;justify-content:center;background:#ef4444;color:#fff;font-size:10px;font-weight:900;width:18px;height:18px;border-radius:50%;position:absolute;top:-5px;right:-3px;">${unreadCount}</span>
+                </button>
+                <button id="tab-btn-datos" onclick="window.switchPortalTab('datos')" style="flex:1;padding:10px 6px;border-radius:12px;border:none;font-size:13px;font-weight:700;cursor:pointer;transition:all 0.2s;background:transparent;color:rgba(255,255,255,0.5);">
+                    📋 Mis Datos
+                </button>
+                <button id="tab-btn-recetas" onclick="window.switchPortalTab('recetas')" style="flex:1;padding:10px 6px;border-radius:12px;border:none;font-size:13px;font-weight:700;cursor:pointer;transition:all 0.2s;background:transparent;color:rgba(255,255,255,0.5);">
+                    💊 Recetas
+                </button>
+            </div>
+
+            <!-- TAB 1: ALERTAS -->
+            <div id="portal-tab-alertas" style="display:block;">
+                ${medsAlert}
+                ${apptCard}
+                <div style="border-bottom:1px solid rgba(255,255,255,0.07);margin-bottom:14px;padding-bottom:4px;display:flex;align-items:center;gap:8px;">
+                    <span style="color:rgba(255,255,255,0.5);font-size:11px;text-transform:uppercase;letter-spacing:1px;font-weight:600;">Bandeja de Mensajes</span>
+                    ${unreadCount > 0 ? `<span style="background:rgba(59,130,246,0.2);color:#60a5fa;font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;">${unreadCount} sin leer</span>` : ''}
+                </div>
+                ${inboxHtml}
+            </div>
+
+            <!-- TAB 2: DATOS -->
+            <div id="portal-tab-datos" style="display:none;">
+                ${datosHtml}
+            </div>
+
+            <!-- TAB 3: RECETAS -->
+            <div id="portal-tab-recetas" style="display:none;" id="portal-recetas-container">
+            </div>
+
+            <!-- CERRAR SESIÓN -->
+            <button onclick="localStorage.removeItem('user_qsl_code');localStorage.removeItem('user_role');window.location.href='index.html';"
+                style="width:100%;margin-top:28px;padding:15px;background:rgba(15,23,42,0.4);color:rgba(255,255,255,0.4);border:1px solid rgba(255,255,255,0.06);border-radius:14px;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;transition:all 0.3s;"
+                onmouseover="this.style.background='rgba(239,68,68,0.1)';this.style.color='#ef4444';this.style.borderColor='rgba(239,68,68,0.3)';"
+                onmouseout="this.style.background='rgba(15,23,42,0.4)';this.style.color='rgba(255,255,255,0.4)';this.style.borderColor='rgba(255,255,255,0.06)';">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                Cerrar Sesión Segura
+            </button>
+        </div>`;
+
+        // Renderizar recetas dentro del tab
+        window._portalMedsData = data;
+        window._renderPortalRecetas(data);
+    }
+
+    window._renderPortalRecetas = function(data) {
+        data = data || window._portalMedsData || {};
+        data.meds = data.meds || [];
+        const pQsl = selectedPatientQSL;
+        const container = document.getElementById('portal-tab-recetas');
+        if (!container) return;
+
+        if (data.meds.length === 0) {
+            container.innerHTML = `<div style="text-align:center;padding:40px 20px;background:rgba(0,0,0,0.15);border-radius:16px;border:1px dashed rgba(255,255,255,0.08);">
+                <div style="font-size:40px;margin-bottom:12px;">💊</div>
+                <h4 style="color:rgba(255,255,255,0.8);font-size:15px;margin-bottom:8px;">Sin recetas activas</h4>
+                <p style="color:rgba(255,255,255,0.4);font-size:13px;">Su médico aún no ha asignado medicamentos.</p>
+            </div>`;
+            return;
+        }
+
+        // Glucosa y presión si habilitado
+        let vitalsHtml = '';
+        if (data.glucoseEnabled) {
+            vitalsHtml += `<div style="background:rgba(0,0,0,0.2);border:1px dashed rgba(255,255,255,0.1);border-radius:16px;padding:14px;margin-bottom:12px;">
+                <p style="color:var(--accent);font-size:12px;font-weight:700;text-transform:uppercase;margin-bottom:8px;">📊 Glucosa (mg/dL)</p>
+                <div style="display:flex;gap:8px;">
+                    <input type="number" id="portal-glucose" placeholder="Ej: 98" style="flex:1;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:10px;color:white;font-size:15px;">
+                    <button onclick="window.addQuickGlucose()" style="background:rgba(34,211,238,0.15);border:1px solid rgba(34,211,238,0.3);color:var(--accent);padding:0 16px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;">Registrar</button>
+                </div>
+            </div>`;
+        }
+        if (data.pressureEnabled) {
+            vitalsHtml += `<div style="background:rgba(0,0,0,0.2);border:1px dashed rgba(255,255,255,0.1);border-radius:16px;padding:14px;margin-bottom:12px;">
+                <p style="color:#f87171;font-size:12px;font-weight:700;text-transform:uppercase;margin-bottom:8px;">❤️ Presión Arterial</p>
+                <div style="display:flex;gap:8px;">
+                    <input type="text" id="portal-pressure" placeholder="Ej: 120/80" style="flex:1;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:10px;color:white;font-size:15px;">
+                    <button onclick="window.addQuickPressure()" style="background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.3);color:#f87171;padding:0 16px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;">Registrar</button>
+                </div>
+            </div>`;
+        }
+
+        const medsHtml = data.meds.map(m => {
+            const isDue = isDoseDue(m.id, m.startTime, m.frequency);
+            const nextDose = calculateNextDose(m.startTime, m.frequency);
+            const schedule = window.getDailySchedule ? window.getDailySchedule(m.startTime, m.frequency) : m.startTime;
+            return `<div style="background:${isDue ? 'rgba(34,211,238,0.1)' : 'rgba(255,255,255,0.04)'};border:1px solid ${isDue ? 'rgba(34,211,238,0.4)' : 'rgba(255,255,255,0.1)'};border-radius:16px;padding:16px;margin-bottom:12px;${isDue ? 'animation:pulse 2s infinite;box-shadow:0 4px 20px rgba(34,211,238,0.15);' : ''}">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;gap:8px;">
+                    <h4 style="color:#fff;font-size:16px;font-weight:700;margin:0;text-transform:uppercase;">${m.name}</h4>
+                    <span style="background:${isDue ? 'var(--accent)' : 'rgba(255,255,255,0.08)'};color:${isDue ? '#000' : '#fff'};padding:4px 10px;border-radius:8px;font-size:11px;font-weight:700;white-space:nowrap;">${nextDose}</span>
+                </div>
+                <p style="color:rgba(255,255,255,0.65);font-size:13px;margin:0 0 8px 0;">Dosis: ${m.dose}</p>
+                <p style="color:rgba(255,255,255,0.4);font-size:12px;margin:0 0 ${isDue ? '12px' : '0'} 0;">🕐 ${schedule}</p>
+                ${isDue ? `<button onclick="window.markTaken(${m.id})" style="width:100%;background:linear-gradient(135deg,#10b981,#059669);color:#fff;border:none;padding:12px;border-radius:12px;font-weight:700;font-size:14px;cursor:pointer;">✓ CONFIRMAR TOMA</button>` : ''}
+            </div>`;
+        }).join('');
+
+        container.innerHTML = vitalsHtml + medsHtml;
+    };
+
+    window.switchPortalTab = function(tab) {
+        ['alertas','datos','recetas'].forEach(t => {
+            const panel = document.getElementById(`portal-tab-${t}`);
+            const btn   = document.getElementById(`tab-btn-${t}`);
+            if (!panel || !btn) return;
+            const active = t === tab;
+            panel.style.display = active ? 'block' : 'none';
+            btn.style.background  = active ? 'rgba(34,211,238,0.15)' : 'transparent';
+            btn.style.color       = active ? 'var(--accent)' : 'rgba(255,255,255,0.5)';
+        });
+    };
+
+    window.markInboxRead = function(qsl, idx) {
+        const key = `patient_inbox_${qsl}`;
+        const inbox = JSON.parse(localStorage.getItem(key) || '[]');
+        if (inbox[idx]) { inbox[idx].leido = true; localStorage.setItem(key, JSON.stringify(inbox)); }
+        // Recargar portal
+        loadSection('patient_portal');
+    };
+
     function renderReminders(data) {
         data = data || {};
         data.meds = data.meds || [];
@@ -3094,7 +3523,7 @@ function renderSection(name, data) {
                     <hr style="border:0; border-top: 1px solid var(--card-border); margin: 20px 0;">
                     
                     <h4 style="color:#10b981; margin-bottom:15px; font-size:18px;">Notificaciones de Cola Automatizadas</h4>
-                    <p style="color:rgba(255,255,255,0.7);font-size:14px;margin-bottom:15px;line-height:1.4;">El sistema alertará a los pacientes automáticamente sobre cuántos turnos les faltan ("Faltan 5 pacientes...", "Falta 1 paciente..."). Elija por dónde recibirán estas alertas.</p>
+                    <p style="color:rgba(255,255,255,0.7);font-size:14px;margin-bottom:15px;line-height:1.4;">El sistema alertará a los pacientes automáticamente sobre cuántos turnos les faltan (desde "Faltan 6 turnos..." hasta "¡Es su turno!"). Elija por dónde recibirán estas alertas.</p>
                     <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:20px; background:rgba(0,0,0,0.2); padding:15px; border-radius:12px; border:1px solid rgba(255,255,255,0.05);">
                         <label style="display:flex; align-items:center; gap:10px; cursor:pointer;" onclick="localStorage.setItem('notification_preference','whatsapp')">
                             <input type="radio" name="notif_pref" value="whatsapp" ${localStorage.getItem('notification_preference') === 'whatsapp' ? 'checked' : ''} style="width:18px;height:18px;accent-color:#10b981;">
@@ -3624,51 +4053,132 @@ function renderSection(name, data) {
     // --- MÓDULO PROGRAMADOR ---
     async function renderProgrammer() {
         let centros = [];
+        let fromCloud = false;
         try {
             const resp = await fetch('/api/centros');
             const result = await resp.json();
-            centros = result.centros || [];
+            const cloudCentros = result.centros || [];
+            const localCentros = JSON.parse(localStorage.getItem('tabla_centros') || '[]');
+
+            if (cloudCentros.length > 0) {
+                // Merge: combinar nube + local, sin duplicados por id_centro
+                const merged = [...cloudCentros];
+                localCentros.forEach(lc => {
+                    if (!merged.find(c => c.id_centro === lc.id_centro)) merged.push(lc);
+                });
+                centros = merged;
+                fromCloud = true;
+            } else if (localCentros.length > 0) {
+                // API vacía pero localStorage tiene datos — CONSERVAR y re-sincronizar
+                centros = localCentros;
+                console.warn('[SISDEL] API devolvió lista vacía pero localStorage tiene datos. Re-sincronizando...');
+                // Re-push each local centro to the API silently
+                localCentros.forEach(async (c) => {
+                    try {
+                        await fetch(`/api/centro/${c.id_centro}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(c)
+                        });
+                    } catch(e2) {}
+                });
+            } else {
+                centros = [];
+            }
         } catch (e) {
+            // Red caída — usar localStorage sin tocar nada
             centros = JSON.parse(localStorage.getItem('tabla_centros') || '[]');
+        }
+        // Siempre persistir la lista final en localStorage (protección)
+        if (centros.length > 0) {
+            localStorage.setItem('tabla_centros', JSON.stringify(centros));
         }
         
         contentArea.innerHTML = `
             <div class="programmer-dashboard animate-in">
-                <div style="display: grid; grid-template-columns: 1fr 400px; gap: 30px;">
-                    <div class="widget-card" style="border: 3px solid #fbbf24; box-shadow: 0 0 20px rgba(251, 191, 36, 0.1);">
-                        <h3 class="widget-title" style="color: #fbbf24; border-bottom: 2px solid rgba(251, 191, 36, 0.2); padding-bottom: 20px;">
-                            Centros Médicos Registrados
+
+                <!-- HEADER CON STATS Y ESTADO DE DATOS -->
+                <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:16px; margin-bottom:28px;">
+                    <div style="background:linear-gradient(135deg,rgba(251,191,36,0.12),rgba(251,191,36,0.04)); border:1px solid rgba(251,191,36,0.3); border-radius:16px; padding:20px; text-align:center;">
+                        <div style="font-size:32px; font-weight:800; color:#fbbf24;">${centros.length}</div>
+                        <div style="font-size:12px; color:rgba(255,255,255,0.5); margin-top:4px; text-transform:uppercase; letter-spacing:1px;">Centros Activos</div>
+                    </div>
+                    <div style="background:linear-gradient(135deg,rgba(96,165,250,0.12),rgba(96,165,250,0.04)); border:1px solid rgba(96,165,250,0.3); border-radius:16px; padding:20px; text-align:center;">
+                        <div style="font-size:32px; font-weight:800; color:#60a5fa;">${centros.reduce((a,c)=>a+(parseInt(c.max_medicos)||0),0)}</div>
+                        <div style="font-size:12px; color:rgba(255,255,255,0.5); margin-top:4px; text-transform:uppercase; letter-spacing:1px;">Licencias Totales</div>
+                    </div>
+                    <div style="background:linear-gradient(135deg,rgba(16,185,129,0.12),rgba(16,185,129,0.04)); border:1px solid rgba(16,185,129,0.3); border-radius:16px; padding:20px; text-align:center;">
+                        <div style="font-size:22px; font-weight:800; color:${fromCloud ? '#10b981' : '#f59e0b'};">${fromCloud ? '☁️ NUBE' : '💾 LOCAL'}</div>
+                        <div style="font-size:12px; color:rgba(255,255,255,0.5); margin-top:4px; text-transform:uppercase; letter-spacing:1px;">Fuente de Datos</div>
+                    </div>
+                    <div style="background:linear-gradient(135deg,rgba(168,85,247,0.12),rgba(168,85,247,0.04)); border:1px solid rgba(168,85,247,0.3); border-radius:16px; padding:20px; text-align:center;">
+                        <div style="font-size:14px; font-weight:700; color:#c084fc;">${localStorage.getItem('centros_last_backup') ? new Date(localStorage.getItem('centros_last_backup')).toLocaleDateString('es-ES') : 'Sin backup'}</div>
+                        <div style="font-size:12px; color:rgba(255,255,255,0.5); margin-top:4px; text-transform:uppercase; letter-spacing:1px;">Último Backup</div>
+                    </div>
+                </div>
+
+                <!-- BARRA DE ACCIONES DE SEGURIDAD -->
+                <div style="background:rgba(251,191,36,0.06); border:1px solid rgba(251,191,36,0.2); border-radius:14px; padding:16px 20px; margin-bottom:24px; display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
+                    <span style="color:#fbbf24; font-size:13px; font-weight:700; flex:1;">🔐 Seguridad de Datos — Realiza backups frecuentes para proteger tu información</span>
+                    <button onclick="window.exportarDatosSisdel()" style="background:linear-gradient(135deg,#fbbf24,#f59e0b); color:#000; border:none; padding:10px 20px; border-radius:10px; font-weight:800; font-size:13px; cursor:pointer; display:flex; align-items:center; gap:8px;">
+                        ⬇️ Exportar Backup JSON
+                    </button>
+                    <button onclick="window.importarDatosSisdel()" style="background:rgba(96,165,250,0.15); color:#60a5fa; border:1px solid rgba(96,165,250,0.3); padding:10px 20px; border-radius:10px; font-weight:700; font-size:13px; cursor:pointer;">
+                        ⬆️ Importar / Restaurar
+                    </button>
+                </div>
+
+                <div style="display: grid; grid-template-columns: 1fr 420px; gap: 30px;">
+                    <!-- LISTA DE CENTROS -->
+                    <div class="widget-card" style="border: 2px solid rgba(251,191,36,0.3); box-shadow: 0 0 30px rgba(251, 191, 36, 0.06);">
+                        <h3 class="widget-title" style="color: #fbbf24; border-bottom: 1px solid rgba(251, 191, 36, 0.15); padding-bottom: 16px; font-size:18px;">
+                            🏥 Centros Médicos Registrados (${centros.length})
                         </h3>
-                        <div class="doctor-list" style="margin-top: 30px; display: grid; gap: 20px;">
+                        <div style="margin-top: 20px; display: grid; gap: 16px;">
                             ${centros.length > 0 ? centros.map(centro => `
-                                <div class="med-item" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); padding: 20px; border-radius: 16px;">
-                                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                                        <div>
-                                            <h4 style="font-size: 20px; color: white; margin-bottom: 5px;">${centro.nombre}</h4>
-                                            <p style="color: var(--accent); font-weight: 600; font-size: 14px;">Límite de Médicos: ${centro.max_medicos}</p>
-                                        </div>
-                                        <div style="text-align: right;">
-                                            <div style="background: #fbbf24; color: #000; padding: 10px 15px; border-radius: 10px; font-weight: 800; font-size: 18px; margin-bottom: 10px; display: inline-block; letter-spacing: 2px; font-family: monospace;">
-                                                 Código Admin: ${centro.admin_code}
+                                <div style="background: linear-gradient(135deg,rgba(251,191,36,0.06),rgba(255,255,255,0.02)); border: 1px solid rgba(251,191,36,0.15); padding: 20px; border-radius: 16px; position:relative; overflow:hidden;">
+                                    <div style="position:absolute; top:0; left:0; width:4px; height:100%; background:linear-gradient(to bottom,#fbbf24,#f59e0b); border-radius:4px 0 0 4px;"></div>
+                                    <div style="padding-left:12px;">
+                                        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom:12px;">
+                                            <div>
+                                                <h4 style="font-size: 18px; color: white; margin-bottom: 4px; font-weight:700;">${centro.nombre}</h4>
+                                                <p style="color: rgba(255,255,255,0.5); font-size: 12px;">${centro.pais || ''} ${centro.nit ? '· NIT: ' + centro.nit : ''}</p>
                                             </div>
-                                            <br>
-                                            <button class="status-badge" style="background: rgba(239, 68, 68, 0.1); color: var(--error); border: 1px solid rgba(239, 68, 68, 0.2); cursor: pointer;" onclick="window.deleteCentro('${centro.id_centro}')">ELIMINAR CENTRO</button>
+                                            <div style="background: rgba(251,191,36,0.1); border:1px solid rgba(251,191,36,0.3); padding: 8px 14px; border-radius: 10px; font-weight: 800; font-size: 16px; color:#fbbf24; letter-spacing: 2px; font-family: monospace; white-space:nowrap;">
+                                                ${centro.admin_code}
+                                            </div>
+                                        </div>
+                                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:13px; margin-bottom:14px;">
+                                            <div style="color:rgba(255,255,255,0.6);">👤 Admin: <span style="color:white;">${centro.admin_nombre || 'N/D'}</span></div>
+                                            <div style="color:rgba(255,255,255,0.6);">👨‍⚕️ Límite: <span style="color:#60a5fa; font-weight:700;">${centro.max_medicos} médicos</span></div>
+                                            ${centro.admin_telefono ? `<div style="color:rgba(255,255,255,0.6);">📞 <span style="color:white;">${centro.admin_telefono}</span></div>` : ''}
+                                            ${centro.admin_correo ? `<div style="color:rgba(255,255,255,0.6);">✉️ <span style="color:white;">${centro.admin_correo}</span></div>` : ''}
+                                        </div>
+                                        <div style="display:flex; gap:10px;">
+                                            <span style="background:rgba(16,185,129,0.1); color:#34d399; font-size:11px; padding:4px 10px; border-radius:20px; border:1px solid rgba(16,185,129,0.2);">✓ Activo</span>
+                                            <button style="background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.2); font-size:11px; padding:4px 10px; border-radius:20px; cursor:pointer; font-weight:600;" onclick="window.deleteCentro('${centro.id_centro}')">🗑 Eliminar</button>
                                         </div>
                                     </div>
                                 </div>
-                            `).join('') : '<div style="text-align:center; padding: 40px; border: 2px dashed rgba(255,255,255,0.05); border-radius: 20px; color: var(--text-muted);">No hay centros médicos registrados todavía.</div>'}
+                            `).join('') : `
+                                <div style="text-align:center; padding: 60px 20px; border: 2px dashed rgba(255,255,255,0.06); border-radius: 20px;">
+                                    <div style="font-size:40px; margin-bottom:12px;">🏥</div>
+                                    <p style="color:var(--text-muted); font-size:14px;">No hay centros médicos registrados.</p>
+                                    <p style="color:rgba(255,255,255,0.3); font-size:12px; margin-top:6px;">Usa el formulario para crear el primero.</p>
+                                </div>`}
                         </div>
                     </div>
 
-                    <div class="widget-card" style="border: 2px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2);">
-                        <h3 class="widget-title" style="font-size: 22px; color: #fbbf24;">Registrar Nuevo Centro Médico</h3>
+                    <!-- FORMULARIO NUEVO CENTRO -->
+                    <div class="widget-card" style="border: 1px solid rgba(251,191,36,0.15); background: rgba(0,0,0,0.3);">
+                        <h3 class="widget-title" style="font-size: 18px; color: #fbbf24; margin-bottom:20px;">➕ Registrar Nuevo Centro Médico</h3>
                         <div class="input-group" style="margin-bottom: 12px;">
                             <label>Nombre del Centro Médico</label>
                             <input type="text" id="centro-new-nombre" placeholder="Ej. Clínicas Alfa">
                         </div>
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 12px;">
                             <div class="input-group">
-                                <label>Límite de Médicos a Crear</label>
+                                <label>Límite de Médicos</label>
                                 <input type="number" id="centro-new-limite" placeholder="Ej. 5">
                             </div>
                             <div class="input-group">
@@ -3682,13 +4192,15 @@ function renderSection(name, data) {
                             <label id="centro-nit-label">NIT / Id Fiscal</label>
                             <input type="text" id="centro-new-nit" placeholder="Identificador">
                         </div>
-                        <h4 style="font-size: 16px; color: #fbbf24; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 15px; margin-top: 5px;">Datos del Administrador General</h4>
+                        <div style="border-top:1px solid rgba(255,255,255,0.08); margin:16px 0; padding-top:14px;">
+                            <h4 style="font-size: 14px; color: #fbbf24; margin-bottom:14px; font-weight:700;">👤 Datos del Administrador General</h4>
+                        </div>
                         <div class="input-group" style="margin-bottom: 12px;">
                             <label>Nombre Completo</label>
                             <input type="text" id="centro-admin-nombre" placeholder="Ej. Juan Pérez">
                         </div>
                         <div class="input-group" style="margin-bottom: 12px;">
-                            <label>Número de Identificación ID (Llave primaria)</label>
+                            <label>Número de Identificación (Llave Primaria)</label>
                             <input type="text" id="centro-admin-id" placeholder="Clave Primaria">
                         </div>
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 12px;">
@@ -3702,9 +4214,27 @@ function renderSection(name, data) {
                             </div>
                         </div>
                         
-                        <button class="btn-primary" style="width: 100%; background: #fbbf24; color: #000; font-weight: 800; padding: 22px; font-size: 18px; margin-top: 25px;" onclick="window.saveNewCentro()">
-                            CREAR CENTRO MEDICO
+                        <button class="btn-primary" style="width: 100%; background: linear-gradient(135deg,#fbbf24,#f59e0b); color: #000; font-weight: 800; padding: 18px; font-size: 16px; margin-top: 16px; border-radius:14px; letter-spacing:0.5px;" onclick="window.saveNewCentro()">
+                            🏥 CREAR CENTRO MÉDICO
                         </button>
+
+                        <!-- CONTACTO SISDEL EN EL PANEL PROGRAMADOR -->
+                        <div style="margin-top:24px; background:linear-gradient(135deg,rgba(34,211,238,0.06),rgba(34,211,238,0.02)); border:1px solid rgba(34,211,238,0.2); border-radius:14px; padding:18px;">
+                            <p style="font-size:11px; color:#22d3ee; font-weight:700; text-transform:uppercase; letter-spacing:1px; margin-bottom:12px;">📞 Soporte SISDEL Internacional</p>
+                            <a href="https://wa.me/50243093379" target="_blank" style="display:flex; align-items:center; gap:10px; text-decoration:none; background:rgba(37,211,102,0.1); border:1px solid rgba(37,211,102,0.2); border-radius:10px; padding:10px 14px; color:#4ade80; font-weight:700; font-size:13px; margin-bottom:8px; transition:all 0.2s;" onmouseover="this.style.background='rgba(37,211,102,0.2)'" onmouseout="this.style.background='rgba(37,211,102,0.1)'">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="#4ade80"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
+                                WhatsApp: (502) 4309-3379
+                            </a>
+                            <a href="tel:+50224584164" style="display:flex; align-items:center; gap:10px; text-decoration:none; background:rgba(96,165,250,0.1); border:1px solid rgba(96,165,250,0.2); border-radius:10px; padding:10px 14px; color:#60a5fa; font-weight:700; font-size:13px; margin-bottom:8px; transition:all 0.2s;" onmouseover="this.style.background='rgba(96,165,250,0.2)'" onmouseout="this.style.background='rgba(96,165,250,0.1)'">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 013.07 9.81a19.79 19.79 0 01-3.07-8.72A2 2 0 012 .93h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L6.09 8.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>
+                                Llamar: (502) 2458-4164
+                            </a>
+                            <a href="mailto:sisdelsoluciones@gmail.com" style="display:flex; align-items:center; gap:10px; text-decoration:none; background:rgba(251,191,36,0.08); border:1px solid rgba(251,191,36,0.2); border-radius:10px; padding:10px 14px; color:#fbbf24; font-weight:700; font-size:13px; transition:all 0.2s;" onmouseover="this.style.background='rgba(251,191,36,0.18)'" onmouseout="this.style.background='rgba(251,191,36,0.08)'">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                                sisdelsoluciones@gmail.com
+                            </a>
+                            <p style="font-size:11px; color:rgba(255,255,255,0.35); margin-top:10px; text-align:center;">www.sisdel.net</p>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -3797,8 +4327,73 @@ function renderSection(name, data) {
         centrosLocales.push(nuevoCentro);
         localStorage.setItem('tabla_centros', JSON.stringify(centrosLocales));
 
+        // ✅ AUTO-BACKUP: snapshot con timestamp para recuperación ante pérdida
+        const backupKey = 'centros_backup_' + new Date().toISOString().slice(0, 10);
+        localStorage.setItem(backupKey, JSON.stringify(centrosLocales));
+        localStorage.setItem('centros_last_backup', new Date().toISOString());
+
         window.showElegantAlert('Centro Registrado', `Se ha generado el Centro ${nombre} para el administrador ${adminNombre}. El código de acceso del sistema es: ${admin_code}`);
         renderProgrammer();
+    };
+
+    // ✅ EXPORTAR DATOS: descarga JSON completo de centros y médicos
+    window.exportarDatosSisdel = () => {
+        const centros = JSON.parse(localStorage.getItem('tabla_centros') || '[]');
+        const medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const payload = {
+            exportado_en: new Date().toLocaleString('es-ES'),
+            version: 'DR-SISDEL-v1',
+            centros,
+            medicos
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `sisdel_backup_${timestamp}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        window.showElegantAlert('Backup Exportado', 'El archivo JSON con todos los datos fue descargado. Guárdalo en un lugar seguro.');
+    };
+
+    // ✅ IMPORTAR DATOS: restaurar desde archivo JSON exportado
+    window.importarDatosSisdel = () => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json';
+        input.onchange = (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                try {
+                    const data = JSON.parse(ev.target.result);
+                    if (data.centros) {
+                        const local = JSON.parse(localStorage.getItem('tabla_centros') || '[]');
+                        const merged = [...local];
+                        data.centros.forEach(c => {
+                            if (!merged.find(m => m.id_centro === c.id_centro)) merged.push(c);
+                        });
+                        localStorage.setItem('tabla_centros', JSON.stringify(merged));
+                    }
+                    if (data.medicos) {
+                        const localM = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+                        const mergedM = [...localM];
+                        data.medicos.forEach(m => {
+                            if (!mergedM.find(x => x.id_medico === m.id_medico)) mergedM.push(m);
+                        });
+                        localStorage.setItem('tabla_medicos', JSON.stringify(mergedM));
+                    }
+                    window.showElegantAlert('Importación Exitosa', `Se restauraron ${data.centros?.length || 0} centros y ${data.medicos?.length || 0} médicos.`);
+                    renderProgrammer();
+                } catch(err) {
+                    window.showElegantAlert('Error', 'El archivo no es válido o está corrupto.', true);
+                }
+            };
+            reader.readAsText(file);
+        };
+        input.click();
     };
 
     window.deleteCentro = async (id) => {
@@ -4624,6 +5219,462 @@ function renderSection(name, data) {
         } else {
             proceedSave(null, false);
         }
+    };
+
+    // ============================================================
+    // MÓDULO DE CONFIGURACIÓN: PRIVILEGIOS Y APARIENCIA
+    // Inspirado en MULTISYS — adaptado para DR-SISDEL
+    // ============================================================
+
+    // Catálogo de privilegios de DR-SISDEL
+    const SISDEL_PRIVILEGES = {
+        pacientes: {
+            label: '👤 Pacientes', color: '#22d3ee',
+            items: [
+                { id: 'ver_pacientes', label: 'Ver pacientes', desc: 'Buscar y acceder a expedientes de pacientes' },
+                { id: 'editar_pacientes', label: 'Editar pacientes', desc: 'Modificar datos clínicos del expediente', sensitive: true },
+                { id: 'eliminar_registros', label: 'Eliminar registros', desc: 'Borrar datos del historial médico', sensitive: true },
+            ]
+        },
+        consultas: {
+            label: '🩺 Consultas Médicas', color: '#34d399',
+            items: [
+                { id: 'realizar_consulta', label: 'Registrar consulta', desc: 'Crear nuevas consultas y evoluciones' },
+                { id: 'ver_historial', label: 'Ver historial', desc: 'Acceder al historial completo de consultas' },
+                { id: 'gestionar_recetas', label: 'Gestionar recetas', desc: 'Crear y administrar recetas médicas' },
+                { id: 'gestionar_laboratorios', label: 'Laboratorios', desc: 'Adjuntar y ver resultados de laboratorio' },
+            ]
+        },
+        agenda: {
+            label: '📅 Agenda y Citas', color: '#60a5fa',
+            items: [
+                { id: 'gestionar_citas', label: 'Gestionar citas', desc: 'Crear, editar y cancelar citas' },
+                { id: 'ver_agenda', label: 'Ver agenda', desc: 'Ver el calendario de citas del médico' },
+            ]
+        },
+        mensajeria: {
+            label: '📨 Mensajería', color: '#f59e0b',
+            items: [
+                { id: 'enviar_alertas', label: 'Enviar alertas', desc: 'Enviar notificaciones individuales a pacientes' },
+                { id: 'mensajeria_masiva', label: 'Mensajería masiva', desc: 'Enviar mensajes a grupos de pacientes', sensitive: true },
+            ]
+        },
+        sistema: {
+            label: '⚙️ Sistema', color: '#c084fc',
+            items: [
+                { id: 'gestionar_medicos', label: 'Gestionar médicos', desc: 'Agregar y eliminar cuentas de médicos', sensitive: true },
+                { id: 'ver_estadisticas', label: 'Ver estadísticas', desc: 'Ver reportes y estadísticas del centro' },
+            ]
+        }
+    };
+
+    // Catálogo de temas visuales
+    const SISDEL_THEMES = [
+        { id: 'tema-oscuro', name: 'Oscuro', desc: 'Tema predeterminado', primary: '#4f46e5', accent: '#22d3ee', bg: '#0f172a' },
+        { id: 'tema-claro', name: 'Claro', desc: 'Interfaz clara y limpia', primary: '#4f46e5', accent: '#0ea5e9', bg: '#f1f5f9' },
+        { id: 'tema-premium', name: 'Premium', desc: 'Estilo oscuro y elegante', primary: '#7c3aed', accent: '#f59e0b', bg: '#0f0a1a' },
+        { id: 'tema-medico-azul', name: 'Médico Azul', desc: 'Ambiente clínico azul', primary: '#1d4ed8', accent: '#38bdf8', bg: '#0c1a2e' },
+        { id: 'tema-medico-verde', name: 'Médico Verde', desc: 'Ambiente clínico verde', primary: '#059669', accent: '#34d399', bg: '#071a0e' },
+        { id: 'tema-suave', name: 'Suave', desc: 'Tonos suaves y calmados', primary: '#6366f1', accent: '#a78bfa', bg: '#1e1b2e' },
+    ];
+
+    // Aplicar tema al documento
+    function aplicarTema(temaId) {
+        SISDEL_THEMES.forEach(t => document.body.classList.remove(t.id));
+        if (temaId) document.body.classList.add(temaId);
+        localStorage.setItem('sisdel_tema', temaId || 'tema-oscuro');
+    }
+
+    // Aplicar tema guardado al cargar
+    (function() {
+        const temaGuardado = localStorage.getItem('sisdel_tema') || 'tema-oscuro';
+        aplicarTema(temaGuardado);
+    })();
+
+    // Cargar apariencia desde Firestore al inicio
+    (async function cargarAparienciaFirestore() {
+        try {
+            const id_centro = localStorage.getItem('id_centro') || 'global';
+            const resp = await fetch(`/api/settings/appearance?id_centro=${id_centro}`);
+            const result = await resp.json();
+            if (result.success && result.appearance.tema) {
+                aplicarTema(result.appearance.tema);
+            }
+        } catch(e) { /* sin conexión, usar localStorage */ }
+    })();
+
+    // ---- RENDER TABS MÓDULO PROGRAMADOR (con Configuración) ----
+    const _originalRenderProgrammer = renderProgrammer;
+    renderProgrammer = async function() {
+        // Llamar al original para cargar datos de centros
+        await _originalRenderProgrammer();
+        // Agregar tabs encima del contenido existente
+        injectConfigTabs('programmer');
+    };
+
+    function injectConfigTabs(role) {
+        const existing = contentArea.innerHTML;
+        const tabsHtml = `
+        <div class="config-tabs" id="config-tabs-bar" style="margin-bottom:24px;">
+            <button class="config-tab-btn active" onclick="window.switchConfigTab('centros', this)">${role === 'admin_general' ? '👨‍⚕️ Médicos' : '🏥 Centros'}</button>
+            ${role === 'programmer' ? `<button class="config-tab-btn" onclick="window.switchConfigTab('medicos', this)">👨‍⚕️ Médicos</button>` : ''}
+            <button class="config-tab-btn" onclick="window.switchConfigTab('privilegios', this)">🔐 Privilegios</button>
+            <button class="config-tab-btn" onclick="window.switchConfigTab('apariencia', this)">🎨 Apariencia</button>
+        </div>
+        <div id="config-tab-content">
+            ${existing}
+        </div>`;
+        contentArea.innerHTML = tabsHtml;
+    }
+
+    window.switchConfigTab = async function(tab, btn) {
+        document.querySelectorAll('.config-tab-btn').forEach(b => b.classList.remove('active'));
+        if (btn) btn.classList.add('active');
+        const tabContent = document.getElementById('config-tab-content');
+        if (!tabContent) return;
+        tabContent.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>Cargando...</p></div>`;
+
+        if (tab === 'centros') {
+            // Recargar el módulo completo del rol actual
+            if (qslCode === 'MED-MASTER') await _originalRenderProgrammer();
+            else await _originalRenderAdminGeneral();
+            const existing = contentArea.innerHTML;
+            // Volver a inyectar tabs
+            injectConfigTabs(qslCode === 'MED-MASTER' ? 'programmer' : 'admin_general');
+            // Marcar el tab activo correcto
+            document.querySelectorAll('.config-tab-btn').forEach(b => {
+                if (b.textContent.includes('Centros') || b.textContent.includes('Médicos')) b.classList.add('active');
+            });
+        } else if (tab === 'medicos') {
+            tabContent.innerHTML = await buildMedicosTab();
+        } else if (tab === 'privilegios') {
+            tabContent.innerHTML = await buildPrivilegiosTab();
+        } else if (tab === 'apariencia') {
+            tabContent.innerHTML = buildAparienciaTab();
+            setupAparienciaListeners();
+        }
+    };
+
+    // ---- TAB: MÉDICOS (crear / gestionar) ----
+    async function buildMedicosTab() {
+        let medicos = [];
+        try {
+            const resp = await fetch('/api/medicos');
+            const result = await resp.json();
+            medicos = result.medicos || [];
+        } catch(e) {
+            medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+        }
+
+        const medicosHtml = medicos.length > 0 ? medicos.map(m => `
+            <div style="background:linear-gradient(135deg,rgba(96,165,250,0.08),rgba(96,165,250,0.02)); border:1px solid rgba(96,165,250,0.2); border-radius:16px; padding:18px; position:relative; display:flex; align-items:center; gap:16px;">
+                <div style="width:48px; height:48px; border-radius:50%; background:linear-gradient(135deg,#1d4ed8,#60a5fa); display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:800; color:white; flex-shrink:0;">${(m.nombre_completo||m.usuario||'?').charAt(0).toUpperCase()}</div>
+                <div style="flex:1; min-width:0;">
+                    <h4 style="color:white; font-size:16px; font-weight:700; margin-bottom:3px;">${m.nombre_completo || m.usuario || m.id_medico}</h4>
+                    <p style="color:rgba(255,255,255,0.5); font-size:12px;">ID: ${m.id_medico} ${m.id_centro ? '· Centro: '+m.id_centro : ''}</p>
+                </div>
+                <div style="display:flex; gap:8px;">
+                    <button onclick="window.editarMedicoForm('${m.id_medico}')" style="background:rgba(96,165,250,0.1); color:#60a5fa; border:1px solid rgba(96,165,250,0.3); padding:8px 14px; border-radius:10px; cursor:pointer; font-size:13px; font-weight:600;">✏️ Editar</button>
+                    <button onclick="window.deleteMedicoConfig('${m.id_medico}')" style="background:rgba(239,68,68,0.1); color:#f87171; border:1px solid rgba(239,68,68,0.2); padding:8px 14px; border-radius:10px; cursor:pointer; font-size:13px; font-weight:600;">🗑</button>
+                </div>
+            </div>
+        `).join('') : `<div style="text-align:center; padding:60px; border:2px dashed rgba(255,255,255,0.06); border-radius:20px;"><div style="font-size:48px; margin-bottom:12px;">👨‍⚕️</div><p style="color:var(--text-muted);">No hay médicos registrados.</p></div>`;
+
+        return `
+        <div style="display:grid; grid-template-columns:1fr 380px; gap:24px; align-items:start;">
+            <div>
+                <h3 style="color:#60a5fa; font-size:18px; font-weight:700; margin-bottom:20px;">👨‍⚕️ Médicos Registrados (${medicos.length})</h3>
+                <div style="display:grid; gap:14px;">${medicosHtml}</div>
+            </div>
+            <div class="widget-card" style="border:1px solid rgba(96,165,250,0.2); background:rgba(0,0,0,0.3); position:sticky; top:0;" id="medico-form-card">
+                <h3 class="widget-title" style="color:#60a5fa; font-size:16px; margin-bottom:20px;">➕ Nuevo Acceso de Médico</h3>
+                <div style="display:grid; gap:12px;">
+                    <div class="input-group"><label>Nombre Completo</label><input type="text" id="nm-nombre" placeholder="Dr. Juan Pérez"></div>
+                    <div class="input-group"><label>Usuario (para iniciar sesión)</label><input type="text" id="nm-usuario" placeholder="juan.perez"></div>
+                    <div class="input-group"><label>Contraseña</label><input type="password" id="nm-pass" placeholder="Contraseña segura"></div>
+                    <div class="input-group"><label>Especialidad (opcional)</label><input type="text" id="nm-especialidad" placeholder="Medicina General"></div>
+                    <div class="input-group"><label>Centro Médico (ID)</label><input type="text" id="nm-centro" placeholder="ID del centro (opcional)"></div>
+                    <button onclick="window.crearNuevoMedico()" style="width:100%; padding:14px; background:linear-gradient(135deg,#1d4ed8,#60a5fa); color:white; font-weight:800; border-radius:12px; border:none; cursor:pointer; font-size:15px; margin-top:8px;">CREAR ACCESO</button>
+                </div>
+            </div>
+        </div>`;
+    }
+
+    window.crearNuevoMedico = async function() {
+        const nombre = document.getElementById('nm-nombre')?.value.trim();
+        const usuario = document.getElementById('nm-usuario')?.value.trim();
+        const pass = document.getElementById('nm-pass')?.value.trim();
+        const especialidad = document.getElementById('nm-especialidad')?.value.trim();
+        const centro = document.getElementById('nm-centro')?.value.trim();
+
+        if (!nombre || !usuario || !pass) {
+            window.showElegantAlert('⚠️ Campos requeridos', 'Nombre, usuario y contraseña son obligatorios.', '⚠️');
+            return;
+        }
+
+        const id_medico = 'MED-' + Date.now();
+        const password_hash = btoa(pass);
+        const medData = { nombre_completo: nombre, usuario, password_hash, especialidad: especialidad || '', id_centro: centro || '', created_at: new Date().toISOString() };
+
+        try {
+            await fetch(`/api/medico/${id_medico}`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(medData) });
+            // También guardar en localStorage
+            const local = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            local.push({ id_medico, ...medData });
+            localStorage.setItem('tabla_medicos', JSON.stringify(local));
+            window.showElegantAlert('✅ Acceso Creado', `El médico ${nombre} ya puede iniciar sesión con su usuario.`);
+            window.switchConfigTab('medicos', null);
+        } catch(e) {
+            window.showElegantAlert('❌ Error', 'No se pudo guardar el médico. Revisa la conexión.');
+        }
+    };
+
+    window.deleteMedicoConfig = async function(id) {
+        if (!confirm('¿Eliminar este acceso de médico?')) return;
+        try {
+            await fetch(`/api/medico/${id}`, { method: 'DELETE' });
+            const local = JSON.parse(localStorage.getItem('tabla_medicos') || '[]').filter(m => m.id_medico !== id);
+            localStorage.setItem('tabla_medicos', JSON.stringify(local));
+            window.switchConfigTab('medicos', null);
+        } catch(e) { window.showElegantAlert('❌ Error', 'No se pudo eliminar.'); }
+    };
+
+    // ---- TAB: PRIVILEGIOS (visual estilo MULTISYS) ----
+    async function buildPrivilegiosTab() {
+        let medicos = [];
+        try {
+            const resp = await fetch('/api/medicos');
+            const result = await resp.json();
+            medicos = result.medicos || [];
+        } catch(e) {
+            medicos = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+        }
+
+        if (medicos.length === 0) {
+            return `<div style="text-align:center; padding:80px; border:2px dashed rgba(255,255,255,0.06); border-radius:20px;"><div style="font-size:48px; margin-bottom:16px;">🔐</div><p style="color:var(--text-muted); font-size:16px;">No hay médicos registrados. Crea un acceso primero.</p></div>`;
+        }
+
+        const firstMed = medicos[0];
+        const userListHtml = medicos.map((m, i) => {
+            const privCount = Object.values(m.privileges || {}).filter(Boolean).length;
+            return `
+            <div class="privilege-user-item ${i === 0 ? 'selected' : ''}" onclick="window.selectPrivilegeUser('${m.id_medico}', this)" id="puser-${m.id_medico}">
+                <div class="privilege-user-avatar">${(m.nombre_completo||m.usuario||'?').charAt(0).toUpperCase()}</div>
+                <div class="privilege-user-info">
+                    <h4>${m.nombre_completo || m.usuario || m.id_medico}</h4>
+                    <p>${m.especialidad || 'Médico'}</p>
+                </div>
+                <span class="privilege-badge">${privCount}</span>
+            </div>`;
+        }).join('');
+
+        return `
+        <div class="privilege-layout">
+            <div>
+                <div style="padding:14px 18px; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted); border-bottom:1px solid rgba(255,255,255,0.06);">
+                    👥 ${medicos.length} USUARIOS
+                </div>
+                <div class="privilege-user-list">${userListHtml}</div>
+            </div>
+            <div>
+                <div id="privilege-matrix-container">
+                    ${buildPrivilegeMatrix(firstMed)}
+                </div>
+            </div>
+        </div>`;
+    }
+
+    function buildPrivilegeMatrix(medico) {
+        const privs = medico.privileges || {};
+        const totalPrivs = Object.keys(SISDEL_PRIVILEGES).reduce((a, c) => a + SISDEL_PRIVILEGES[c].items.length, 0);
+        const activePrivs = Object.values(privs).filter(Boolean).length;
+
+        const categoriesHtml = Object.entries(SISDEL_PRIVILEGES).map(([catKey, cat]) => {
+            const catActiveCount = cat.items.filter(item => privs[item.id]).length;
+            const itemsHtml = cat.items.map(item => `
+                <div class="privilege-item">
+                    <div class="privilege-item-info">
+                        <strong>
+                            ${item.label}
+                            ${item.sensitive ? '<span class="sensitive-tag">⚠️ Sensible</span>' : ''}
+                        </strong>
+                        <p>${item.desc}</p>
+                    </div>
+                    <label class="toggle-switch">
+                        <input type="checkbox" ${privs[item.id] ? 'checked' : ''}
+                            onchange="window.togglePrivilege('${medico.id_medico}', '${item.id}', this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            `).join('');
+
+            return `
+            <div class="privilege-category-card">
+                <div class="privilege-category-header" style="color:${cat.color}; background: rgba(0,0,0,0.15);">
+                    ${cat.label}
+                    <span style="margin-left:auto; background:rgba(255,255,255,0.08); padding:2px 8px; border-radius:8px; font-size:11px; color:rgba(255,255,255,0.5);">${catActiveCount}/${cat.items.length}</span>
+                </div>
+                ${itemsHtml}
+            </div>`;
+        }).join('');
+
+        return `
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; flex-wrap:wrap; gap:12px;">
+            <div>
+                <h3 style="color:white; font-size:18px; font-weight:700;">${medico.nombre_completo || medico.usuario || medico.id_medico}</h3>
+                <p style="color:var(--text-muted); font-size:13px;">${medico.id_medico} · ${medico.especialidad || 'Médico'} · <span style="color:#60a5fa;">${activePrivs}/${totalPrivs} privilegios activos</span></p>
+            </div>
+            <div style="display:flex; gap:10px;">
+                <button onclick="window.marcarTodosPrivilegios('${medico.id_medico}', true)" style="background:rgba(16,185,129,0.1); color:#34d399; border:1px solid rgba(16,185,129,0.3); padding:8px 16px; border-radius:10px; cursor:pointer; font-size:13px; font-weight:600;">✅ Marcar todos</button>
+                <button onclick="window.marcarTodosPrivilegios('${medico.id_medico}', false)" style="background:rgba(239,68,68,0.08); color:#f87171; border:1px solid rgba(239,68,68,0.2); padding:8px 16px; border-radius:10px; cursor:pointer; font-size:13px; font-weight:600;">🚫 Limpiar</button>
+            </div>
+        </div>
+        <div class="privilege-matrix">${categoriesHtml}</div>`;
+    }
+
+    window.selectPrivilegeUser = async function(medicoId, el) {
+        document.querySelectorAll('.privilege-user-item').forEach(i => i.classList.remove('selected'));
+        if (el) el.classList.add('selected');
+
+        const container = document.getElementById('privilege-matrix-container');
+        if (!container) return;
+        container.innerHTML = `<div class="loading-state" style="height:200px;"><div class="spinner"></div></div>`;
+
+        try {
+            const resp = await fetch(`/api/medico/${medicoId}`);
+            // medico data is stored as data field in Firestore
+            const resp2 = await fetch('/api/medicos');
+            const result = await resp2.json();
+            const medico = (result.medicos || []).find(m => m.id_medico === medicoId);
+            if (medico) container.innerHTML = buildPrivilegeMatrix(medico);
+        } catch(e) {
+            const local = JSON.parse(localStorage.getItem('tabla_medicos') || '[]').find(m => m.id_medico === medicoId);
+            if (local) container.innerHTML = buildPrivilegeMatrix(local);
+        }
+    };
+
+    window.togglePrivilege = async function(medicoId, privilegeId, value) {
+        // Obtener privilegios actuales del médico
+        let privs = {};
+        try {
+            const resp = await fetch('/api/medicos');
+            const result = await resp.json();
+            const med = (result.medicos || []).find(m => m.id_medico === medicoId);
+            privs = med?.privileges || {};
+        } catch(e) {
+            const local = JSON.parse(localStorage.getItem('tabla_medicos') || '[]').find(m => m.id_medico === medicoId);
+            privs = local?.privileges || {};
+        }
+        privs[privilegeId] = value;
+
+        try {
+            await fetch(`/api/medico/${medicoId}/privileges`, {
+                method: 'PATCH', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({ privileges: privs })
+            });
+            // Actualizar localStorage
+            const local = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            const idx = local.findIndex(m => m.id_medico === medicoId);
+            if (idx >= 0) { local[idx].privileges = privs; localStorage.setItem('tabla_medicos', JSON.stringify(local)); }
+            // Actualizar badge del usuario
+            const badge = document.querySelector(`#puser-${medicoId} .privilege-badge`);
+            if (badge) badge.textContent = Object.values(privs).filter(Boolean).length;
+        } catch(e) { console.error('Error guardando privilegio:', e); }
+    };
+
+    window.marcarTodosPrivilegios = async function(medicoId, valor) {
+        const allPrivs = {};
+        Object.values(SISDEL_PRIVILEGES).forEach(cat => cat.items.forEach(item => { allPrivs[item.id] = valor; }));
+        try {
+            await fetch(`/api/medico/${medicoId}/privileges`, {
+                method: 'PATCH', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({ privileges: allPrivs })
+            });
+            const local = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            const idx = local.findIndex(m => m.id_medico === medicoId);
+            if (idx >= 0) { local[idx].privileges = allPrivs; localStorage.setItem('tabla_medicos', JSON.stringify(local)); }
+            // Refrescar la vista
+            const selected = document.querySelector('.privilege-user-item.selected');
+            window.selectPrivilegeUser(medicoId, selected);
+        } catch(e) { window.showElegantAlert('❌ Error', 'No se pudieron actualizar los privilegios.'); }
+    };
+
+    // ---- TAB: APARIENCIA ----
+    function buildAparienciaTab() {
+        const temaActual = localStorage.getItem('sisdel_tema') || 'tema-oscuro';
+        const swatchesHtml = SISDEL_THEMES.map(t => `
+            <div class="theme-swatch ${temaActual === t.id ? 'active' : ''}"
+                 style="background: linear-gradient(135deg, ${t.bg} 0%, ${t.primary}22 100%); border-color: ${temaActual === t.id ? t.accent : 'transparent'};"
+                 onclick="window.seleccionarTema('${t.id}')">
+                <div class="theme-active-check" style="color:${t.primary};">✓</div>
+                <div class="swatch-preview">
+                    <div class="swatch-circle" style="background:${t.bg}; border:2px solid rgba(255,255,255,0.2);"></div>
+                    <div class="swatch-circle" style="background:${t.primary};"></div>
+                    <div class="swatch-circle" style="background:${t.accent};"></div>
+                </div>
+                <h4>${t.name}</h4>
+                <p>${t.desc}</p>
+            </div>
+        `).join('');
+
+        return `
+        <div style="max-width:860px;">
+            <h3 style="color:white; font-size:20px; font-weight:700; margin-bottom:8px;">🎨 Apariencia del Sistema</h3>
+            <p style="color:var(--text-muted); font-size:14px; margin-bottom:28px;">Elige el tema visual para toda la interfaz. El cambio se aplica de inmediato y se guarda en la nube.</p>
+
+            <h4 style="color:var(--text-muted); font-size:12px; text-transform:uppercase; letter-spacing:1px; margin-bottom:16px;">Temas disponibles</h4>
+            <div class="theme-grid" id="theme-grid">${swatchesHtml}</div>
+
+            <div style="margin-top:36px; padding:24px; background:rgba(0,0,0,0.2); border-radius:16px; border:1px solid rgba(255,255,255,0.06);">
+                <h4 style="color:white; font-size:15px; font-weight:700; margin-bottom:6px;">📌 Tema activo</h4>
+                <p id="tema-activo-nombre" style="color:var(--accent); font-size:18px; font-weight:800;">${SISDEL_THEMES.find(t => t.id === temaActual)?.name || 'Oscuro'}</p>
+                <p style="color:var(--text-muted); font-size:12px; margin-top:4px;">Este tema se aplica a todos los usuarios del sistema en este dispositivo.</p>
+            </div>
+        </div>`;
+    }
+
+    function setupAparienciaListeners() { /* listeners ya están en el HTML con onclick */ }
+
+    window.seleccionarTema = async function(temaId) {
+        aplicarTema(temaId);
+        // Actualizar UI de swatches
+        document.querySelectorAll('.theme-swatch').forEach(s => s.classList.remove('active'));
+        const tema = SISDEL_THEMES.find(t => t.id === temaId);
+        if (tema) {
+            document.querySelectorAll('.theme-swatch').forEach(s => {
+                if (s.getAttribute('onclick')?.includes(temaId)) {
+                    s.classList.add('active');
+                    s.style.borderColor = tema.accent;
+                }
+            });
+            const nombreEl = document.getElementById('tema-activo-nombre');
+            if (nombreEl) { nombreEl.textContent = tema.name; nombreEl.style.color = tema.accent; }
+        }
+        // Guardar en Firestore
+        try {
+            const id_centro = localStorage.getItem('id_centro') || 'global';
+            await fetch('/api/settings/appearance', {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({ id_centro, appearance: { tema: temaId } })
+            });
+        } catch(e) { /* guardar solo localmente si no hay conexión */ }
+    };
+
+    // ---- Guardar referencia al original de renderAdminGeneral ----
+    const _originalRenderAdminGeneral = renderAdminGeneral;
+
+    // Sobreescribir renderAdminGeneral para inyectar tabs
+    renderAdminGeneral = async function() {
+        await _originalRenderAdminGeneral();
+        injectConfigTabs('admin_general');
+    };
+
+    // Actualizar título de sección en configuración
+    const _origGetSectionTitle = getSectionTitle;
+    getSectionTitle = function(name) {
+        if (name === 'programmer') return 'Módulo Programador (Super Admin)';
+        if (name === 'admin_general') return 'Administración Central';
+        return _origGetSectionTitle(name);
     };
 
 });
