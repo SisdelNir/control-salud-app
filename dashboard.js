@@ -1362,17 +1362,34 @@ function renderSection(name, data) {
 
         // Construye SIEMPRE el array de pacientes desde el localStorage actual,
         // así cada re-render usa los datos más frescos (citas, recetas, etc.).
+        //
+        // REGLA DE FILTRO:
+        //   Un paciente aparece en la lista si tiene ≥1 cita futura, o si
+        //   no tiene citas. Los que sólo tienen citas pasadas (atendidas o no)
+        //   se trasladan al Historial y dejan de aparecer aquí.
         function buildPatientsArray() {
             const registry = JSON.parse(localStorage.getItem(key) || '[]');
             const allAppts = window.getAppointments ? window.getAppointments() : [];
             const now = new Date();
-            return registry.slice(-50).reverse().map(qsl => {
+            const archived = []; // pacientes movidos al historial (info para el header)
+
+            const active = registry.slice(-100).reverse().map(qsl => {
                 qsl = typeof qsl === 'string' ? qsl : (qsl.qsl || qsl.codigo || qsl.id || String(qsl));
                 const data = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}');
                 const name = data.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || qsl;
 
-                const upcoming = allAppts
-                    .filter(a => (a.qsl === qsl || a.name === name) && new Date(a.date + 'T' + (a.time || '00:00')) >= now)
+                // Citas relacionadas con este paciente
+                const patientAppts = allAppts.filter(a => a.qsl === qsl || a.name === name);
+                const futureAppts = patientAppts.filter(a => new Date(a.date + 'T' + (a.time || '00:00')) >= now);
+                const pastAppts = patientAppts.filter(a => new Date(a.date + 'T' + (a.time || '00:00')) < now);
+
+                // Si tiene SOLO citas pasadas (≥1 pasada, 0 futuras) → archivar
+                if (pastAppts.length > 0 && futureAppts.length === 0) {
+                    archived.push({ qsl, name });
+                    return null;
+                }
+
+                const upcoming = futureAppts
                     .sort((a,b) => new Date(a.date+'T'+(a.time||'00:00')) - new Date(b.date+'T'+(b.time||'00:00')))[0];
 
                 let nextAppt = '—';
@@ -1407,7 +1424,11 @@ function renderSection(name, data) {
                     nextAppt, nextApptDays,
                     lastRx: lastRxShort
                 };
-            });
+            }).filter(Boolean);
+
+            // Expone el conteo de archivados para que renderList lo muestre
+            active._archived = archived;
+            return active;
         }
 
         // Trae citas del cloud al abrir (refuerza el polling) y re-renderiza
@@ -1479,7 +1500,9 @@ function renderSection(name, data) {
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-shrink:0;">
                         <div>
                             <h3 style="color:#60a5fa;margin:0;font-size:20px;display:flex;align-items:center;gap:8px;">👥 Lista de Pacientes</h3>
-                            <p style="color:rgba(255,255,255,0.35);margin:4px 0 0;font-size:12px;">${patients.length} pacientes registrados</p>
+                            <p style="color:rgba(255,255,255,0.35);margin:4px 0 0;font-size:12px;">
+                                <b style="color:#60a5fa;">${patients.length}</b> activo${patients.length === 1 ? '' : 's'}${patients._archived && patients._archived.length ? ` &nbsp;·&nbsp; <span style="color:#c4b5fd;">${patients._archived.length} en Historial</span>` : ''}
+                            </p>
                         </div>
                         <div style="display:flex; gap:12px;">
                             <button onclick="window.showMessagingCenter()" style="background:linear-gradient(135deg,rgba(16,185,129,0.2),rgba(16,185,129,0.05));border:1px solid rgba(16,185,129,0.4);border-radius:10px;padding:8px 16px;color:#34d399;font-size:14px;font-weight:700;display:flex;align-items:center;gap:6px;cursor:pointer;transition:transform 0.2s;" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='none'">
@@ -2237,147 +2260,220 @@ function renderSection(name, data) {
                     </div>
                 </div>
                 
-                <div id="patient-form" style="margin: 30px 0; background: rgba(0,0,0,0.2); border-radius: 15px; border: 1px solid rgba(255,255,255,0.05); padding: 30px;">
-                    <!-- Sección 1: Datos Personales -->
-                    <h4 style="color: #22d3ee; margin-bottom: 20px; text-transform: uppercase; font-size: 14px; letter-spacing: 1px;">1. Datos de Filiación</h4>
-                    <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 20px; margin-bottom: 25px;">
-                        <div class="input-group">
-                            <label>Nombre Completo *</label>
-                            <input type="text" id="p-nombre" placeholder="Nombres y Apellidos">
-                        </div>
-                        <div class="input-group">
-                            <label>Fecha Nacimiento</label>
-                            <input type="date" id="p-fecha-nac">
-                        </div>
-                        <div class="input-group">
-                            <label>Edad</label>
-                            <input type="number" id="p-edad" placeholder="Años">
-                        </div>
-                    </div>
-                    
-                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 25px;">
-                        <div class="input-group">
-                            <label>Género</label>
-                            <select id="p-genero" style="width: 100%; background: rgba(0,0,0,0.3); color: white; border: 1px solid var(--card-border); padding: 12px; border-radius: 12px;">
-                                <option value="Masculino">Masculino</option>
-                                <option value="Femenino">Femenino</option>
-                            </select>
-                        </div>
-                        <div class="input-group">
-                            <label>ID (DPI, Pasaporte, etc.)</label>
-                            <input type="text" id="p-id" placeholder="No. Identificación">
-                        </div>
-                        <div class="input-group">
-                            <label>Estado Civil</label>
-                            <select id="p-civil" style="width: 100%; background: rgba(0,0,0,0.3); color: white; border: 1px solid var(--card-border); padding: 12px; border-radius: 12px;">
-                                <option value="Soltero">Soltero</option>
-                                <option value="Soltera">Soltera</option>
-                                <option value="Casado">Casado</option>
-                                <option value="Casada">Casada</option>
-                                <option value="Viudo">Viudo</option>
-                                <option value="Viuda">Viuda</option>
-                                <option value="Divorciado">Divorciado</option>
-                                <option value="Divorciada">Divorciada</option>
-                                <option value="Unión Libre">Unión Libre</option>
-                            </select>
-                        </div>
+                <!-- Formulario por pestañas -->
+                <div id="patient-form" style="margin: 30px 0;">
+
+                    <!-- Barra de pestañas -->
+                    <div style="display:flex; border-radius:16px 16px 0 0; overflow:hidden; border:1px solid rgba(255,255,255,0.08); border-bottom:none;">
+                        <button class="pf-tab-btn" id="pftab-btn-esenciales" onclick="window.switchPfTab('esenciales',this)"
+                            style="flex:1; padding:15px 8px; background:rgba(16,185,129,0.18); border:none; color:#10b981; font-size:12px; font-weight:700; cursor:pointer; border-right:1px solid rgba(255,255,255,0.07); letter-spacing:0.5px; text-transform:uppercase; transition:all 0.2s; display:flex; align-items:center; justify-content:center; gap:6px;">
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>Datos Esenciales
+                        </button>
+                        <button class="pf-tab-btn" id="pftab-btn-personal" onclick="window.switchPfTab('personal',this)"
+                            style="flex:1; padding:15px 8px; background:rgba(0,0,0,0.25); border:none; color:rgba(255,255,255,0.4); font-size:12px; font-weight:700; cursor:pointer; border-right:1px solid rgba(255,255,255,0.07); letter-spacing:0.5px; text-transform:uppercase; transition:all 0.2s; display:flex; align-items:center; justify-content:center; gap:6px;">
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Ficha Personal
+                        </button>
+                        <button class="pf-tab-btn" id="pftab-btn-clinico" onclick="window.switchPfTab('clinico',this)"
+                            style="flex:1; padding:15px 8px; background:rgba(0,0,0,0.25); border:none; color:rgba(255,255,255,0.4); font-size:12px; font-weight:700; cursor:pointer; letter-spacing:0.5px; text-transform:uppercase; transition:all 0.2s; display:flex; align-items:center; justify-content:center; gap:6px;">
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>Historia Clínica
+                        </button>
                     </div>
 
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px;">
-                        <div class="input-group">
-                            <label>Ocupación</label>
-                            <input type="text" id="p-ocupacion" placeholder="Profesión u oficio">
-                        </div>
-                        <div class="input-group">
-                            <label>Dirección de Domicilio</label>
-                            <input type="text" id="p-direccion" placeholder="Dirección completa">
-                        </div>
-                    </div>
+                    <div style="background:rgba(0,0,0,0.2); border-radius:0 0 15px 15px; border:1px solid rgba(255,255,255,0.05); padding:26px 28px 28px;">
 
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px;">
-                        <div class="input-group">
-                            <label>Teléfono de Contacto *</label>
-                            <input type="text" id="p-telefono" placeholder="Ej: +502 ...">
-                        </div>
-                        <div class="input-group">
-                            <label>Correo Electrónico</label>
-                            <input type="email" id="p-email" placeholder="paciente@ejemplo.com">
-                        </div>
-                    </div>
+                        <!-- ===== TAB 1: DATOS ESENCIALES ===== -->
+                        <div id="pf-tab-esenciales">
+                            <p style="font-size:11px; color:rgba(255,255,255,0.3); margin:0 0 20px; text-transform:uppercase; letter-spacing:1px;">Campos prioritarios — requeridos para crear el expediente</p>
 
-                    <!-- Sección 2: Emergencia y Seguro -->
-                    <h4 style="color: #22d3ee; margin-bottom: 20px; text-transform: uppercase; font-size: 14px; letter-spacing: 1px; margin-top: 40px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 20px;">2. Contacto y Cobertura</h4>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 25px;">
-                        <div class="input-group">
-                            <label>Contacto Emergencia (Nombre)</label>
-                            <input type="text" id="p-emerg-nombre" placeholder="Nombre completo">
-                        </div>
-                        <div class="input-group">
-                            <label>Relación</label>
-                            <input type="text" id="p-emerg-rel" placeholder="Ej: Madre, Esposo">
-                        </div>
-                        <div class="input-group">
-                            <label>Teléfono Emergencia</label>
-                            <input type="text" id="p-emerg-tel" placeholder="Número contacto">
-                        </div>
-                    </div>
-                    <div class="input-group" style="margin-bottom: 25px;">
-                        <label>Seguro Médico / Cobertura</label>
-                        <input type="text" id="p-seguro" placeholder="Aseguradora y No. Póliza">
-                    </div>
+                            <div style="display:grid; grid-template-columns:2fr 1fr 1fr; gap:18px; margin-bottom:20px;">
+                                <div class="input-group">
+                                    <label>Nombre Completo *</label>
+                                    <input type="text" id="p-nombre" placeholder="Nombres y Apellidos">
+                                </div>
+                                <div class="input-group">
+                                    <label>Fecha Nacimiento</label>
+                                    <input type="date" id="p-fecha-nac">
+                                </div>
+                                <div class="input-group">
+                                    <label>Edad</label>
+                                    <input type="number" id="p-edad" placeholder="Años">
+                                </div>
+                            </div>
 
-                    <!-- Sección 3: Antecedentes Médicos -->
-                    <h4 style="color: #22d3ee; margin-bottom: 20px; text-transform: uppercase; font-size: 14px; letter-spacing: 1px; margin-top: 40px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 20px;">3. Historia Clínica</h4>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 25px;">
-                        <div class="input-group">
-                            <label>Tipo de Sangre</label>
-                            <input type="text" id="p-sangre" placeholder="Ej: O+">
-                        </div>
-                        <div class="input-group">
-                            <label>Glucosa Basal (mg/dL)</label>
-                            <input type="number" id="p-glucosa" placeholder="Ej: 98">
-                        </div>
-                        <div class="input-group">
-                            <label>Alergias (Med, Alimentos, etc.)</label>
-                            <input type="text" id="p-alergias" placeholder="Detallar alergias">
-                        </div>
-                    </div>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
-                        <div class="input-group">
-                            <label>Antecedentes Personales</label>
-                            <textarea id="p-ant-pers" style="height: 80px; width: 100%;" placeholder="Enfermedades crónicas, etc."></textarea>
-                        </div>
-                        <div class="input-group">
-                            <label>Antecedentes Quirúrgicos</label>
-                            <textarea id="p-ant-quir" style="height: 80px; width: 100%;" placeholder="Operaciones previas"></textarea>
-                        </div>
-                    </div>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
-                        <div class="input-group">
-                            <label>Antecedentes Familiares</label>
-                            <textarea id="p-ant-fam" style="height: 80px; width: 100%;" placeholder="Diabetes, corazón, etc."></textarea>
-                        </div>
-                        <div class="input-group">
-                            <label>Medicamentos Actuales</label>
-                            <textarea id="p-meds-act" style="height: 80px; width: 100%;" placeholder="Tratamientos en curso"></textarea>
-                        </div>
-                    </div>
-                    <div class="input-group" style="margin-bottom: 25px;">
-                        <label>Hábitos (Tabaco, Alcohol, Ejercicio, etc.)</label>
-                        <input type="text" id="p-habitos" placeholder="Estilo de vida">
-                    </div>
+                            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:18px; margin-bottom:20px;">
+                                <div class="input-group">
+                                    <label>Género</label>
+                                    <select id="p-genero" style="width:100%; background:rgba(0,0,0,0.3); color:white; border:1px solid var(--card-border); padding:12px; border-radius:12px;">
+                                        <option value="Masculino">Masculino</option>
+                                        <option value="Femenino">Femenino</option>
+                                    </select>
+                                </div>
+                                <div class="input-group">
+                                    <label>Teléfono de Contacto *</label>
+                                    <input type="text" id="p-telefono" placeholder="Ej: +502 ...">
+                                </div>
+                                <div class="input-group">
+                                    <label>ID (DPI, Pasaporte, etc.)</label>
+                                    <input type="text" id="p-id" placeholder="No. Identificación">
+                                </div>
+                            </div>
 
-                    <!-- Sección 4: Motivo -->
-                    <h4 style="color: #22d3ee; margin-bottom: 20px; text-transform: uppercase; font-size: 14px; letter-spacing: 1px; margin-top: 40px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 20px;">4. Motivo de Consulta</h4>
-                    <div class="input-group" style="margin-bottom: 30px;">
-                        <label>Motivo Principal / Diagnóstico Inicial *</label>
-                        <input type="text" id="p-motivo" placeholder="Ej. Control de diabetes, Dolor agudo...">
-                    </div>
+                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-bottom:20px;">
+                                <div class="input-group">
+                                    <label>Tipo de Sangre</label>
+                                    <select id="p-sangre" style="width:100%; background:rgba(0,0,0,0.3); color:white; border:1px solid var(--card-border); padding:12px; border-radius:12px;">
+                                        <option value="">— Seleccionar —</option>
+                                        <option value="A+">A+</option><option value="A-">A-</option>
+                                        <option value="B+">B+</option><option value="B-">B-</option>
+                                        <option value="AB+">AB+</option><option value="AB-">AB-</option>
+                                        <option value="O+">O+</option><option value="O-">O-</option>
+                                        <option value="Desconocido">Desconocido</option>
+                                    </select>
+                                </div>
+                                <div class="input-group">
+                                    <label>Alergias (Med, Alimentos, etc.)</label>
+                                    <input type="text" id="p-alergias" placeholder="Detallar alergias conocidas">
+                                </div>
+                            </div>
 
-                    <button id="btn-add-patient" class="btn-primary" style="width: 100%; padding: 22px; font-size: 18px; font-weight: 700;">
-                        GUARDAR FICHA MÉDICA Y CREAR EXPEDIENTE
-                    </button>
-                </div>
+                            <div class="input-group" style="margin-bottom:20px;">
+                                <label>Motivo Principal / Diagnóstico Inicial *</label>
+                                <input type="text" id="p-motivo" placeholder="Ej. Control de diabetes, Dolor agudo, Revisión general...">
+                            </div>
+
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:14px; flex-wrap:wrap; gap:10px;">
+                                <button id="btn-add-patient-t1" class="btn-primary" style="padding:14px 28px; font-size:15px; font-weight:700; background:linear-gradient(135deg,#10b981,#059669); flex:1; min-width:200px;" onclick="document.getElementById('btn-add-patient').click()">
+                                    GUARDAR FICHA MÉDICA
+                                </button>
+                                <button type="button" onclick="window.switchPfTab('personal', document.getElementById('pftab-btn-personal'))"
+                                    style="padding:14px 22px; background:rgba(34,211,238,0.1); border:1px solid rgba(34,211,238,0.3); color:#22d3ee; border-radius:12px; cursor:pointer; font-size:13px; font-weight:700; display:flex; align-items:center; gap:7px; white-space:nowrap;" onmouseover="this.style.background='rgba(34,211,238,0.2)'" onmouseout="this.style.background='rgba(34,211,238,0.1)'">
+                                    Ficha Personal <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- ===== TAB 2: FICHA PERSONAL ===== -->
+                        <div id="pf-tab-personal" style="display:none;">
+                            <p style="font-size:11px; color:rgba(255,255,255,0.3); margin:0 0 20px; text-transform:uppercase; letter-spacing:1px;">Datos administrativos y de contacto del paciente</p>
+
+                            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:18px; margin-bottom:20px;">
+                                <div class="input-group">
+                                    <label>Estado Civil</label>
+                                    <select id="p-civil" style="width:100%; background:rgba(0,0,0,0.3); color:white; border:1px solid var(--card-border); padding:12px; border-radius:12px;">
+                                        <option value="Soltero">Soltero</option>
+                                        <option value="Soltera">Soltera</option>
+                                        <option value="Casado">Casado</option>
+                                        <option value="Casada">Casada</option>
+                                        <option value="Viudo">Viudo</option>
+                                        <option value="Viuda">Viuda</option>
+                                        <option value="Divorciado">Divorciado</option>
+                                        <option value="Divorciada">Divorciada</option>
+                                        <option value="Unión Libre">Unión Libre</option>
+                                    </select>
+                                </div>
+                                <div class="input-group">
+                                    <label>Ocupación</label>
+                                    <input type="text" id="p-ocupacion" placeholder="Profesión u oficio">
+                                </div>
+                                <div class="input-group">
+                                    <label>Correo Electrónico</label>
+                                    <input type="email" id="p-email" placeholder="paciente@ejemplo.com">
+                                </div>
+                            </div>
+
+                            <div class="input-group" style="margin-bottom:20px;">
+                                <label>Dirección de Domicilio</label>
+                                <input type="text" id="p-direccion" placeholder="Dirección completa">
+                            </div>
+
+                            <h4 style="color:#f59e0b; margin:22px 0 16px; font-size:12px; text-transform:uppercase; letter-spacing:1px; border-top:1px solid rgba(255,255,255,0.06); padding-top:20px; display:flex; align-items:center; gap:7px;">
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 3.07 9.81a19.79 19.79 0 0 1-3.07-8.72A2 2 0 0 1 2 0h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L6.09 7.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+                                Contacto de Emergencia
+                            </h4>
+                            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:18px; margin-bottom:20px;">
+                                <div class="input-group">
+                                    <label>Nombre</label>
+                                    <input type="text" id="p-emerg-nombre" placeholder="Nombre completo">
+                                </div>
+                                <div class="input-group">
+                                    <label>Relación</label>
+                                    <input type="text" id="p-emerg-rel" placeholder="Ej: Madre, Esposo">
+                                </div>
+                                <div class="input-group">
+                                    <label>Teléfono</label>
+                                    <input type="text" id="p-emerg-tel" placeholder="Número contacto">
+                                </div>
+                            </div>
+
+                            <div class="input-group" style="margin-bottom:20px;">
+                                <label>Seguro Médico / Cobertura</label>
+                                <input type="text" id="p-seguro" placeholder="Aseguradora y No. Póliza">
+                            </div>
+
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:14px; flex-wrap:wrap; gap:10px;">
+                                <button type="button" onclick="window.switchPfTab('esenciales', document.getElementById('pftab-btn-esenciales'))"
+                                    style="padding:14px 22px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.1); color:rgba(255,255,255,0.55); border-radius:12px; cursor:pointer; font-size:13px; font-weight:600; display:flex; align-items:center; gap:7px;" onmouseover="this.style.background='rgba(255,255,255,0.1)'" onmouseout="this.style.background='rgba(255,255,255,0.06)'">
+                                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg> Anterior
+                                </button>
+                                <button id="btn-add-patient-t2" class="btn-primary" style="padding:14px 28px; font-size:15px; font-weight:700; background:linear-gradient(135deg,#10b981,#059669); flex:1; min-width:160px; margin:0 10px;" onclick="document.getElementById('btn-add-patient').click()">
+                                    GUARDAR FICHA MÉDICA
+                                </button>
+                                <button type="button" onclick="window.switchPfTab('clinico', document.getElementById('pftab-btn-clinico'))"
+                                    style="padding:14px 22px; background:rgba(34,211,238,0.1); border:1px solid rgba(34,211,238,0.3); color:#22d3ee; border-radius:12px; cursor:pointer; font-size:13px; font-weight:700; display:flex; align-items:center; gap:7px; white-space:nowrap;" onmouseover="this.style.background='rgba(34,211,238,0.2)'" onmouseout="this.style.background='rgba(34,211,238,0.1)'">
+                                    Historia Clínica <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- ===== TAB 3: HISTORIA CLÍNICA ===== -->
+                        <div id="pf-tab-clinico" style="display:none;">
+                            <p style="font-size:11px; color:rgba(255,255,255,0.3); margin:0 0 20px; text-transform:uppercase; letter-spacing:1px;">Antecedentes médicos y hábitos del paciente</p>
+
+                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-bottom:20px;">
+                                <div class="input-group">
+                                    <label>Glucosa Basal (mg/dL)</label>
+                                    <input type="number" id="p-glucosa" placeholder="Ej: 98">
+                                </div>
+                                <div class="input-group">
+                                    <label>Hábitos (Tabaco, Alcohol, Ejercicio, etc.)</label>
+                                    <input type="text" id="p-habitos" placeholder="Estilo de vida">
+                                </div>
+                            </div>
+
+                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-bottom:18px;">
+                                <div class="input-group">
+                                    <label>Antecedentes Personales</label>
+                                    <textarea id="p-ant-pers" style="height:88px; width:100%; resize:vertical;" placeholder="Enfermedades crónicas, etc."></textarea>
+                                </div>
+                                <div class="input-group">
+                                    <label>Antecedentes Quirúrgicos</label>
+                                    <textarea id="p-ant-quir" style="height:88px; width:100%; resize:vertical;" placeholder="Operaciones previas"></textarea>
+                                </div>
+                            </div>
+                            <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-bottom:18px;">
+                                <div class="input-group">
+                                    <label>Antecedentes Familiares</label>
+                                    <textarea id="p-ant-fam" style="height:88px; width:100%; resize:vertical;" placeholder="Diabetes, corazón, cáncer, etc."></textarea>
+                                </div>
+                                <div class="input-group">
+                                    <label>Medicamentos Actuales</label>
+                                    <textarea id="p-meds-act" style="height:88px; width:100%; resize:vertical;" placeholder="Tratamientos en curso"></textarea>
+                                </div>
+                            </div>
+
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:20px; padding-top:20px; border-top:1px solid rgba(255,255,255,0.07); gap:12px; flex-wrap:wrap;">
+                                <button type="button" onclick="window.switchPfTab('personal', document.getElementById('pftab-btn-personal'))"
+                                    style="padding:14px 22px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.1); color:rgba(255,255,255,0.55); border-radius:12px; cursor:pointer; font-size:13px; font-weight:600; display:flex; align-items:center; gap:7px; white-space:nowrap;" onmouseover="this.style.background='rgba(255,255,255,0.1)'" onmouseout="this.style.background='rgba(255,255,255,0.06)'">
+                                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg> Anterior
+                                </button>
+                                <button id="btn-add-patient" class="btn-primary" style="flex:1; padding:20px; font-size:17px; font-weight:700; min-width:200px;">
+                                    GUARDAR FICHA MÉDICA Y CREAR EXPEDIENTE
+                                </button>
+                            </div>
+                        </div>
+
+                    </div><!-- /panel interior -->
+                </div><!-- /patient-form -->
 
             </div> <!-- Close view-registration -->
             
@@ -2494,6 +2590,25 @@ function renderSection(name, data) {
             </div> <!-- Close view-search -->
             </div> <!-- Close widget-card -->
         `;
+
+        // Controlador de pestañas del formulario de paciente
+        window.switchPfTab = function(tab, btn) {
+            ['esenciales','personal','clinico'].forEach(t => {
+                const el = document.getElementById('pf-tab-' + t);
+                if (el) el.style.display = 'none';
+                const b = document.getElementById('pftab-btn-' + t);
+                if (b) {
+                    b.style.background = 'rgba(0,0,0,0.25)';
+                    b.style.color = 'rgba(255,255,255,0.4)';
+                }
+            });
+            const active = document.getElementById('pf-tab-' + tab);
+            if (active) active.style.display = 'block';
+            if (btn) {
+                btn.style.background = 'rgba(16,185,129,0.18)';
+                btn.style.color = '#10b981';
+            }
+        };
 
         const fechaNacInput = document.getElementById('p-fecha-nac');
         const edadInput = document.getElementById('p-edad');
