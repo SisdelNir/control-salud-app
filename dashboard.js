@@ -7533,12 +7533,20 @@ function renderSection(name, data) {
     // ===  MÓDULO GESTIÓN FINANCIERA  ============================
     // ============================================================
     function hasPriv(privId) {
+        // MED-MASTER (super-admin): tiene todos los privilegios.
         if (qslCode === 'MED-MASTER') return true;
         const docId = localStorage.getItem('current_doctor_id');
         if (!docId) return false;
         try {
             const list = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
             const me = list.find(m => m.id_medico === docId);
+            // Heurística: si el id empieza con 'OFI-' es usuario de oficina;
+            // si empieza con 'MED-' es médico. Por defecto asumimos médico.
+            const isOficina = (me && me.tipo === 'oficina') || /^OFI-/.test(docId);
+            // Los MÉDICOS tienen TODOS los privilegios por defecto (son dueños
+            // de su propio módulo). Solo los usuarios de OFICINA están
+            // restringidos por el set de privilegios asignados.
+            if (!isOficina) return true;
             if (!me) return false;
             return !!(me.privileges && me.privileges[privId]);
         } catch (e) { return false; }
