@@ -7647,8 +7647,165 @@ function renderSection(name, data) {
             const d = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}');
             return {
                 qsl,
-                nombre: d.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || qsl
+                nombre: d.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || qsl,
+                telefono: d.telefono || '',
+                id_identificacion: d.id_identificacion || ''
             };
+        });
+    }
+
+    // =====================================================================
+    // BÚSQUEDA INTELIGENTE DE PACIENTES (componente reutilizable)
+    // =====================================================================
+    // Renderiza un input con autocompletar que filtra pacientes por nombre,
+    // código QSL, teléfono o número de identificación mientras el usuario escribe.
+    //
+    // Uso:
+    //   _smartPatientSelect({
+    //     id: 'fz-cobro-qsl',                  // ID del input OCULTO (lo leen los saves)
+    //     placeholder: 'Buscar paciente...',
+    //     generalOption: true,                  // agrega "Sin paciente" al inicio
+    //     generalLabel: '— (cobro general / sin paciente) —',
+    //     disabled: false
+    //   })
+    //
+    // Los saves existentes leen document.getElementById('fz-cobro-qsl').value
+    // → el QSL seleccionado, o '' si es "sin paciente"/sin selección.
+    // =====================================================================
+    function _smartPatientSelect(opts) {
+        const {
+            id,
+            placeholder = 'Escriba nombre, teléfono o DPI…',
+            generalOption = false,
+            generalLabel = '— Sin paciente —',
+            disabled = false
+        } = opts || {};
+        const dl = id + '-list';
+        const searchId = id + '-search';
+        const clearId = id + '-clear';
+        const genEscaped = generalLabel.replace(/"/g, '&quot;');
+
+        return `
+        <div class="sps-wrap" style="position:relative;" data-sps-id="${id}">
+            <input type="hidden" id="${id}" value="">
+            <div style="position:relative;">
+                <input type="text" id="${searchId}" placeholder="${placeholder}" autocomplete="off"
+                    ${disabled ? 'disabled' : ''}
+                    onfocus="window._spsOnFocus('${id}')"
+                    oninput="window._spsOnInput('${id}')"
+                    onkeydown="window._spsOnKey('${id}', event)"
+                    style="width:100%; padding-right:36px;">
+                <button type="button" id="${clearId}" onclick="window._spsClear('${id}')"
+                    style="display:none; position:absolute; right:8px; top:50%; transform:translateY(-50%); background:rgba(239,68,68,0.12); border:none; color:#f87171; width:24px; height:24px; border-radius:50%; cursor:pointer; font-size:14px; line-height:1; padding:0;" title="Limpiar selección">✕</button>
+            </div>
+            <div id="${dl}" class="sps-results"
+                data-general="${generalOption ? '1' : '0'}"
+                data-general-label="${genEscaped}"
+                style="display:none; position:absolute; top:100%; left:0; right:0; margin-top:4px; max-height:280px; overflow-y:auto; background:#0f172a; border:1px solid rgba(96,165,250,0.4); border-radius:10px; z-index:9999; box-shadow:0 12px 28px rgba(0,0,0,0.55);">
+            </div>
+        </div>`;
+    }
+
+    function _spsRender(id, query) {
+        const dl = document.getElementById(id + '-list');
+        if (!dl) return;
+        const pacientes = _listPacientesParaSelect();
+        const q = (query || '').trim().toLowerCase();
+
+        let filtered = pacientes;
+        if (q) {
+            filtered = pacientes.filter(p => {
+                const hay = `${p.nombre} ${p.qsl} ${p.telefono} ${p.id_identificacion}`.toLowerCase();
+                return hay.includes(q);
+            });
+        }
+        filtered = filtered.slice(0, 12);
+
+        const generalOn = dl.getAttribute('data-general') === '1';
+        const generalLabel = (dl.getAttribute('data-general-label') || '— Sin paciente —').replace(/&quot;/g, '"');
+
+        let html = '';
+        if (generalOn) {
+            const genJS = generalLabel.replace(/'/g, "\\'");
+            html += `
+                <div class="sps-row" onclick="window._spsPick('${id}', '', '${genJS}')"
+                    style="padding:10px 14px; cursor:pointer; color:rgba(255,255,255,0.6); font-style:italic; border-bottom:1px solid rgba(255,255,255,0.06);"
+                    onmouseover="this.style.background='rgba(96,165,250,0.1)';" onmouseout="this.style.background='transparent';">
+                    ${generalLabel}
+                </div>`;
+        }
+
+        if (filtered.length === 0) {
+            html += `<div style="padding:18px 14px; text-align:center; color:rgba(255,255,255,0.4); font-size:13px;">
+                ${pacientes.length === 0 ? 'No hay pacientes registrados.' : 'No se encontraron pacientes con ese criterio.'}
+            </div>`;
+        } else {
+            html += filtered.map(p => {
+                const safeName = (p.nombre || '').replace(/'/g, "\\'");
+                const sub = [p.qsl, p.telefono && `📞 ${p.telefono}`, p.id_identificacion && `🪪 ${p.id_identificacion}`]
+                    .filter(Boolean).join(' · ');
+                return `
+                <div class="sps-row" onclick="window._spsPick('${id}', '${p.qsl}', '${safeName}')"
+                    style="padding:10px 14px; cursor:pointer; border-bottom:1px solid rgba(255,255,255,0.04);"
+                    onmouseover="this.style.background='rgba(96,165,250,0.12)';" onmouseout="this.style.background='transparent';">
+                    <div style="color:white; font-size:14px; font-weight:600;">${p.nombre}</div>
+                    <div style="color:rgba(255,255,255,0.5); font-size:11px; margin-top:2px;">${sub}</div>
+                </div>`;
+            }).join('');
+        }
+
+        dl.innerHTML = html;
+        dl.style.display = 'block';
+    }
+
+    window._spsOnFocus = function(id) { _spsRender(id, document.getElementById(id + '-search')?.value || ''); };
+    window._spsOnInput = function(id) {
+        const v = document.getElementById(id + '-search')?.value || '';
+        // Mientras el usuario escribe, anulamos cualquier QSL previo
+        const hidden = document.getElementById(id);
+        if (hidden && hidden.value) {
+            hidden.value = '';
+            const clr = document.getElementById(id + '-clear');
+            if (clr) clr.style.display = 'none';
+        }
+        _spsRender(id, v);
+    };
+    window._spsOnKey = function(id, e) {
+        if (e.key === 'Escape') {
+            const dl = document.getElementById(id + '-list');
+            if (dl) dl.style.display = 'none';
+        }
+    };
+    window._spsPick = function(id, qsl, nombre) {
+        const hidden = document.getElementById(id);
+        const search = document.getElementById(id + '-search');
+        const dl = document.getElementById(id + '-list');
+        const clr = document.getElementById(id + '-clear');
+        if (hidden) hidden.value = qsl || '';
+        if (search) search.value = nombre || '';
+        if (dl) dl.style.display = 'none';
+        if (clr) clr.style.display = qsl ? 'block' : 'none';
+    };
+    window._spsClear = function(id) {
+        const hidden = document.getElementById(id);
+        const search = document.getElementById(id + '-search');
+        const clr = document.getElementById(id + '-clear');
+        if (hidden) hidden.value = '';
+        if (search) { search.value = ''; search.focus(); }
+        if (clr) clr.style.display = 'none';
+        _spsRender(id, '');
+    };
+
+    // Cerrar el panel al hacer click fuera del componente (1 sola vez)
+    if (!window._spsOutsideHandler) {
+        window._spsOutsideHandler = true;
+        document.addEventListener('click', (e) => {
+            document.querySelectorAll('.sps-wrap').forEach(wrap => {
+                if (!wrap.contains(e.target)) {
+                    const dl = wrap.querySelector('.sps-results');
+                    if (dl) dl.style.display = 'none';
+                }
+            });
         });
     }
 
@@ -7779,10 +7936,13 @@ function renderSection(name, data) {
                 ${!canCreate ? '<p style="color:rgba(248,113,113,0.85);font-size:12px;margin-bottom:12px;">🔒 Sin privilegio "Registrar cobros".</p>' : ''}
                 <div style="display:grid;gap:12px;">
                     <div class="input-group"><label>Paciente</label>
-                        <select id="fz-cobro-qsl" ${!canCreate ? 'disabled' : ''}>
-                            <option value="">— (cobro general / sin paciente) —</option>
-                            ${pacientes.map(p => `<option value="${p.qsl}">${p.nombre}</option>`).join('')}
-                        </select>
+                        ${_smartPatientSelect({
+                            id: 'fz-cobro-qsl',
+                            placeholder: 'Buscar por nombre, teléfono o DPI…',
+                            generalOption: true,
+                            generalLabel: '— (cobro general / sin paciente) —',
+                            disabled: !canCreate
+                        })}
                     </div>
                     <div class="input-group"><label>Concepto</label>
                         <input type="text" id="fz-cobro-concepto" placeholder="Consulta general" autocomplete="off" ${!canCreate ? 'disabled' : ''}>
@@ -7908,10 +8068,12 @@ function renderSection(name, data) {
                 ${!canCreate ? '<p style="color:rgba(248,113,113,0.85);font-size:12px;margin-bottom:12px;">🔒 Sin privilegio "Gestionar cuentas por cobrar".</p>' : ''}
                 <div style="display:grid;gap:12px;">
                     <div class="input-group"><label>Paciente *</label>
-                        <select id="fz-deuda-qsl" ${!canCreate ? 'disabled' : ''}>
-                            <option value="">— Selecciona —</option>
-                            ${pacientes.map(p => `<option value="${p.qsl}">${p.nombre}</option>`).join('')}
-                        </select>
+                        ${_smartPatientSelect({
+                            id: 'fz-deuda-qsl',
+                            placeholder: 'Buscar por nombre, teléfono o DPI…',
+                            generalOption: false,
+                            disabled: !canCreate
+                        })}
                     </div>
                     <div class="input-group"><label>Concepto</label>
                         <input type="text" id="fz-deuda-concepto" placeholder="Consulta sin pagar" autocomplete="off" ${!canCreate ? 'disabled' : ''}>
@@ -8091,10 +8253,12 @@ function renderSection(name, data) {
             <h3 style="color:white;font-size:17px;margin:0 0 16px;">📄 Generar Estado de Cuenta</h3>
             <div style="display:grid; grid-template-columns:1fr 180px 180px auto; gap:14px; align-items:end;">
                 <div class="input-group"><label>Paciente</label>
-                    <select id="fz-estado-qsl">
-                        <option value="">— Todos —</option>
-                        ${pacientes.map(p => `<option value="${p.qsl}">${p.nombre}</option>`).join('')}
-                    </select>
+                    ${_smartPatientSelect({
+                        id: 'fz-estado-qsl',
+                        placeholder: 'Buscar paciente (o dejar vacío = todos)…',
+                        generalOption: true,
+                        generalLabel: '— Todos los pacientes —'
+                    })}
                 </div>
                 <div class="input-group"><label>Desde</label>
                     <input type="date" id="fz-estado-desde">
