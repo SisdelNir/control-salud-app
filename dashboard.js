@@ -1513,7 +1513,12 @@ function renderSection(name, data) {
                                     <th colspan="2" style="padding:5px 14px 2px;text-align:center;border-bottom:none;">
                                         <span style="font-size:15px;color:rgba(34,211,238,0.65);font-weight:600;letter-spacing:0.5px;">📡 Estará enviando datos</span>
                                     </th>
-                                    <th colspan="2" style="padding:0;"></th>
+                                    <th style="padding:0;"></th>
+                                    <th style="padding:5px 14px 2px;text-align:right;border-bottom:none;">
+                                        <button onclick="window.showAppointmentHistory()" title="Historial completo de citas atendidas y no atendidas" style="background:linear-gradient(135deg,rgba(168,85,247,0.2),rgba(168,85,247,0.05));border:1px solid rgba(168,85,247,0.5);color:#c4b5fd;padding:6px 14px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;letter-spacing:0.5px;">
+                                            📋 HISTORIAL
+                                        </button>
+                                    </th>
                                 </tr>
                                 <tr>
                                     <th style="padding:10px 14px;color:rgba(255,255,255,0.5);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);">Nombre</th>
@@ -1541,6 +1546,194 @@ function renderSection(name, data) {
         window._plFilter = (q) => renderList(q);
 
         renderList('');
+        document.body.appendChild(overlay);
+    };
+
+    // === Navegar a "Datos del Paciente" (tab overview) con paciente seleccionado ===
+    window.selectPatientAndShowData = function(qsl) {
+        selectedPatientQSL = qsl;
+        Array.from(navItems).forEach(n => n.classList.remove('active'));
+        const overviewTab = Array.from(navItems).find(item => item.getAttribute('data-section') === 'overview');
+        if (overviewTab) overviewTab.classList.add('active');
+        // Cerrar overlays abiertos
+        ['appointment-history-overlay', 'patient-list-overlay'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.remove();
+        });
+        loadSection('overview');
+    };
+
+    // === HISTORIAL DE CITAS (tabla tipo Excel) ===
+    window.showAppointmentHistory = function() {
+        const key = getDocPatientsKey();
+        const registry = JSON.parse(localStorage.getItem(key) || '[]');
+        const allAppts = window.getAppointments ? window.getAppointments() : [];
+
+        // Mapa rápido qsl → {name, telefono, consultations}
+        const patientMap = {};
+        registry.forEach(qsl => {
+            qsl = typeof qsl === 'string' ? qsl : (qsl.qsl || qsl.codigo || qsl.id || String(qsl));
+            const pd = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}');
+            patientMap[qsl] = {
+                name: pd.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || qsl,
+                telefono: pd.telefono || '—',
+                consultations: pd.consultations || []
+            };
+        });
+
+        // Determina si una cita fue atendida buscando consulta con la misma fecha
+        function statusOf(appt) {
+            const slot = new Date(appt.date + 'T' + (appt.time || '00:00'));
+            const now = new Date();
+            if (slot > now) return 'pending';
+            const p = patientMap[appt.qsl];
+            if (!p) return 'unknown';
+            const apptDateES = new Date(appt.date + 'T12:00:00').toLocaleDateString('es-ES');
+            const apptDateESLong = new Date(appt.date + 'T12:00:00').toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+            const attended = p.consultations.some(c =>
+                typeof c.date === 'string' &&
+                (c.date.includes(apptDateES) || c.date.includes(apptDateESLong) || c.date.startsWith(appt.date))
+            );
+            return attended ? 'attended' : 'missed';
+        }
+
+        // Trae observaciones de la consulta correspondiente (si existió)
+        function observationsOf(appt) {
+            const p = patientMap[appt.qsl];
+            if (!p) return '';
+            const apptDateES = new Date(appt.date + 'T12:00:00').toLocaleDateString('es-ES');
+            const consult = p.consultations.find(c =>
+                typeof c.date === 'string' &&
+                (c.date.includes(apptDateES) || c.date.startsWith(appt.date))
+            );
+            if (!consult) return '';
+            return (consult.observaciones || consult.referencias || consult.notas || '').toString().trim();
+        }
+
+        // Lista enriquecida ordenada por fecha descendente (más recientes primero)
+        const records = allAppts
+            .map(a => {
+                const p = patientMap[a.qsl] || { name: a.name || '(Paciente eliminado)', telefono: '—' };
+                return {
+                    qsl: a.qsl,
+                    name: p.name,
+                    telefono: p.telefono,
+                    date: a.date,
+                    time: a.time,
+                    motivo: a.motivo || '',
+                    observaciones: observationsOf(a),
+                    status: statusOf(a)
+                };
+            })
+            .sort((a, b) => {
+                const da = new Date((a.date || '') + 'T' + (a.time || '00:00'));
+                const db = new Date((b.date || '') + 'T' + (b.time || '00:00'));
+                return db - da;
+            });
+
+        const overlay = document.createElement('div');
+        overlay.id = 'appointment-history-overlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.94);z-index:9999999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(10px);padding:12px;box-sizing:border-box;';
+
+        const statusBadge = (s) => {
+            if (s === 'attended') return '<span title="Atendida" style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.5);color:#34d399;font-size:18px;font-weight:bold;">✓</span>';
+            if (s === 'missed')   return '<span title="No atendida" style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:rgba(239,68,68,0.2);border:1px solid rgba(239,68,68,0.5);color:#f87171;font-size:18px;font-weight:bold;">✕</span>';
+            if (s === 'pending')  return '<span title="Pendiente" style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:rgba(251,191,36,0.18);border:1px solid rgba(251,191,36,0.5);color:#fbbf24;font-size:16px;">⏳</span>';
+            return '<span title="Sin datos" style="opacity:0.4;">—</span>';
+        };
+
+        const renderHistList = (q) => {
+            const qLow = (q || '').toLowerCase();
+            const filtered = records.filter(r =>
+                !qLow ||
+                r.name.toLowerCase().includes(qLow) ||
+                r.telefono.toLowerCase().includes(qLow) ||
+                (r.date || '').includes(qLow) ||
+                (r.motivo || '').toLowerCase().includes(qLow) ||
+                (r.observaciones || '').toLowerCase().includes(qLow)
+            );
+
+            const stats = {
+                total: records.length,
+                attended: records.filter(r => r.status === 'attended').length,
+                missed: records.filter(r => r.status === 'missed').length,
+                pending: records.filter(r => r.status === 'pending').length
+            };
+
+            const rows = filtered.length > 0
+                ? filtered.map(r => {
+                    const fechaLabel = r.date
+                        ? new Date(r.date + 'T12:00:00').toLocaleDateString('es-ES', { day: '2-digit', month: 'short', year: 'numeric' }) + ' · ' + (r.time || '')
+                        : '—';
+                    return `<tr style="border-bottom:1px solid rgba(255,255,255,0.06);cursor:pointer;transition:background 0.15s;"
+                                onmouseover="this.style.background='rgba(168,85,247,0.08)'"
+                                onmouseout="this.style.background='transparent'"
+                                onclick="window.selectPatientAndShowData('${r.qsl}')">
+                        <td style="padding:11px 14px;color:white;font-weight:600;font-size:13px;">${r.name}</td>
+                        <td style="padding:11px 14px;color:rgba(255,255,255,0.65);font-size:13px;">${r.telefono}</td>
+                        <td style="padding:11px 14px;color:rgba(255,255,255,0.75);font-size:13px;white-space:nowrap;">${fechaLabel}</td>
+                        <td style="padding:11px 14px;color:rgba(255,255,255,0.6);font-size:12px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${r.motivo}">${r.motivo || '—'}</td>
+                        <td style="padding:11px 14px;color:rgba(255,255,255,0.6);font-size:12px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${r.observaciones}">${r.observaciones || '—'}</td>
+                        <td style="padding:11px 14px;text-align:center;">${statusBadge(r.status)}</td>
+                    </tr>`;
+                }).join('')
+                : `<tr><td colspan="6" style="padding:40px;text-align:center;color:rgba(255,255,255,0.35);font-size:14px;">No se encontraron citas en el historial.</td></tr>`;
+
+            overlay.innerHTML = `
+                <div style="background:linear-gradient(145deg,#0f172a,#1a1530);border:1px solid rgba(168,85,247,0.35);border-radius:20px;padding:28px;width:98vw;height:96vh;display:flex;flex-direction:column;box-shadow:0 30px 80px rgba(0,0,0,0.7);box-sizing:border-box;">
+                    <!-- Header -->
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-shrink:0;">
+                        <div>
+                            <h3 style="color:#c4b5fd;margin:0;font-size:20px;display:flex;align-items:center;gap:10px;">📋 Historial de Citas</h3>
+                            <p style="color:rgba(255,255,255,0.4);margin:4px 0 0;font-size:12px;">
+                                Total: <b style="color:white;">${stats.total}</b> &nbsp;·&nbsp;
+                                <span style="color:#34d399;">✓ Atendidas: <b>${stats.attended}</b></span> &nbsp;·&nbsp;
+                                <span style="color:#f87171;">✕ No atendidas: <b>${stats.missed}</b></span> &nbsp;·&nbsp;
+                                <span style="color:#fbbf24;">⏳ Pendientes: <b>${stats.pending}</b></span>
+                            </p>
+                        </div>
+                        <button onclick="document.getElementById('appointment-history-overlay').remove()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:white;padding:8px 16px;border-radius:10px;cursor:pointer;font-size:14px;">✕ Cerrar</button>
+                    </div>
+
+                    <!-- Search -->
+                    <div style="margin-bottom:14px;flex-shrink:0;">
+                        <input type="text" id="hist-search" placeholder="🔍  Buscar por nombre, teléfono, fecha, motivo u observación..."
+                            oninput="window._histFilter(this.value)"
+                            value="${q || ''}"
+                            style="width:100%;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);color:white;padding:11px 16px;border-radius:10px;font-size:14px;box-sizing:border-box;">
+                    </div>
+
+                    <div style="font-size:12px;color:rgba(255,255,255,0.35);margin-bottom:8px;">
+                        Clic en una fila para abrir <b style="color:#c4b5fd;">Datos del Paciente</b>
+                    </div>
+
+                    <!-- Table -->
+                    <div style="overflow:auto;flex:1;border-radius:12px;border:1px solid rgba(255,255,255,0.07);">
+                        <table style="width:100%;border-collapse:collapse;">
+                            <thead style="position:sticky;top:0;background:#1a1530;z-index:1;">
+                                <tr>
+                                    <th style="padding:11px 14px;color:rgba(196,181,253,0.85);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:left;border-bottom:1px solid rgba(168,85,247,0.25);">Nombre Paciente</th>
+                                    <th style="padding:11px 14px;color:rgba(196,181,253,0.85);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:left;border-bottom:1px solid rgba(168,85,247,0.25);">Teléfono</th>
+                                    <th style="padding:11px 14px;color:rgba(196,181,253,0.85);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:left;border-bottom:1px solid rgba(168,85,247,0.25);">Fecha de Cita</th>
+                                    <th style="padding:11px 14px;color:rgba(196,181,253,0.85);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:left;border-bottom:1px solid rgba(168,85,247,0.25);">Motivo Consulta</th>
+                                    <th style="padding:11px 14px;color:rgba(196,181,253,0.85);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:left;border-bottom:1px solid rgba(168,85,247,0.25);">Observaciones</th>
+                                    <th style="padding:11px 14px;color:rgba(196,181,253,0.85);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:center;border-bottom:1px solid rgba(168,85,247,0.25);">Estado</th>
+                                </tr>
+                            </thead>
+                            <tbody>${rows}</tbody>
+                        </table>
+                    </div>
+                </div>`;
+
+            overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+            requestAnimationFrame(() => {
+                const inp = document.getElementById('hist-search');
+                if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+            });
+        };
+
+        window._histFilter = (q) => renderHistList(q);
+        renderHistList('');
         document.body.appendChild(overlay);
     };
 
