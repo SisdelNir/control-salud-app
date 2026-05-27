@@ -1799,8 +1799,13 @@ function renderSection(name, data) {
             return (consult.observaciones || consult.referencias || consult.notas || '').toString().trim();
         }
 
-        // Lista enriquecida ordenada por fecha descendente (más recientes primero)
-        const apptRecords = allAppts
+        // REGLA HISTORIAL: solo citas cuya fecha+hora ya pasó hace MÁS DE 24 HORAS.
+        // Las citas de hoy/mañana (o pasadas <24h) están en la Lista Principal;
+        // aquí solo aparece lo "cerrado" después del periodo de gracia de 24h.
+        const now = new Date();
+        const cutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000); // hace 24h
+
+        const records = allAppts
             .map(a => {
                 const p = patientMap[a.qsl] || { name: a.name || '(Paciente eliminado)', telefono: '—' };
                 return {
@@ -1811,44 +1816,14 @@ function renderSection(name, data) {
                     time: a.time,
                     motivo: a.motivo || '',
                     observaciones: observationsOf(a),
-                    status: statusOf(a)
+                    status: statusOf(a),
+                    _ts: new Date((a.date || '') + 'T' + (a.time || '00:00')).getTime()
                 };
             })
-            .sort((a, b) => {
-                const da = new Date((a.date || '') + 'T' + (a.time || '00:00'));
-                const db = new Date((b.date || '') + 'T' + (b.time || '00:00'));
-                return db - da;
-            });
-
-        // Pacientes sin ninguna cita agendada (también van al historial)
-        const now = new Date();
-        const patientsWithAnyAppt = new Set(
-            allAppts.flatMap(a => [a.qsl, a.name].filter(Boolean))
-        );
-        const unscheduled = registry
-            .map(qsl => typeof qsl === 'string' ? qsl : (qsl.qsl || qsl.codigo || qsl.id || String(qsl)))
-            .filter(qsl => {
-                const p = patientMap[qsl];
-                if (!p) return false;
-                // Sin cita futura Y sin ningún registro de cita
-                const has = patientsWithAnyAppt.has(qsl) || patientsWithAnyAppt.has(p.name);
-                return !has;
-            })
-            .map(qsl => {
-                const p = patientMap[qsl];
-                return {
-                    qsl,
-                    name: p.name,
-                    telefono: p.telefono,
-                    date: '',
-                    time: '',
-                    motivo: '',
-                    observaciones: '',
-                    status: 'unscheduled'
-                };
-            });
-
-        const records = [...apptRecords, ...unscheduled];
+            // Solo si la cita ya pasó hace más de 24h
+            .filter(r => Number.isFinite(r._ts) && r._ts < cutoff.getTime())
+            // Más recientes primero
+            .sort((a, b) => b._ts - a._ts);
 
         const overlay = document.createElement('div');
         overlay.id = 'appointment-history-overlay';
@@ -1907,10 +1882,10 @@ function renderSection(name, data) {
                         <div>
                             <h3 style="color:#c4b5fd;margin:0;font-size:20px;display:flex;align-items:center;gap:10px;">📋 Historial de Citas</h3>
                             <p style="color:rgba(255,255,255,0.4);margin:4px 0 0;font-size:12px;">
+                                <span style="color:rgba(255,255,255,0.6);">Citas con más de 24h de pasadas — </span>
                                 Total: <b style="color:white;">${stats.total}</b> &nbsp;·&nbsp;
                                 <span style="color:#34d399;">✓ Atendidas: <b>${stats.attended}</b></span> &nbsp;·&nbsp;
-                                <span style="color:#f87171;">✕ No atendidas: <b>${stats.missed}</b></span> &nbsp;·&nbsp;
-                                <span style="color:#fbbf24;">⏳ Pendientes: <b>${stats.pending}</b></span>${stats.unscheduled ? ` &nbsp;·&nbsp; <span style="color:#cbd5e1;">📋 Sin agendar: <b>${stats.unscheduled}</b></span>` : ''}
+                                <span style="color:#f87171;">✕ No atendidas: <b>${stats.missed}</b></span>
                             </p>
                         </div>
                         <button onclick="document.getElementById('appointment-history-overlay').remove()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:white;padding:8px 16px;border-radius:10px;cursor:pointer;font-size:14px;">✕ Cerrar</button>
