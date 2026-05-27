@@ -1419,14 +1419,20 @@ function renderSection(name, data) {
         // Construye SIEMPRE el array de pacientes desde el localStorage actual,
         // así cada re-render usa los datos más frescos (citas, recetas, etc.).
         //
-        // REGLA DE FILTRO (estricta):
-        //   Un paciente aparece en Lista SOLO si tiene ≥1 cita futura.
-        //   Sin cita futura → va al Historial (sea por citas pasadas o por
-        //   no tener ninguna cita agendada).
+        // REGLA DE FILTRO (Lista = SOLO HOY):
+        //   Un paciente aparece en Lista si:
+        //   (a) tiene una cita programada para HOY (cualquier hora), o
+        //   (b) fue atendido HOY (consulta registrada con fecha de hoy).
+        //   Cualquier otro caso (cita futura de otro día, sin cita, citas
+        //   pasadas, sin atender) → va al Historial.
+        //   Al cambiar el día, los pacientes de "hoy" pasan automáticamente
+        //   al Historial.
         function buildPatientsArray() {
             const registry = JSON.parse(localStorage.getItem(key) || '[]');
             const allAppts = window.getAppointments ? window.getAppointments() : [];
             const now = new Date();
+            const todayISO = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0');
+            const todayES = now.toLocaleDateString('es-ES');
             const archived = []; // pacientes movidos al historial (info para el header)
 
             const active = registry.slice(-100).reverse().map(qsl => {
@@ -1434,17 +1440,24 @@ function renderSection(name, data) {
                 const data = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}');
                 const name = data.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || qsl;
 
-                // Citas relacionadas con este paciente
-                const patientAppts = allAppts.filter(a => a.qsl === qsl || a.name === name);
-                const futureAppts = patientAppts.filter(a => new Date(a.date + 'T' + (a.time || '00:00')) >= now);
+                // Citas DE HOY (cualquier hora del día)
+                const todayAppts = allAppts.filter(a =>
+                    (a.qsl === qsl || a.name === name) && a.date === todayISO
+                );
+                // Atendido HOY (cualquier consulta con date de hoy)
+                const attendedToday = (data.consultations || []).some(c =>
+                    typeof c.date === 'string' &&
+                    (c.date.includes(todayES) || c.date.startsWith(todayISO))
+                );
 
-                // Sin cita futura → archivar (va al Historial)
-                if (futureAppts.length === 0) {
+                // Si NO tiene cita de hoy NI fue atendido hoy → archivar
+                if (todayAppts.length === 0 && !attendedToday) {
                     archived.push({ qsl, name });
                     return null;
                 }
 
-                const upcoming = futureAppts
+                // La "próxima cita" mostrada en la columna es la primera de hoy
+                const upcoming = todayAppts
                     .sort((a,b) => new Date(a.date+'T'+(a.time||'00:00')) - new Date(b.date+'T'+(b.time||'00:00')))[0];
 
                 let nextAppt = '—';
@@ -1556,7 +1569,7 @@ function renderSection(name, data) {
                         <div>
                             <h3 style="color:#60a5fa;margin:0;font-size:20px;display:flex;align-items:center;gap:8px;">👥 Lista de Pacientes</h3>
                             <p style="color:rgba(255,255,255,0.35);margin:4px 0 0;font-size:12px;">
-                                <b style="color:#60a5fa;">${patients.length}</b> activo${patients.length === 1 ? '' : 's'}${patients._archived && patients._archived.length ? ` &nbsp;·&nbsp; <span style="color:#c4b5fd;">${patients._archived.length} en Historial</span>` : ''}
+                                <b style="color:#60a5fa;">${patients.length}</b> de hoy ${(()=>{const d=new Date();return `(${d.toLocaleDateString('es-ES',{weekday:'short',day:'2-digit',month:'short'})})`;})()}${patients._archived && patients._archived.length ? ` &nbsp;·&nbsp; <span style="color:#c4b5fd;">${patients._archived.length} en Historial</span>` : ''}
                             </p>
                         </div>
                         <div style="display:flex; gap:12px;">
