@@ -141,6 +141,236 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    // === SINCRONIZACIÓN EN TIEMPO REAL (cada 3s) ===
+    // Trae la lista completa de pacientes desde Firestore y la fusiona en
+    // localStorage. Si la "Lista de Pacientes" está abierta, la re-renderiza.
+    let _syncInFlight = false;
+    let _lastSyncTs = 0;
+    async function syncPatientsFromCloud({ force = false } = {}) {
+        if (_syncInFlight) return;
+        _syncInFlight = true;
+        try {
+            const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+            const since = force ? 0 : _lastSyncTs;
+            const url = `/api/patients/list?doctor_id=${encodeURIComponent(doctor_id)}${since ? `&since=${since}` : ''}`;
+            const resp = await fetch(url, { cache: 'no-store' });
+            if (!resp.ok) return;
+            const result = await resp.json();
+            if (!result.success) return;
+
+            const key = getDocPatientsKey();
+            const localList = JSON.parse(localStorage.getItem(key) || '[]');
+            const localSet = new Set(localList);
+            let registryChanged = false;
+            let anyPatientChanged = false;
+
+            for (const p of (result.patients || [])) {
+                const qsl = p.qsl;
+                if (!qsl) continue;
+                // Datos completos
+                const prevRaw = localStorage.getItem(`patient_data_${qsl}`);
+                const nextRaw = JSON.stringify(p.data || {});
+                if (prevRaw !== nextRaw) {
+                    localStorage.setItem(`patient_data_${qsl}`, nextRaw);
+                    anyPatientChanged = true;
+                }
+                if (p.nombre) {
+                    const prevName = localStorage.getItem(`patient_name_${qsl}`);
+                    if (prevName !== p.nombre) {
+                        localStorage.setItem(`patient_name_${qsl}`, p.nombre);
+                        anyPatientChanged = true;
+                    }
+                }
+                localStorage.setItem(`active_qsl_${qsl}`, p.alerts_enabled ? 'true' : 'false');
+                if (!localSet.has(qsl)) {
+                    localList.push(qsl);
+                    localSet.add(qsl);
+                    registryChanged = true;
+                }
+            }
+
+            if (registryChanged) {
+                localStorage.setItem(key, JSON.stringify(localList));
+            }
+
+            if (typeof result.server_time === 'number') _lastSyncTs = result.server_time;
+
+            // Si la lista de pacientes está abierta, refrescar UI
+            if ((registryChanged || anyPatientChanged) && document.getElementById('patient-list-overlay')) {
+                if (typeof window.showPatientList === 'function') {
+                    const searchVal = document.getElementById('pl-search')?.value || '';
+                    document.getElementById('patient-list-overlay').remove();
+                    window.showPatientList();
+                    const newSearch = document.getElementById('pl-search');
+                    if (newSearch && searchVal) {
+                        newSearch.value = searchVal;
+                        if (typeof window._plFilter === 'function') window._plFilter(searchVal.toLowerCase());
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('syncPatientsFromCloud:', e?.message || e);
+        } finally {
+            _syncInFlight = false;
+        }
+    }
+
+    // Empuja al cloud todos los pacientes locales que aún no estén etiquetados
+    // con doctor_id (migración de datos creados antes de la sync bidireccional).
+    async function backfillLocalPatientsToCloud() {
+        try {
+            const key = getDocPatientsKey();
+            const list = JSON.parse(localStorage.getItem(key) || '[]');
+            const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+            for (const qsl of list) {
+                const raw = localStorage.getItem(`patient_data_${qsl}`);
+                if (!raw) continue;
+                let data;
+                try { data = JSON.parse(raw); } catch { continue; }
+                fetch(`/api/patient/${qsl}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ data, doctor_id })
+                }).catch(() => {});
+            }
+        } catch (e) { console.warn('backfill error:', e?.message || e); }
+    }
+
+    // === SINCRONIZACIÓN DE MÉDICOS ===
+    async function syncMedicosFromCloud() {
+        try {
+            const resp = await fetch('/api/medicos', { cache: 'no-store' });
+            if (!resp.ok) return;
+            const result = await resp.json();
+            if (!result.success) return;
+            const next = JSON.stringify(result.medicos || []);
+            const prev = localStorage.getItem('tabla_medicos');
+            if (prev !== next) {
+                localStorage.setItem('tabla_medicos', next);
+                // Re-renderizar si está abierta la pantalla de médicos
+                if (typeof window.renderMedicosTab === 'function' &&
+                    document.querySelector('[data-tab="medicos"].active, #tab-medicos.active, #medicos-list')) {
+                    try { window.renderMedicosTab(); } catch (e) {}
+                }
+            }
+        } catch (e) { console.warn('syncMedicos:', e?.message || e); }
+    }
+
+    // === SINCRONIZACIÓN DE CENTROS MÉDICOS ===
+    async function syncCentrosFromCloud() {
+        try {
+            const resp = await fetch('/api/centros', { cache: 'no-store' });
+            if (!resp.ok) return;
+            const result = await resp.json();
+            if (!result.success) return;
+            const next = JSON.stringify(result.centros || []);
+            const prev = localStorage.getItem('tabla_centros');
+            if (prev !== next) {
+                localStorage.setItem('tabla_centros', next);
+                if (typeof window.renderCentrosTab === 'function' &&
+                    document.querySelector('[data-tab="centros"].active, #tab-centros.active')) {
+                    try { window.renderCentrosTab(); } catch (e) {}
+                }
+            }
+        } catch (e) { console.warn('syncCentros:', e?.message || e); }
+    }
+
+    // === SINCRONIZACIÓN DE CITAS / AGENDA ===
+    async function syncAppointmentsFromCloud() {
+        try {
+            const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+            const resp = await fetch(`/api/appointments?doctor_id=${encodeURIComponent(doctor_id)}`, { cache: 'no-store' });
+            if (!resp.ok) return;
+            const result = await resp.json();
+            if (!result.success) return;
+            const cloud = (result.appointments || []).map(a => ({
+                qsl: a.qsl_code,
+                name: a.paciente_nombre,
+                date: a.fecha ? a.fecha.slice(0, 10) : '',
+                time: a.hora,
+                motivo: a.motivo
+            }));
+            const key = window.getAppointmentsKey ? window.getAppointmentsKey() : 'appointments_data';
+            const prev = localStorage.getItem(key);
+            const next = JSON.stringify(cloud);
+            if (prev !== next) {
+                localStorage.setItem(key, next);
+                if (typeof window.renderAgenda === 'function' &&
+                    document.querySelector('.section-agenda, [data-section="agenda"].active')) {
+                    try { window.renderAgenda(); } catch (e) {}
+                }
+            }
+        } catch (e) { console.warn('syncAppointments:', e?.message || e); }
+    }
+
+    // === SINCRONIZACIÓN DE APARIENCIA / TEMA ===
+    async function syncAppearanceFromCloud() {
+        try {
+            const id_centro = localStorage.getItem('id_centro') || 'global';
+            const resp = await fetch(`/api/settings/appearance?id_centro=${encodeURIComponent(id_centro)}`, { cache: 'no-store' });
+            if (!resp.ok) return;
+            const result = await resp.json();
+            if (!result.success) return;
+            const tema = result.appearance && result.appearance.tema;
+            if (tema && localStorage.getItem('sisdel_tema') !== tema) {
+                localStorage.setItem('sisdel_tema', tema);
+                document.body.className = document.body.className.replace(/tema-\S+/g, '') + ' ' + tema;
+            }
+        } catch (e) { console.warn('syncAppearance:', e?.message || e); }
+    }
+
+    // === SINCRONIZACIÓN DE HISTORIAL DE MENSAJES ===
+    async function syncMessageHistoryFromCloud() {
+        try {
+            const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+            const resp = await fetch(`/api/messages/history?doctor_id=${encodeURIComponent(doctor_id)}`, { cache: 'no-store' });
+            if (!resp.ok) return;
+            const result = await resp.json();
+            if (!result.success) return;
+            const next = JSON.stringify(result.history || []);
+            const prev = localStorage.getItem('dr_sisdel_msg_history');
+            if (prev !== next) {
+                localStorage.setItem('dr_sisdel_msg_history', next);
+            }
+        } catch (e) { console.warn('syncMessageHistory:', e?.message || e); }
+    }
+
+    // === SINCRONIZACIÓN UNIFICADA ===
+    async function syncEverythingFromCloud({ force = false } = {}) {
+        // Todos en paralelo para minimizar latencia (~ tiempo del más lento, no la suma)
+        await Promise.allSettled([
+            syncPatientsFromCloud({ force }),
+            syncMedicosFromCloud(),
+            syncCentrosFromCloud(),
+            syncAppointmentsFromCloud(),
+            syncAppearanceFromCloud(),
+            syncMessageHistoryFromCloud()
+        ]);
+        try { window._lastFullSync = Date.now(); } catch (e) {}
+    }
+
+    // Arrancar polling cada 3 segundos
+    window._syncPatientsFromCloud = syncPatientsFromCloud;
+    window._syncEverythingFromCloud = syncEverythingFromCloud;
+    if (!window._cloudSyncInterval) {
+        // Backfill + sincronización inicial completa
+        backfillLocalPatientsToCloud().finally(() => syncEverythingFromCloud({ force: true }));
+        let tickCount = 0;
+        window._cloudSyncInterval = setInterval(() => {
+            // Solo si la pestaña está visible para no malgastar recursos
+            if (document.visibilityState === 'hidden') return;
+            tickCount++;
+            // Cada ~30s hacemos un full-sync de pacientes (detecta eliminados);
+            // el resto, incremental por timestamp.
+            const force = (tickCount % 10) === 0;
+            syncEverythingFromCloud({ force });
+        }, 3000);
+        // Forzar sync completo al regresar a la pestaña
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') syncEverythingFromCloud({ force: true });
+        });
+    }
+
     async function fetchPatientDataAsync(qsl) {
         await syncPatientDataWithServer(qsl);
         const data = localStorage.getItem(`patient_data_${qsl}`);
@@ -1886,11 +2116,21 @@ function renderSection(name, data) {
 
             localStorage.setItem(`patient_name_${qsl}`, nombre);
             localStorage.setItem(`patient_data_${qsl}`, JSON.stringify(patientData));
-            
+
             if (!existingPatients.includes(qsl)) {
                 existingPatients.push(qsl);
                 localStorage.setItem(key, JSON.stringify(existingPatients));
             }
+
+            // Push inmediato a la nube para sincronización entre máquinas
+            try {
+                const doctor_id = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+                fetch(`/api/patient/${qsl}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ data: patientData, doctor_id })
+                }).catch(e => console.error('Cloud push error:', e));
+            } catch (e) { console.error(e); }
 
             const pendingDate = localStorage.getItem('pending_appt_date');
             const pendingTime = localStorage.getItem('pending_appt_time');
@@ -3511,11 +3751,11 @@ function renderSection(name, data) {
                 </div>
                 <div class="input-group" style="margin-bottom: 20px;">
                     <label>Clave Maestra Actual *</label>
-                    <input type="password" id="current-doc-pass" placeholder="Ingresar clave actual para autorizar..." ${!isDoc ? 'disabled' : ''}>
+                    <input type="password" id="current-doc-pass" placeholder="Ingresar clave actual para autorizar..." autocomplete="new-password" ${!isDoc ? 'disabled' : ''}>
                 </div>
                 <div class="input-group" style="margin-bottom: 20px;">
                     <label>Nueva Clave de Acceso</label>
-                    <input type="password" id="new-doc-pass" placeholder="Ingresar nueva clave..." ${!isDoc ? 'disabled' : ''}>
+                    <input type="password" id="new-doc-pass" placeholder="Ingresar nueva clave..." autocomplete="new-password" ${!isDoc ? 'disabled' : ''}>
                 </div>
                 ${isDoc ? `
                     <button class="btn-primary" style="width: 100%; margin-bottom: 20px; background: #fbbf24; color: #000; font-weight: 800;" onclick="window.updateDocProfile()">ACTUALIZAR CREDENCIALES</button>
@@ -5391,7 +5631,7 @@ function renderSection(name, data) {
                 <div style="display:grid; gap:12px;">
                     <div class="input-group"><label>Nombre Completo</label><input type="text" id="nm-nombre" placeholder="Dr. Juan Pérez"></div>
                     <div class="input-group"><label>Usuario (para iniciar sesión)</label><input type="text" id="nm-usuario" placeholder="juan.perez"></div>
-                    <div class="input-group"><label>Contraseña</label><input type="password" id="nm-pass" placeholder="Contraseña segura"></div>
+                    <div class="input-group"><label>Contraseña</label><input type="password" id="nm-pass" placeholder="Contraseña segura" autocomplete="new-password"></div>
                     <div class="input-group"><label>Especialidad (opcional)</label><input type="text" id="nm-especialidad" placeholder="Medicina General"></div>
                     <div class="input-group"><label>Centro Médico (ID)</label><input type="text" id="nm-centro" placeholder="ID del centro (opcional)"></div>
                     <button onclick="window.crearNuevoMedico()" style="width:100%; padding:14px; background:linear-gradient(135deg,#1d4ed8,#60a5fa); color:white; font-weight:800; border-radius:12px; border:none; cursor:pointer; font-size:15px; margin-top:8px;">CREAR ACCESO</button>
