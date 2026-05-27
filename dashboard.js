@@ -6940,54 +6940,89 @@ function renderSection(name, data) {
 
     function buildPrivilegeMatrix(medico) {
         const privs = medico.privileges || {};
-        // Filtrado por contexto: en modo 'office' se ocultan consultas y gestionar_medicos
         const PRIVS = _getFilteredPrivileges();
         const totalPrivs = Object.keys(PRIVS).reduce((a, c) => a + PRIVS[c].items.length, 0);
-        // Solo contamos privilegios visibles activos (no los ocultos por filtro)
         const visibleIds = new Set(Object.values(PRIVS).flatMap(c => c.items.map(i => i.id)));
         const activePrivs = Object.entries(privs).filter(([k, v]) => v && visibleIds.has(k)).length;
 
+        // Inicializa estado pendiente con los privilegios actuales del usuario.
+        // Los cambios se mantienen en memoria hasta pulsar GUARDAR.
+        window._pendingPrivileges = window._pendingPrivileges || {};
+        window._pendingPrivileges[medico.id_medico] = { ...privs };
+
+        const tipoLabel = medico.tipo === 'oficina' ? 'oficina' : (medico.especialidad || 'médico');
+        const userCode  = medico.usuario || medico.id_medico;
+
         const categoriesHtml = Object.entries(PRIVS).map(([catKey, cat]) => {
             const catActiveCount = cat.items.filter(item => privs[item.id]).length;
-            const itemsHtml = cat.items.map(item => `
-                <div class="privilege-item">
-                    <div class="privilege-item-info">
-                        <strong>
-                            ${item.label}
-                            ${item.sensitive ? '<span class="sensitive-tag">⚠️ Sensible</span>' : ''}
-                        </strong>
-                        <p>${item.desc}</p>
+            const itemsHtml = cat.items.map(item => {
+                const isActive = !!privs[item.id];
+                return `
+                <div class="pm-item ${isActive ? 'pm-item-active' : ''}" data-priv-id="${item.id}" data-medico-id="${medico.id_medico}"
+                     onclick="window.pmTogglePrivilege('${medico.id_medico}', '${item.id}')"
+                     style="display:flex; align-items:flex-start; gap:12px; padding:14px; border-radius:10px; cursor:pointer; margin-bottom:6px; transition:all 0.15s; ${isActive ? 'background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.25);' : 'background:transparent; border:1px solid transparent;'}">
+                    <!-- Círculo selector: vacío gris / lleno verde con check -->
+                    <div class="pm-circle" style="width:22px; height:22px; border-radius:50%; flex-shrink:0; margin-top:1px; display:flex; align-items:center; justify-content:center; transition:all 0.15s; ${isActive ? 'background:#10b981; border:2px solid #10b981;' : 'background:transparent; border:2px solid rgba(255,255,255,0.25);'}">
+                        ${isActive ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3.5"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
                     </div>
-                    <label class="toggle-switch">
-                        <input type="checkbox" ${privs[item.id] ? 'checked' : ''}
-                            onchange="window.togglePrivilege('${medico.id_medico}', '${item.id}', this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-            `).join('');
+                    <div style="flex:1; min-width:0;">
+                        <div style="display:flex; align-items:center; gap:8px; margin-bottom:2px; flex-wrap:wrap;">
+                            <strong style="color:white; font-size:14px; font-weight:600;">${item.label}</strong>
+                            ${item.sensitive ? '<span style="background:rgba(251,146,60,0.15); border:1px solid rgba(251,146,60,0.35); color:#fdba74; font-size:9px; font-weight:800; padding:2px 6px; border-radius:5px; text-transform:uppercase; letter-spacing:0.5px;">⚠ Sensible</span>' : ''}
+                        </div>
+                        <p style="color:rgba(255,255,255,0.45); font-size:12px; margin:0; line-height:1.4;">${item.desc}</p>
+                    </div>
+                </div>`;
+            }).join('');
 
             return `
-            <div class="privilege-category-card">
-                <div class="privilege-category-header" style="color:${cat.color}; background: rgba(0,0,0,0.15);">
-                    ${cat.label}
-                    <span style="margin-left:auto; background:rgba(255,255,255,0.08); padding:2px 8px; border-radius:8px; font-size:11px; color:rgba(255,255,255,0.5);">${catActiveCount}/${cat.items.length}</span>
+            <div class="pm-category" data-cat-key="${catKey}" style="background:rgba(0,0,0,0.2); border:1px solid rgba(255,255,255,0.05); border-radius:14px; padding:18px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid rgba(255,255,255,0.05);">
+                    <h4 style="color:${cat.color}; font-size:14px; font-weight:700; margin:0;">${cat.label}</h4>
+                    <span class="pm-cat-counter" data-cat-key="${catKey}" style="background:rgba(255,255,255,0.06); color:rgba(255,255,255,0.55); font-size:11px; font-weight:700; padding:3px 10px; border-radius:8px; white-space:nowrap;">${catActiveCount} / ${cat.items.length}</span>
                 </div>
                 ${itemsHtml}
             </div>`;
         }).join('');
 
         return `
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; flex-wrap:wrap; gap:12px;">
+        <!-- Header del usuario seleccionado -->
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; flex-wrap:wrap; gap:14px; padding-bottom:18px; border-bottom:1px solid rgba(255,255,255,0.06);">
             <div>
-                <h3 style="color:white; font-size:18px; font-weight:700;">${medico.nombre_completo || medico.usuario || medico.id_medico}</h3>
-                <p style="color:var(--text-muted); font-size:13px;">${medico.id_medico} · ${medico.especialidad || 'Médico'} · <span style="color:#60a5fa;">${activePrivs}/${totalPrivs} privilegios activos</span></p>
+                <h3 style="color:white; font-size:20px; font-weight:700; margin:0 0 4px;">${medico.nombre_completo || userCode}</h3>
+                <p style="color:rgba(255,255,255,0.55); font-size:13px; margin:0;">
+                    ${userCode} · ${tipoLabel} ·
+                    <span id="pm-counter-total" style="color:#60a5fa; font-weight:700;">${activePrivs} / ${totalPrivs} privilegios activos</span>
+                </p>
             </div>
             <div style="display:flex; gap:10px;">
-                <button onclick="window.marcarTodosPrivilegios('${medico.id_medico}', true)" style="background:rgba(16,185,129,0.1); color:#34d399; border:1px solid rgba(16,185,129,0.3); padding:8px 16px; border-radius:10px; cursor:pointer; font-size:13px; font-weight:600;">✅ Marcar todos</button>
-                <button onclick="window.marcarTodosPrivilegios('${medico.id_medico}', false)" style="background:rgba(239,68,68,0.08); color:#f87171; border:1px solid rgba(239,68,68,0.2); padding:8px 16px; border-radius:10px; cursor:pointer; font-size:13px; font-weight:600;">🚫 Limpiar</button>
+                <button type="button" onclick="window.pmMarcarTodos('${medico.id_medico}', true)" style="background:white; color:#1e293b; border:1px solid rgba(255,255,255,0.9); padding:9px 18px; border-radius:10px; cursor:pointer; font-size:13px; font-weight:700; display:flex; align-items:center; gap:6px;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+                    Marcar todos
+                </button>
+                <button type="button" onclick="window.pmMarcarTodos('${medico.id_medico}', false)" style="background:transparent; color:white; border:1px solid rgba(255,255,255,0.25); padding:9px 18px; border-radius:10px; cursor:pointer; font-size:13px; font-weight:700; display:flex; align-items:center; gap:6px;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/></svg>
+                    Limpiar
+                </button>
             </div>
         </div>
-        <div class="privilege-matrix">${categoriesHtml}</div>`;
+
+        <!-- Grid de categorías (responsivo: 3 columnas en desktop, 1 en móvil) -->
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px; margin-bottom:24px;">
+            ${categoriesHtml}
+        </div>
+
+        <!-- Pie con botón GUARDAR -->
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:18px 22px; background:linear-gradient(135deg, rgba(16,185,129,0.06), rgba(16,185,129,0.02)); border:1px solid rgba(16,185,129,0.2); border-radius:14px; gap:16px; flex-wrap:wrap;">
+            <div>
+                <p style="color:white; font-size:13px; font-weight:600; margin:0 0 2px;" id="pm-status-text">Selecciona los privilegios y pulsa GUARDAR</p>
+                <p style="color:rgba(255,255,255,0.45); font-size:11px; margin:0;">Los cambios no se aplican hasta que confirmes con el botón verde.</p>
+            </div>
+            <button type="button" id="pm-save-btn" onclick="window.pmGuardarPrivilegios('${medico.id_medico}')" style="background:linear-gradient(135deg,#10b981,#059669); color:white; border:none; padding:14px 32px; border-radius:12px; cursor:pointer; font-size:14px; font-weight:800; letter-spacing:0.5px; display:flex; align-items:center; gap:8px; box-shadow:0 4px 14px rgba(16,185,129,0.3);">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                GUARDAR CAMBIOS
+            </button>
+        </div>`;
     }
 
     window.selectPrivilegeUser = async function(medicoId, el) {
@@ -7011,60 +7046,156 @@ function renderSection(name, data) {
         }
     };
 
-    window.togglePrivilege = async function(medicoId, privilegeId, value) {
-        // Obtener privilegios actuales del médico
-        let privs = {};
-        try {
-            const resp = await fetch('/api/medicos');
-            const result = await resp.json();
-            const med = (result.medicos || []).find(m => m.id_medico === medicoId);
-            privs = med?.privileges || {};
-        } catch(e) {
-            const local = JSON.parse(localStorage.getItem('tabla_medicos') || '[]').find(m => m.id_medico === medicoId);
-            privs = local?.privileges || {};
+    // ===== PRIVILEGIOS — Versión con checkboxes circulares y GUARDAR manual =====
+    // Estado en memoria (por id_medico) de los cambios pendientes
+    window._pendingPrivileges = window._pendingPrivileges || {};
+
+    // Helper: aplica el aspecto visual de "marcado" o "desmarcado" a un item
+    function _pmApplyItemStyle(el, active) {
+        const circle = el.querySelector('.pm-circle');
+        if (active) {
+            el.classList.add('pm-item-active');
+            el.style.background = 'rgba(16,185,129,0.08)';
+            el.style.border = '1px solid rgba(16,185,129,0.25)';
+            if (circle) {
+                circle.style.background = '#10b981';
+                circle.style.border = '2px solid #10b981';
+                circle.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3.5"><polyline points="20 6 9 17 4 12"/></svg>';
+            }
+        } else {
+            el.classList.remove('pm-item-active');
+            el.style.background = 'transparent';
+            el.style.border = '1px solid transparent';
+            if (circle) {
+                circle.style.background = 'transparent';
+                circle.style.border = '2px solid rgba(255,255,255,0.25)';
+                circle.innerHTML = '';
+            }
         }
-        privs[privilegeId] = value;
+    }
+
+    // Recalcula contadores por categoría y el total
+    function _pmUpdateCounters(medicoId) {
+        const PRIVS = _getFilteredPrivileges();
+        const state = window._pendingPrivileges[medicoId] || {};
+        let totalActive = 0, totalAll = 0;
+        Object.entries(PRIVS).forEach(([catKey, cat]) => {
+            const active = cat.items.filter(it => state[it.id]).length;
+            totalActive += active;
+            totalAll += cat.items.length;
+            const counter = document.querySelector(`.pm-cat-counter[data-cat-key="${catKey}"]`);
+            if (counter) counter.textContent = `${active} / ${cat.items.length}`;
+        });
+        const totalEl = document.getElementById('pm-counter-total');
+        if (totalEl) totalEl.textContent = `${totalActive} / ${totalAll} privilegios activos`;
+    }
+
+    function _pmMarkUnsaved() {
+        const statusEl = document.getElementById('pm-status-text');
+        if (statusEl) {
+            statusEl.textContent = '● Hay cambios sin guardar';
+            statusEl.style.color = '#fbbf24';
+        }
+        const saveBtn = document.getElementById('pm-save-btn');
+        if (saveBtn) saveBtn.style.boxShadow = '0 4px 18px rgba(251,191,36,0.5)';
+    }
+
+    // Toggle de un privilegio (solo en memoria, no llama a la red)
+    window.pmTogglePrivilege = function(medicoId, privilegeId) {
+        const state = window._pendingPrivileges[medicoId] || {};
+        const newVal = !state[privilegeId];
+        state[privilegeId] = newVal;
+        window._pendingPrivileges[medicoId] = state;
+
+        const itemEl = document.querySelector(`.pm-item[data-priv-id="${privilegeId}"][data-medico-id="${medicoId}"]`);
+        if (itemEl) _pmApplyItemStyle(itemEl, newVal);
+
+        _pmUpdateCounters(medicoId);
+        _pmMarkUnsaved();
+    };
+
+    // Marcar / limpiar TODOS los privilegios visibles (solo en memoria)
+    window.pmMarcarTodos = function(medicoId, valor) {
+        const PRIVS = _getFilteredPrivileges();
+        const state = window._pendingPrivileges[medicoId] || {};
+        Object.values(PRIVS).forEach(cat => cat.items.forEach(it => { state[it.id] = !!valor; }));
+        window._pendingPrivileges[medicoId] = state;
+
+        document.querySelectorAll(`.pm-item[data-medico-id="${medicoId}"]`).forEach(el => {
+            const pid = el.getAttribute('data-priv-id');
+            _pmApplyItemStyle(el, !!state[pid]);
+        });
+
+        _pmUpdateCounters(medicoId);
+        _pmMarkUnsaved();
+    };
+
+    // Persiste en la nube + localStorage los privilegios pendientes
+    window.pmGuardarPrivilegios = async function(medicoId) {
+        const state = window._pendingPrivileges[medicoId] || {};
+        // Conservar privilegios ocultos por filtro (del otro contexto) para no perderlos
+        let prevAll = {};
+        try {
+            const local = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            const m = local.find(x => x.id_medico === medicoId);
+            if (m) prevAll = m.privileges || {};
+        } catch(e) {}
+        const visibleIds = new Set(Object.values(_getFilteredPrivileges()).flatMap(c => c.items.map(i => i.id)));
+        const finalPrivs = { ...prevAll };
+        Object.entries(state).forEach(([k, v]) => {
+            if (visibleIds.has(k)) finalPrivs[k] = !!v;
+        });
+
+        const btn = document.getElementById('pm-save-btn');
+        const originalBtnHTML = btn ? btn.innerHTML : '';
+        if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; btn.textContent = 'Guardando...'; }
 
         try {
             await fetch(`/api/medico/${medicoId}/privileges`, {
-                method: 'PATCH', headers: {'Content-Type':'application/json'},
-                body: JSON.stringify({ privileges: privs })
+                method: 'PATCH',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({ privileges: finalPrivs })
             });
             // Actualizar localStorage
             const local = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
             const idx = local.findIndex(m => m.id_medico === medicoId);
-            if (idx >= 0) { local[idx].privileges = privs; localStorage.setItem('tabla_medicos', JSON.stringify(local)); }
-            // Actualizar badge del usuario
+            if (idx >= 0) {
+                local[idx].privileges = finalPrivs;
+                localStorage.setItem('tabla_medicos', JSON.stringify(local));
+            }
+            // Actualizar badge lateral
             const badge = document.querySelector(`#puser-${medicoId} .privilege-badge`);
-            if (badge) badge.textContent = Object.values(privs).filter(Boolean).length;
-        } catch(e) { console.error('Error guardando privilegio:', e); }
+            if (badge) badge.textContent = Object.values(finalPrivs).filter(Boolean).length;
+
+            const statusEl = document.getElementById('pm-status-text');
+            if (statusEl) {
+                statusEl.textContent = '✓ Cambios guardados correctamente';
+                statusEl.style.color = '#34d399';
+            }
+            if (btn) {
+                btn.disabled = false;
+                btn.style.opacity = '1';
+                btn.style.boxShadow = '0 4px 14px rgba(16,185,129,0.3)';
+                btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg> GUARDADO';
+                setTimeout(() => { if (btn) btn.innerHTML = originalBtnHTML; }, 2200);
+            }
+        } catch(e) {
+            console.error('Error guardando privilegios:', e);
+            if (btn) {
+                btn.disabled = false;
+                btn.style.opacity = '1';
+                btn.textContent = '❌ Reintentar';
+            }
+            window.showElegantAlert('❌ Error', 'No se pudieron guardar los privilegios. Revisa la conexión.');
+        }
     };
 
-    window.marcarTodosPrivilegios = async function(medicoId, valor) {
-        // Conservar privilegios previos para NO desmarcar los ocultos por filtro
-        let prev = {};
-        try {
-            const local = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
-            const m = local.find(x => x.id_medico === medicoId);
-            if (m) prev = m.privileges || {};
-        } catch(e) {}
-        const allPrivs = { ...prev };
-        // Solo aplicar a los visibles según el contexto actual
-        Object.values(_getFilteredPrivileges()).forEach(cat =>
-            cat.items.forEach(item => { allPrivs[item.id] = valor; })
-        );
-        try {
-            await fetch(`/api/medico/${medicoId}/privileges`, {
-                method: 'PATCH', headers: {'Content-Type':'application/json'},
-                body: JSON.stringify({ privileges: allPrivs })
-            });
-            const local = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
-            const idx = local.findIndex(m => m.id_medico === medicoId);
-            if (idx >= 0) { local[idx].privileges = allPrivs; localStorage.setItem('tabla_medicos', JSON.stringify(local)); }
-            // Refrescar la vista
-            const selected = document.querySelector('.privilege-user-item.selected');
-            window.selectPrivilegeUser(medicoId, selected);
-        } catch(e) { window.showElegantAlert('❌ Error', 'No se pudieron actualizar los privilegios.'); }
+    // Compatibilidad: mantener nombres viejos por si algún módulo los llama
+    window.togglePrivilege = function(medicoId, privilegeId, _v) {
+        window.pmTogglePrivilege(medicoId, privilegeId);
+    };
+    window.marcarTodosPrivilegios = function(medicoId, valor) {
+        window.pmMarcarTodos(medicoId, valor);
     };
 
     // ---- TAB: APARIENCIA ----
