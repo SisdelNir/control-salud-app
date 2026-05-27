@@ -1390,6 +1390,9 @@ function renderSection(name, data) {
             case 'settings':
                 renderSettings();
                 break;
+            case 'configuration':
+                renderConfiguration();
+                break;
             case 'programmer':
                 renderProgrammer();
                 break;
@@ -6578,7 +6581,253 @@ function renderSection(name, data) {
     getSectionTitle = function(name) {
         if (name === 'programmer') return 'Módulo Programador (Super Admin)';
         if (name === 'admin_general') return 'Administración Central';
+        if (name === 'configuration') return 'Configuración del Sistema';
         return _origGetSectionTitle(name);
     };
+
+    // ============================================================
+    // ===  MÓDULO CONFIGURACIÓN  (acceso para todos los médicos) ===
+    // ============================================================
+    // Defaults para recordatorios — se mezclan con lo guardado en cloud/local
+    const SISDEL_REMINDER_DEFAULTS = {
+        enabled: true,
+        leadHours: [24, 2, 0.5],      // tiempos de aviso antes de la cita
+        channel: 'sisdel',            // 'sisdel' | 'whatsapp' | 'ambos'
+        followUpUnattended: true,     // notificar al doctor si la cita pasó sin atender
+        sound: true,                  // sonido al recibir alerta en el navegador
+        weekend: true,                // permitir envío sábado/domingo
+        templateBefore: 'Recordatorio de su cita con DR-SISDEL para el {fecha} a las {hora}. Motivo: {motivo}',
+        templateMissed: 'No se ha registrado su asistencia a la cita del {fecha}. Por favor reagende cuanto antes.'
+    };
+
+    function _getReminderConfig() {
+        try {
+            const raw = localStorage.getItem('sisdel_reminder_config');
+            const stored = raw ? JSON.parse(raw) : {};
+            return Object.assign({}, SISDEL_REMINDER_DEFAULTS, stored);
+        } catch (e) { return Object.assign({}, SISDEL_REMINDER_DEFAULTS); }
+    }
+
+    async function _saveReminderConfig(cfg) {
+        localStorage.setItem('sisdel_reminder_config', JSON.stringify(cfg));
+        // Persistir también en cloud bajo settings/appearance (mismo doc, key 'reminders')
+        try {
+            const id_centro = localStorage.getItem('id_centro') || 'global';
+            // Fetch existing appearance to no sobrescribir tema
+            let appearance = {};
+            try {
+                const r = await fetch(`/api/settings/appearance?id_centro=${encodeURIComponent(id_centro)}`);
+                const j = await r.json();
+                if (j.success) appearance = j.appearance || {};
+            } catch (e) {}
+            appearance.reminders = cfg;
+            await fetch('/api/settings/appearance', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({ id_centro, appearance })
+            });
+        } catch (e) { console.warn('Cloud save reminders:', e); }
+    }
+
+    async function renderConfiguration() {
+        contentArea.innerHTML = `
+            <div class="config-tabs" id="config-tabs-bar" style="margin-bottom:24px;">
+                <button class="config-tab-btn active" onclick="window.switchConfigurationTab('privilegios', this)">🔐 Privilegios de Usuario</button>
+                <button class="config-tab-btn" onclick="window.switchConfigurationTab('recordatorios', this)">🔔 Recordatorios</button>
+                <button class="config-tab-btn" onclick="window.switchConfigurationTab('apariencia', this)">🎨 Apariencia</button>
+            </div>
+            <div id="config-tab-content">
+                <div class="loading-state"><div class="spinner"></div><p>Cargando privilegios...</p></div>
+            </div>
+        `;
+        // Cargar el primer tab (privilegios)
+        const tabContent = document.getElementById('config-tab-content');
+        try {
+            tabContent.innerHTML = await buildPrivilegiosTab();
+        } catch (e) {
+            tabContent.innerHTML = '<p style="color:#f87171;padding:30px;">Error al cargar privilegios.</p>';
+        }
+    }
+
+    window.switchConfigurationTab = async function(tab, btn) {
+        document.querySelectorAll('#config-tabs-bar .config-tab-btn').forEach(b => b.classList.remove('active'));
+        if (btn) btn.classList.add('active');
+        const tabContent = document.getElementById('config-tab-content');
+        if (!tabContent) return;
+        tabContent.innerHTML = `<div class="loading-state"><div class="spinner"></div></div>`;
+
+        if (tab === 'privilegios') {
+            tabContent.innerHTML = await buildPrivilegiosTab();
+        } else if (tab === 'apariencia') {
+            tabContent.innerHTML = buildAparienciaTab();
+            if (typeof setupAparienciaListeners === 'function') setupAparienciaListeners();
+        } else if (tab === 'recordatorios') {
+            tabContent.innerHTML = buildRecordatoriosTab();
+            setupRecordatoriosListeners();
+        }
+    };
+
+    // ---- TAB: RECORDATORIOS DE CITAS ----
+    function buildRecordatoriosTab() {
+        const cfg = _getReminderConfig();
+        const checked = (b) => b ? 'checked' : '';
+        const leadOptions = [
+            { h: 48, label: '2 días antes' },
+            { h: 24, label: '24 horas antes' },
+            { h: 12, label: '12 horas antes' },
+            { h: 2,  label: '2 horas antes' },
+            { h: 1,  label: '1 hora antes' },
+            { h: 0.5, label: '30 minutos antes' },
+            { h: 0.25, label: '15 minutos antes' }
+        ];
+        const leadHtml = leadOptions.map(o => `
+            <label class="reminder-chip" style="display:flex;align-items:center;gap:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:10px 14px;cursor:pointer;font-size:13px;color:white;">
+                <input type="checkbox" data-lead="${o.h}" ${cfg.leadHours.includes(o.h) ? 'checked' : ''} style="width:18px;height:18px;accent-color:#a78bfa;">
+                <span>${o.label}</span>
+            </label>
+        `).join('');
+
+        return `
+        <div style="display:grid;grid-template-columns:1fr;gap:18px;">
+
+            <!-- Habilitar / Deshabilitar -->
+            <div style="background:linear-gradient(135deg,rgba(167,139,250,0.08),rgba(167,139,250,0.02));border:1px solid rgba(167,139,250,0.25);border-radius:16px;padding:22px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <div>
+                        <h3 style="color:white;font-size:17px;font-weight:700;margin:0 0 4px;">🔔 Recordatorios automáticos</h3>
+                        <p style="color:rgba(255,255,255,0.5);font-size:13px;margin:0;">Enviar recordatorio al paciente antes de su cita</p>
+                    </div>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="rem-enabled" ${checked(cfg.enabled)}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+
+            <!-- Tiempos de aviso -->
+            <div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:22px;">
+                <h3 style="color:white;font-size:15px;font-weight:700;margin:0 0 6px;">⏰ Tiempos de aviso antes de la cita</h3>
+                <p style="color:rgba(255,255,255,0.5);font-size:12px;margin:0 0 16px;">Selecciona uno o varios. Se enviará un mensaje en cada uno de los tiempos marcados.</p>
+                <div id="rem-lead-grid" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(180px, 1fr));gap:10px;">
+                    ${leadHtml}
+                </div>
+            </div>
+
+            <!-- Canal de envío -->
+            <div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:22px;">
+                <h3 style="color:white;font-size:15px;font-weight:700;margin:0 0 14px;">📨 Canal de envío</h3>
+                <div style="display:flex;flex-wrap:wrap;gap:14px;">
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;color:white;font-size:14px;">
+                        <input type="radio" name="rem-channel" value="sisdel" ${cfg.channel === 'sisdel' ? 'checked' : ''} style="width:18px;height:18px;accent-color:#a78bfa;">
+                        Notificación SISDEL (in-app)
+                    </label>
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;color:white;font-size:14px;">
+                        <input type="radio" name="rem-channel" value="whatsapp" ${cfg.channel === 'whatsapp' ? 'checked' : ''} style="width:18px;height:18px;accent-color:#a78bfa;">
+                        WhatsApp
+                    </label>
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;color:white;font-size:14px;">
+                        <input type="radio" name="rem-channel" value="ambos" ${cfg.channel === 'ambos' ? 'checked' : ''} style="width:18px;height:18px;accent-color:#a78bfa;">
+                        Ambos
+                    </label>
+                </div>
+            </div>
+
+            <!-- Opciones extra -->
+            <div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:22px;display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+                <div style="display:flex;align-items:center;gap:14px;justify-content:space-between;">
+                    <div>
+                        <h4 style="color:white;font-size:14px;margin:0 0 3px;">Notificar cita no atendida</h4>
+                        <p style="color:rgba(255,255,255,0.45);font-size:12px;margin:0;">Avisar al médico cuando una cita pase sin atender</p>
+                    </div>
+                    <label class="toggle-switch"><input type="checkbox" id="rem-followup" ${checked(cfg.followUpUnattended)}><span class="toggle-slider"></span></label>
+                </div>
+                <div style="display:flex;align-items:center;gap:14px;justify-content:space-between;">
+                    <div>
+                        <h4 style="color:white;font-size:14px;margin:0 0 3px;">Sonido al recibir alerta</h4>
+                        <p style="color:rgba(255,255,255,0.45);font-size:12px;margin:0;">Reproducir un beep cuando entra una notificación</p>
+                    </div>
+                    <label class="toggle-switch"><input type="checkbox" id="rem-sound" ${checked(cfg.sound)}><span class="toggle-slider"></span></label>
+                </div>
+                <div style="display:flex;align-items:center;gap:14px;justify-content:space-between;grid-column:1/-1;">
+                    <div>
+                        <h4 style="color:white;font-size:14px;margin:0 0 3px;">Permitir envíos en fin de semana</h4>
+                        <p style="color:rgba(255,255,255,0.45);font-size:12px;margin:0;">Si se desactiva, no enviará recordatorios sábados ni domingos</p>
+                    </div>
+                    <label class="toggle-switch"><input type="checkbox" id="rem-weekend" ${checked(cfg.weekend)}><span class="toggle-slider"></span></label>
+                </div>
+            </div>
+
+            <!-- Plantillas -->
+            <div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:22px;">
+                <h3 style="color:white;font-size:15px;font-weight:700;margin:0 0 6px;">📝 Plantillas de mensaje</h3>
+                <p style="color:rgba(255,255,255,0.5);font-size:12px;margin:0 0 14px;">Usa <code style="background:rgba(255,255,255,0.05);padding:2px 6px;border-radius:4px;color:#a78bfa;">{fecha}</code>, <code style="background:rgba(255,255,255,0.05);padding:2px 6px;border-radius:4px;color:#a78bfa;">{hora}</code>, <code style="background:rgba(255,255,255,0.05);padding:2px 6px;border-radius:4px;color:#a78bfa;">{motivo}</code>, <code style="background:rgba(255,255,255,0.05);padding:2px 6px;border-radius:4px;color:#a78bfa;">{paciente}</code> para personalizar.</p>
+                <label style="color:rgba(255,255,255,0.7);font-size:13px;font-weight:600;display:block;margin-bottom:6px;">Recordatorio antes de cita</label>
+                <textarea id="rem-template-before" style="width:100%;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);color:white;border-radius:10px;padding:12px;font-size:13px;font-family:inherit;resize:vertical;min-height:70px;box-sizing:border-box;margin-bottom:14px;">${cfg.templateBefore}</textarea>
+                <label style="color:rgba(255,255,255,0.7);font-size:13px;font-weight:600;display:block;margin-bottom:6px;">Aviso de cita no atendida</label>
+                <textarea id="rem-template-missed" style="width:100%;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);color:white;border-radius:10px;padding:12px;font-size:13px;font-family:inherit;resize:vertical;min-height:70px;box-sizing:border-box;">${cfg.templateMissed}</textarea>
+            </div>
+
+            <!-- Botón guardar -->
+            <div style="display:flex;justify-content:flex-end;gap:12px;">
+                <button onclick="window.resetReminderConfig()" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.15);color:white;padding:10px 22px;border-radius:10px;cursor:pointer;font-size:14px;font-weight:600;">↺ Restaurar valores por defecto</button>
+                <button onclick="window.saveReminderConfig()" style="background:linear-gradient(135deg,#a78bfa,#7c3aed);color:white;border:none;padding:10px 28px;border-radius:10px;cursor:pointer;font-size:14px;font-weight:800;letter-spacing:0.3px;box-shadow:0 8px 20px rgba(124,58,237,0.4);">💾 GUARDAR</button>
+            </div>
+        </div>`;
+    }
+
+    function setupRecordatoriosListeners() {
+        // Listeners no son estrictamente necesarios — el guardar lee todo al pulsar GUARDAR
+    }
+
+    window.saveReminderConfig = async function() {
+        try {
+            const leadHours = Array.from(document.querySelectorAll('#rem-lead-grid input[type=checkbox]:checked'))
+                .map(el => parseFloat(el.getAttribute('data-lead')));
+            const channelEl = document.querySelector('input[name=rem-channel]:checked');
+            const cfg = {
+                enabled: !!document.getElementById('rem-enabled')?.checked,
+                leadHours: leadHours.length ? leadHours : [24, 2],
+                channel: channelEl ? channelEl.value : 'sisdel',
+                followUpUnattended: !!document.getElementById('rem-followup')?.checked,
+                sound: !!document.getElementById('rem-sound')?.checked,
+                weekend: !!document.getElementById('rem-weekend')?.checked,
+                templateBefore: document.getElementById('rem-template-before')?.value || SISDEL_REMINDER_DEFAULTS.templateBefore,
+                templateMissed: document.getElementById('rem-template-missed')?.value || SISDEL_REMINDER_DEFAULTS.templateMissed
+            };
+            await _saveReminderConfig(cfg);
+            // Sincronizar también notification_preference para compatibilidad
+            if (cfg.channel === 'whatsapp' || cfg.channel === 'sisdel') {
+                localStorage.setItem('notification_preference', cfg.channel);
+            }
+            if (typeof window.showElegantAlert === 'function') {
+                window.showElegantAlert('Configuración Guardada', 'Las preferencias de recordatorios se han guardado y sincronizado con la nube.');
+            }
+        } catch (e) {
+            console.error(e);
+            alert('Error al guardar la configuración.');
+        }
+    };
+
+    window.resetReminderConfig = async function() {
+        if (!confirm('¿Restaurar todas las configuraciones de recordatorios a sus valores predeterminados?')) return;
+        await _saveReminderConfig(Object.assign({}, SISDEL_REMINDER_DEFAULTS));
+        const tabContent = document.getElementById('config-tab-content');
+        if (tabContent) {
+            tabContent.innerHTML = buildRecordatoriosTab();
+            setupRecordatoriosListeners();
+        }
+    };
+
+    // Aplicar configuración al cargar (sincroniza desde cloud si está disponible)
+    (async function _bootstrapReminders() {
+        try {
+            const id_centro = localStorage.getItem('id_centro') || 'global';
+            const r = await fetch(`/api/settings/appearance?id_centro=${encodeURIComponent(id_centro)}`);
+            const j = await r.json();
+            if (j.success && j.appearance && j.appearance.reminders) {
+                localStorage.setItem('sisdel_reminder_config', JSON.stringify(j.appearance.reminders));
+            }
+        } catch (e) {}
+    })();
 
 });
