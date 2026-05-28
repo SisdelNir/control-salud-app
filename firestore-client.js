@@ -604,14 +604,26 @@
             }
         });
 
-        // Restar slots ocupados (citas existentes ese día) — un cobertor amplio
+        // Citas ocupadas ese día (excluyendo soft-deleted).
+        // Convertir cada ocupado a un INTERVALO en minutos [start, start+dur)
+        // para detectar solapamiento (no solo igualdad exacta).
         const apptSnap = await db().collection(COLLECTIONS.citas)
             .where('doctor_id', '==', doctor_id)
             .where('fecha', '==', date)
             .get();
-        const occupied = new Set(
-            apptSnap.docs.filter(d => !d.data().deleted).map(d => d.data().hora)
-        );
+        const occupiedIntervals = apptSnap.docs
+            .filter(d => !d.data().deleted)
+            .map(d => {
+                const h = d.data().hora || '';
+                const parts = h.split(':').map(n => parseInt(n));
+                if (parts.length < 2 || isNaN(parts[0]) || isNaN(parts[1])) return null;
+                const start = parts[0] * 60 + parts[1];
+                // Si la cita guardó su propia duración, usarla; si no, usar la configurada
+                const apptDur = parseInt(d.data().duration_minutes) || dur;
+                return { start, end: start + apptDur };
+            })
+            .filter(Boolean);
+
         // Restar slots pasados (si la fecha es hoy)
         const now = new Date();
         const isToday = (date === now.getFullYear() + '-' +
@@ -619,15 +631,31 @@
             String(now.getDate()).padStart(2,'0'));
         const nowMinutes = now.getHours() * 60 + now.getMinutes();
 
-        const available = slots.filter(s => {
-            if (occupied.has(s)) return false;
-            if (isToday) {
-                const [h, m] = s.split(':').map(n => parseInt(n));
-                if (h * 60 + m <= nowMinutes) return false;
+        function _overlaps(slotStart, slotEnd) {
+            // Un slot solapa si su intervalo se cruza con CUALQUIER ocupado.
+            for (const o of occupiedIntervals) {
+                if (slotStart < o.end && slotEnd > o.start) return true;
             }
+            return false;
+        }
+
+        const available = slots.filter(s => {
+            const [h, m] = s.split(':').map(n => parseInt(n));
+            const slotStart = h * 60 + m;
+            const slotEnd = slotStart + dur;
+            // Excluir slots pasados (solo aplica si la fecha es hoy)
+            if (isToday && slotStart <= nowMinutes) return false;
+            // Excluir slots que solapen con citas ya reservadas
+            if (_overlaps(slotStart, slotEnd)) return false;
             return true;
         });
-        return { success: true, slots: available, session_duration: dur };
+        return {
+            success: true,
+            slots: available,
+            session_duration: dur,
+            total_generated: slots.length,
+            occupied_count: occupiedIntervals.length
+        };
     }
 
     // Crea paciente nuevo + cita en un solo flujo desde la página pública.
@@ -675,6 +703,10 @@
         // 4) Crear cita con ID determinístico (evita duplicados)
         const sanitize = s => String(s || '').replace(/[^a-zA-Z0-9_-]/g, '_');
         const apptId = `${sanitize(doctor_id)}__${sanitize(qsl)}__${sanitize(fecha)}__${sanitize(hora)}`;
+        // Obtener duración configurada del médico para guardarla en la cita
+        // (permite detección de solapamiento correcta si más adelante el médico cambia el slot size)
+        const bkCfg = (await getBookingConfig(doctor_id)).config;
+        const sessionDur = parseInt(bkCfg.session_duration) || 30;
         await db().collection(COLLECTIONS.citas).doc(apptId).set({
             doctor_id,
             qsl_code: qsl,
@@ -683,6 +715,7 @@
             fecha,
             hora,
             motivo: motivo || '',
+            duration_minutes: sessionDur,
             source: 'public_booking',
             created_at: serverTimestamp()
         }, { merge: true });

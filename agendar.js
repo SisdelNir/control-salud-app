@@ -153,10 +153,10 @@
         renderCalendar();
     };
 
-    window._selectDay = async function(iso) {
-        selectedDate = iso;
-        selectedTime = null;
-        renderCalendar();
+    // Carga slots disponibles para una fecha. Se reutiliza tanto al elegir
+    // un día como tras una reserva (para refrescar y mostrar lo que queda).
+    async function loadSlotsForDay(iso, opts) {
+        opts = opts || {};
         const card = document.getElementById('slots-card');
         const cont = document.getElementById('slots-container');
         const title = document.getElementById('slots-title');
@@ -165,21 +165,46 @@
             const d = new Date(iso + 'T12:00:00');
             title.textContent = `2. Selecciona una hora — ${d.toLocaleDateString('es-ES', { weekday:'long', day:'2-digit', month:'long' })}`;
         }
-        if (cont) cont.innerHTML = '<div class="loading"><div class="spinner"></div><p>Buscando horarios disponibles...</p></div>';
+        if (cont && !opts.silent) cont.innerHTML = '<div class="loading"><div class="spinner"></div><p>Buscando horarios disponibles...</p></div>';
 
         try {
-            const r = await fetch(`/api/booking/${encodeURIComponent(doctorId)}/slots?date=${encodeURIComponent(iso)}`);
+            // cache: 'no-store' evita que el navegador devuelva slots viejos
+            const r = await fetch(`/api/booking/${encodeURIComponent(doctorId)}/slots?date=${encodeURIComponent(iso)}`, { cache: 'no-store' });
             const j = await r.json();
             availableSlots = j.success ? (j.slots || []) : [];
+            const totalGen = j.total_generated || 0;
+            const occCount = j.occupied_count || 0;
+
             if (availableSlots.length === 0) {
-                cont.innerHTML = `<p style="text-align:center;padding:20px;color:rgba(255,255,255,0.5);">No hay horarios disponibles para este día. Elige otro día.</p>`;
+                let msg;
+                if (totalGen === 0) {
+                    msg = 'El médico no tiene horarios configurados para este día. Elige otro día.';
+                } else if (occCount >= totalGen) {
+                    msg = `Todos los horarios de este día (${totalGen}) ya están ocupados. Elige otro día.`;
+                } else {
+                    msg = 'No hay horarios disponibles para este día. Elige otro día.';
+                }
+                cont.innerHTML = `<p style="text-align:center;padding:24px;color:rgba(255,255,255,0.55);">${msg}</p>`;
                 return;
             }
-            cont.innerHTML = `<div class="slots-grid">${availableSlots.map(s => `<button class="slot-btn" onclick="window._selectSlot('${s}')">${s}</button>`).join('')}</div>`;
+            const statusLine = (occCount > 0)
+                ? `<p style="font-size:12px;color:rgba(255,255,255,0.45);margin:0 0 10px;">✓ Mostrando ${availableSlots.length} de ${totalGen} horarios · ${occCount} ya reservado${occCount===1?'':'s'} (no se muestran)</p>`
+                : `<p style="font-size:12px;color:rgba(255,255,255,0.45);margin:0 0 10px;">✓ ${availableSlots.length} horarios disponibles</p>`;
+            cont.innerHTML = statusLine + `<div class="slots-grid">${availableSlots.map(s => `<button class="slot-btn" onclick="window._selectSlot('${s}')">${s}</button>`).join('')}</div>`;
         } catch (e) {
             console.error(e);
             cont.innerHTML = `<p style="color:#f87171;padding:14px;">Error al cargar horarios. Intenta de nuevo.</p>`;
         }
+    }
+
+    window._selectDay = async function(iso) {
+        selectedDate = iso;
+        selectedTime = null;
+        renderCalendar();
+        await loadSlotsForDay(iso);
+    };
+    window._reloadCurrentDaySlots = async function() {
+        if (selectedDate) await loadSlotsForDay(selectedDate, { silent: true });
     };
 
     window._selectSlot = function(time) {
@@ -254,9 +279,20 @@
             });
             const j = await r.json();
             if (!j.success) {
-                setErr(j.error || 'No se pudo reservar. Intenta de nuevo.');
-                btns.forEach(b => b.disabled = false);
-                if (primary) primary.textContent = '✓ Confirmar Cita';
+                const msg = j.error || 'No se pudo reservar. Intenta de nuevo.';
+                setErr(msg);
+                // Si el slot fue tomado entre selección y confirmación,
+                // cerrar el modal y refrescar los slots disponibles para
+                // que el paciente vea inmediatamente lo que queda.
+                if (/ya fue tomado|no está disponible/i.test(msg)) {
+                    setTimeout(() => {
+                        window._closeBookingModal();
+                        window._reloadCurrentDaySlots();
+                    }, 1800);
+                } else {
+                    btns.forEach(b => b.disabled = false);
+                    if (primary) primary.textContent = '✓ Confirmar Cita';
+                }
                 return;
             }
             window._closeBookingModal();
