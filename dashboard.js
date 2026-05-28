@@ -1271,43 +1271,68 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    // Número en palabras para los mensajes de turno
+    const _NUM_PALABRAS = {
+        1: 'un', 2: 'dos', 3: 'tres', 4: 'cuatro', 5: 'cinco',
+        6: 'seis', 7: 'siete', 8: 'ocho', 9: 'nueve', 10: 'diez'
+    };
+
+    // Avisa a los pacientes en cola cuántos turnos faltan para su consulta.
+    // Se dispara cuando el médico atiende al siguiente paciente. La "cola" son
+    // las citas de hoy que aún no han pasado, ordenadas por hora. El paciente
+    // en posición N recibe "Faltan N turnos para su consulta".
+    // El aviso se envía a Firestore (alertas_sistema) para llegar al portal del
+    // paciente de forma remota; también se guarda local como respaldo.
     window.processQueueNotifications = function() {
-        const pref = localStorage.getItem('notification_preference') || 'sisdel';
+        // Leer config de recordatorios (toggle + umbral)
+        let cfg = {};
+        try { cfg = JSON.parse(localStorage.getItem('sisdel_reminder_config') || '{}'); } catch (e) {}
+        const enabled = cfg.queueAlertEnabled !== false; // por defecto activo
+        if (!enabled) return;
+        const threshold = parseInt(cfg.queueAlertThreshold) || 5;
+        const pref = cfg.channel || localStorage.getItem('notification_preference') || 'sisdel';
+
         const appointments = window.getAppointments ? window.getAppointments() : [];
         const todayStr = new Date().toISOString().slice(0, 10);
         const nowTimeStr = new Date().toTimeString().slice(0, 5);
-        
+
+        // Cola = citas de hoy aún no pasadas, ordenadas por hora ascendente
         const remainingAppts = appointments
             .filter(a => a.date === todayStr && a.time >= nowTimeStr)
-            .sort((a,b) => (a.time > b.time ? 1 : -1));
-            
-        remainingAppts.forEach((appt, index) => {
-            const turnosFaltantes = index + 1; // index 0 (the immediate next) is "faltan 1 paciente"
-            if (turnosFaltantes <= 6) {
-                const msjs = {
-                    1: '⚡ ¡Es su turno! Diríjase al consultorio ahora.',
-                    2: '🏃 Faltan 2 pacientes. Por favor preséntese en recepción.',
-                    3: '⏳ Faltan 3 pacientes para su turno. Vaya preparándose.',
-                    4: '🔔 Faltan 4 pacientes para su turno. Esté atento.',
-                    5: '📋 Faltan 5 pacientes para su turno.',
-                    6: '📢 Aviso temprano: faltan 6 turnos. Comience a desplazarse para llegar puntual a su cita.'
-                };
-                const customMsg = msjs[turnosFaltantes] || `Faltan ${turnosFaltantes} turnos para su consulta.`;
+            .sort((a, b) => (a.time > b.time ? 1 : -1));
 
-                if (pref === 'whatsapp') {
-                    console.log(`[API Meta WhatsApp] Simulando envío a ${appt.name} (QSL: ${appt.qsl}): ${customMsg}`);
-                } else {
-                    const notifKey = `patient_notifications_${appt.qsl}`;
-                    let queue = JSON.parse(localStorage.getItem(notifKey) || '[]');
-                    // Prevent duplicate consecutive messages
-                    if (queue.length === 0 || queue[queue.length - 1].msg !== customMsg) {
-                        queue.push({
-                            time: Date.now(),
-                            msg: customMsg,
-                            read: false
-                        });
-                        localStorage.setItem(notifKey, JSON.stringify(queue));
-                    }
+        remainingAppts.forEach((appt, index) => {
+            const turnosFaltantes = index + 1; // index 0 = el siguiente = "falta 1 turno"
+            if (turnosFaltantes > threshold) return; // fuera del umbral, no avisar
+
+            let customMsg;
+            if (turnosFaltantes === 1) {
+                customMsg = '⚡ ¡Es su turno! Por favor diríjase al consultorio.';
+            } else {
+                const palabra = _NUM_PALABRAS[turnosFaltantes] || turnosFaltantes;
+                customMsg = `🔔 Faltan ${palabra} turnos para su consulta. Vaya preparándose.`;
+            }
+
+            if (!appt.qsl) return;
+
+            // 1) Guardar local (respaldo + para el portal en el mismo navegador)
+            const notifKey = `patient_notifications_${appt.qsl}`;
+            let queue = JSON.parse(localStorage.getItem(notifKey) || '[]');
+            if (queue.length === 0 || queue[queue.length - 1].msg !== customMsg) {
+                queue.push({ time: Date.now(), msg: customMsg, read: false });
+                localStorage.setItem(notifKey, JSON.stringify(queue));
+
+                // 2) Enviar a Firestore (alertas_sistema) → portal del paciente remoto
+                if (pref === 'sisdel' || pref === 'ambos') {
+                    const msgId = 'turno_' + appt.qsl + '_' + turnosFaltantes + '_' + todayStr;
+                    fetch(`/api/patient/${encodeURIComponent(appt.qsl)}/alerts/messages`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ id: msgId, mensaje: customMsg, leido: false })
+                    }).catch(() => {});
+                }
+                if (pref === 'whatsapp' || pref === 'ambos') {
+                    console.log(`[WhatsApp] → ${appt.name} (${appt.qsl}): ${customMsg}`);
                 }
             }
         });
@@ -8169,6 +8194,8 @@ function renderSection(name, data) {
         followUpUnattended: true,     // notificar al doctor si la cita pasó sin atender
         sound: true,                  // sonido al recibir alerta en el navegador
         weekend: true,                // permitir envío sábado/domingo
+        queueAlertEnabled: true,      // avisar a pacientes en cola por turnos restantes
+        queueAlertThreshold: 5,       // empezar a avisar cuando falten N turnos
         templateBefore: 'Recordatorio de su cita con DR-SISDEL para el {fecha} a las {hora}. Motivo: {motivo}',
         templateMissed: 'No se ha registrado su asistencia a la cita del {fecha}. Por favor reagende cuanto antes.'
     };
@@ -8299,6 +8326,29 @@ function renderSection(name, data) {
                 <p style="color:rgba(255,255,255,0.5);font-size:12px;margin:0 0 16px;">Selecciona uno o varios. Se enviará un mensaje en cada uno de los tiempos marcados.</p>
                 <div id="rem-lead-grid" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(180px, 1fr));gap:10px;">
                     ${leadHtml}
+                </div>
+            </div>
+
+            <!-- Aviso por turnos en cola -->
+            <div style="background:linear-gradient(135deg,rgba(34,211,238,0.06),rgba(34,211,238,0.02));border:1px solid rgba(34,211,238,0.25);border-radius:16px;padding:22px;">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+                    <div style="flex:1;min-width:240px;">
+                        <h3 style="color:white;font-size:15px;font-weight:700;margin:0 0 6px;">🔔 Aviso por turnos en cola</h3>
+                        <p style="color:rgba(255,255,255,0.55);font-size:12px;margin:0;">
+                            Cuando atiendas al siguiente paciente, el sistema avisa a los que están en cola
+                            cuántos turnos faltan para su consulta (ej. "Faltan cinco turnos para su consulta").
+                        </p>
+                    </div>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="rem-queue-enabled" ${checked(cfg.queueAlertEnabled)}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div style="margin-top:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                    <label style="color:rgba(255,255,255,0.7);font-size:13px;font-weight:600;">Empezar a avisar cuando falten:</label>
+                    <select id="rem-queue-threshold" style="background:rgba(0,0,0,0.4);border:1px solid rgba(255,255,255,0.15);color:white;padding:8px 12px;border-radius:8px;font-size:14px;">
+                        ${[3,4,5,6,7,8,10].map(n => `<option value="${n}" ${(cfg.queueAlertThreshold||5)==n?'selected':''}>${n} turnos antes</option>`).join('')}
+                    </select>
                 </div>
             </div>
 
@@ -8678,6 +8728,8 @@ function renderSection(name, data) {
                 followUpUnattended: !!document.getElementById('rem-followup')?.checked,
                 sound: !!document.getElementById('rem-sound')?.checked,
                 weekend: !!document.getElementById('rem-weekend')?.checked,
+                queueAlertEnabled: !!document.getElementById('rem-queue-enabled')?.checked,
+                queueAlertThreshold: parseInt(document.getElementById('rem-queue-threshold')?.value) || 5,
                 templateBefore: document.getElementById('rem-template-before')?.value || SISDEL_REMINDER_DEFAULTS.templateBefore,
                 templateMissed: document.getElementById('rem-template-missed')?.value || SISDEL_REMINDER_DEFAULTS.templateMissed
             };
