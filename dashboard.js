@@ -3519,28 +3519,12 @@ function renderSection(name, data) {
                     ${isMed ? `<button class="btn-primary" style="width: 100%; margin-top: 30px; padding: 20px;" onclick="window.savePatientChanges()">ACTUALIZAR DATOS DEL EXPEDIENTE</button>` : ''}
                 </div>
 
-                <!-- Seccion 2: RECETAS -->
+                <!-- Seccion 2: RECETAS (solo lectura — la creación de nuevas recetas
+                     se realiza desde "Consulta Médica", no desde Datos del Paciente) -->
                 <div class="widget-card animate-in" style="grid-column: span 2; margin-top: 20px;">
                     <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 15px; margin-bottom: 20px;">
                         <h3 class="widget-title" style="margin: 0;">Medicación y Recetas</h3>
-                        ${isMed ? `<button id="add-btn" class="status-badge" style="background: var(--accent); color: #000; cursor: pointer; border: none; font-weight: 700; padding: 8px 15px;">+ NUEVA RECETA</button>` : ''}
-                    </div>
-                    
-                    <div id="med-form" style="display: none; background: rgba(0,0,0,0.2); padding: 25px; border-radius: 15px; margin-bottom: 25px; border: 1px dashed var(--accent);">
-                        <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 15px; margin-bottom: 15px;">
-                            <div class="input-group"><label>Medicamento</label><input type="text" id="m-name"></div>
-                            <div class="input-group"><label>Dosis</label><input type="text" id="m-dose"></div>
-                            <div class="input-group"><label>Frecuencia(h)</label><input type="number" id="m-freq"></div>
-                        </div>
-                        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px;">
-                            <div class="input-group"><label>Inicio</label><input type="time" id="m-start" value="08:00"></div>
-                            <div class="input-group"><label>Días</label><input type="number" id="m-days"></div>
-                            <div class="input-group"><label>Indicaciones</label><input type="text" id="m-notes"></div>
-                        </div>
-                        <div style="display: flex; gap: 10px; margin-top: 20px;">
-                            <button id="btn-med-save" class="btn-primary" style="flex: 1; padding: 15px;">Guardar Receta</button>
-                            <button id="btn-med-cancel" class="btn-secondary" style="flex: 1; padding: 15px;">Cancelar</button>
-                        </div>
+                        <span style="color:rgba(255,255,255,0.35); font-size:11px; font-style:italic;">Solo lectura · Edita desde Consulta Médica</span>
                     </div>
 
                     <div class="med-list">
