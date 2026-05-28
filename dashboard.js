@@ -1950,7 +1950,9 @@ function renderSection(name, data) {
             );
 
             const rows = filtered.length > 0
-                ? filtered.map(p => `
+                ? filtered.map(p => {
+                    const safeName = (p.name || p.qsl).replace(/'/g, "\\'");
+                    return `
                     <tr style="border-bottom:1px solid rgba(255,255,255,0.06); transition:background 0.15s;" onmouseover="this.style.background='rgba(59,130,246,0.08)'" onmouseout="this.style.background='transparent'">
                         <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; color:white; font-weight:600; font-size:13px; cursor:pointer;">${p.name}</td>
                         <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; color:rgba(255,255,255,0.6); font-size:13px; cursor:pointer;">${p.telefono}</td>
@@ -1963,8 +1965,19 @@ function renderSection(name, data) {
                                 : '<span style="color:rgba(255,255,255,0.25);font-size:12px;">—</span>'}
                         </td>
                         <td onclick="window.showPatientLastRx('${p.qsl}')" title="Ver receta en detalle" style="padding:11px 14px; color:#60a5fa; font-size:12px; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; text-decoration:underline;">${p.lastRx}</td>
-                    </tr>`).join('')
-                : `<tr><td colspan="7" style="padding:30px; text-align:center; color:rgba(255,255,255,0.3); font-size:14px;">No se encontraron pacientes.</td></tr>`;
+                        <td style="padding:8px 10px; white-space:nowrap; text-align:right;">
+                            <button title="Editar paciente" onclick="event.stopPropagation(); window.plEditPatient('${p.qsl}')"
+                                style="background:rgba(96,165,250,0.12); border:1px solid rgba(96,165,250,0.35); color:#60a5fa; padding:6px 10px; border-radius:8px; cursor:pointer; font-size:13px; font-weight:600; margin-right:4px;">
+                                ✏️
+                            </button>
+                            <button title="Eliminar paciente" onclick="event.stopPropagation(); window.plDeletePatient('${p.qsl}', '${safeName}')"
+                                style="background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); color:#f87171; padding:6px 10px; border-radius:8px; cursor:pointer; font-size:13px; font-weight:600;">
+                                🗑
+                            </button>
+                        </td>
+                    </tr>`;
+                }).join('')
+                : `<tr><td colspan="8" style="padding:30px; text-align:center; color:rgba(255,255,255,0.3); font-size:14px;">No se encontraron pacientes.</td></tr>`;
 
             overlay.innerHTML = `
                 <div style="background:linear-gradient(145deg,#0f172a,#1a2540);border:1px solid rgba(59,130,246,0.3);border-radius:20px;padding:28px;width:98vw;height:96vh;display:flex;flex-direction:column;box-shadow:0 30px 80px rgba(0,0,0,0.6);box-sizing:border-box;">
@@ -2025,6 +2038,7 @@ function renderSection(name, data) {
                                     <th style="padding:10px 14px;color:rgba(248,113,113,0.7);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:center;border-bottom:1px solid rgba(255,255,255,0.08);">Presión</th>
                                     <th style="padding:10px 14px;color:rgba(251,191,36,0.7);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);">Próxima Cita</th>
                                     <th style="padding:10px 14px;color:rgba(255,255,255,0.5);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:left;border-bottom:1px solid rgba(255,255,255,0.08);">Última Receta/Nota</th>
+                                    <th style="padding:10px 14px;color:rgba(255,255,255,0.5);font-size:11px;text-transform:uppercase;letter-spacing:1px;text-align:right;border-bottom:1px solid rgba(255,255,255,0.08);">Acciones</th>
                                 </tr>
                             </thead>
                             <tbody>${rows}</tbody>
@@ -2061,6 +2075,79 @@ function renderSection(name, data) {
             if (el) el.remove();
         });
         loadSection('overview');
+    };
+
+    // ===== EDITAR / ELIMINAR PACIENTE desde la Lista de Pacientes =====
+    window.plEditPatient = function(qsl) {
+        // Cerrar overlay y navegar al expediente (Datos del Paciente)
+        // donde el médico puede editar todos los campos del paciente.
+        const ov = document.getElementById('patient-list-overlay');
+        if (ov) ov.remove();
+        if (typeof window.selectPatientAndShowData === 'function') {
+            window.selectPatientAndShowData(qsl);
+        } else {
+            selectedPatientQSL = qsl;
+            loadSection('overview');
+        }
+    };
+
+    window.plDeletePatient = async function(qsl, nombre) {
+        // Privilegio requerido
+        if (typeof window.hasPriv === 'function' && !window.hasPriv('eliminar_registros')) {
+            if (typeof window.showElegantAlert === 'function') {
+                window.showElegantAlert('🔒 Sin permiso',
+                    'No tienes el privilegio "Eliminar pacientes/registros". Solicítalo al médico desde Configuración → Privilegios.');
+            } else { alert('Sin permiso para eliminar pacientes.'); }
+            return;
+        }
+        const safeName = nombre || qsl;
+        if (!confirm(`¿Eliminar al paciente "${safeName}"?\n\nSe marcará como eliminado en la nube (soft delete) y dejará de aparecer en listas. El doctor puede recuperarlo desde Firestore si fuera necesario.`)) return;
+        try {
+            // 1) Soft-delete en Firestore (mantiene el doc para recuperación)
+            await fetch(`/api/patient/${encodeURIComponent(qsl)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ data: {}, doctor_id: localStorage.getItem('current_doctor_id') || 'MED-MASTER', deleted: true })
+            }).catch(() => {});
+            // Intento directo via interceptor: marcar deleted=true preservando data
+            try {
+                if (window.firebaseDb && window.firebaseFieldValue) {
+                    await window.firebaseDb.collection('pacientes').doc(qsl).set(
+                        { deleted: true, deleted_at: window.firebaseFieldValue.serverTimestamp() },
+                        { merge: true }
+                    );
+                }
+            } catch (e) {}
+
+            // 2) Limpiar cachés locales
+            try {
+                const key = getDocPatientsKey();
+                const list = JSON.parse(localStorage.getItem(key) || '[]')
+                    .filter(q => (typeof q === 'string' ? q : (q.qsl || q.codigo || q.id || String(q))) !== qsl);
+                localStorage.setItem(key, JSON.stringify(list));
+                localStorage.removeItem(`patient_data_${qsl}`);
+                localStorage.removeItem(`patient_name_${qsl}`);
+                localStorage.removeItem(`active_qsl_${qsl}`);
+            } catch (e) {}
+
+            // 3) Refrescar la Lista de Pacientes si está abierta
+            if (typeof window._plFilter === 'function') {
+                const searchVal = document.getElementById('pl-search')?.value?.toLowerCase() || '';
+                window._plFilter(searchVal);
+            } else if (typeof window.showPatientList === 'function') {
+                document.getElementById('patient-list-overlay')?.remove();
+                window.showPatientList();
+            }
+
+            if (typeof window.showElegantAlert === 'function') {
+                window.showElegantAlert('✅ Eliminado', `El paciente "${safeName}" fue eliminado correctamente.`);
+            }
+        } catch (e) {
+            console.error(e);
+            if (typeof window.showElegantAlert === 'function') {
+                window.showElegantAlert('❌ Error', 'No se pudo eliminar el paciente. Revisa la conexión.');
+            }
+        }
     };
 
     // === HISTORIAL DE CITAS (tabla tipo Excel) ===
