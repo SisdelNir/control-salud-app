@@ -2081,6 +2081,18 @@ function renderSection(name, data) {
         loadSection('overview');
     };
 
+    // Regresar al "Menú Principal" desde el Expediente:
+    // limpia el paciente seleccionado y vuelve a Consulta Médica
+    // (que muestra el buscador + lista de pacientes para hoy/mañana).
+    window.regresarMenuPrincipal = function() {
+        selectedPatientQSL = null;
+        // Marcar la pestaña de Consulta Médica como activa
+        Array.from(navItems).forEach(n => n.classList.remove('active'));
+        const consultTab = Array.from(navItems).find(item => item.getAttribute('data-section') === 'consultation');
+        if (consultTab) consultTab.classList.add('active');
+        loadSection('consultation');
+    };
+
     // ===== EDITAR / ELIMINAR PACIENTE desde la Lista de Pacientes =====
     window.plEditPatient = function(qsl) {
         // Cerrar overlay y navegar al expediente (Datos del Paciente)
@@ -3400,6 +3412,23 @@ function renderSection(name, data) {
         const isMed = userRole === 'medico';
 
         contentArea.innerHTML = `
+            <div style="display:flex; justify-content:flex-end; margin-bottom:14px;">
+                <button onclick="window.regresarMenuPrincipal()"
+                    style="background:linear-gradient(135deg, rgba(96,165,250,0.18), rgba(96,165,250,0.06));
+                           border:1px solid rgba(96,165,250,0.4); color:#60a5fa;
+                           padding:10px 20px; border-radius:10px; cursor:pointer;
+                           font-size:14px; font-weight:700; display:inline-flex; align-items:center; gap:8px;
+                           transition:transform 0.15s;"
+                    onmouseover="this.style.transform='translateY(-1px)'"
+                    onmouseout="this.style.transform='none'"
+                    title="Volver al menú principal de la Consulta Médica">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                        <line x1="19" y1="12" x2="5" y2="12"></line>
+                        <polyline points="12 19 5 12 12 5"></polyline>
+                    </svg>
+                    Regresar al Menú Principal
+                </button>
+            </div>
             <div class="dashboard-grid">
                 <!-- Seccion 1: FICHA CLINICA -->
                 <div class="widget-card animate-in" style="grid-column: span 2; padding: 40px; border: 3px solid rgba(34, 211, 238, 0.4); border-radius: 24px;">
