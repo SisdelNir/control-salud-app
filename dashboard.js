@@ -2092,10 +2092,10 @@ function renderSection(name, data) {
                                     </th>
                                     <th style="padding:0;"></th>
                                     <th style="padding:5px 14px 2px;text-align:right;border-bottom:none;white-space:nowrap;">
-                                        <button onclick="window.showAllPatients()" title="Ver todos los pacientes registrados con buscador inteligente" style="background:linear-gradient(135deg,rgba(34,211,238,0.2),rgba(34,211,238,0.05));border:1px solid rgba(34,211,238,0.5);color:#67e8f9;padding:6px 14px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;letter-spacing:0.5px;margin-right:6px;">
-                                            👥 PACIENTES AGENDADOS
+                                        <button onclick="window.showAllPatients()" title="Ver todos los pacientes registrados con buscador inteligente" style="background:linear-gradient(135deg,rgba(34,211,238,0.2),rgba(34,211,238,0.05));border:1px solid rgba(34,211,238,0.5);color:#67e8f9;padding:4px 10px;border-radius:7px;cursor:pointer;font-size:8.5px;font-weight:700;display:inline-flex;align-items:center;gap:4px;letter-spacing:0.4px;margin-right:5px;">
+                                            👥 LISTADO GENERAL
                                         </button>
-                                        ${(typeof window.hasPriv !== 'function' || window.hasPriv('ver_historial_citas')) ? `<button onclick="window.showAppointmentHistory()" title="Historial completo de citas atendidas y no atendidas" style="background:linear-gradient(135deg,rgba(168,85,247,0.2),rgba(168,85,247,0.05));border:1px solid rgba(168,85,247,0.5);color:#c4b5fd;padding:6px 14px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;letter-spacing:0.5px;">
+                                        ${(typeof window.hasPriv !== 'function' || window.hasPriv('ver_historial_citas')) ? `<button onclick="window.showAppointmentHistory()" title="Historial completo de citas atendidas y no atendidas" style="background:linear-gradient(135deg,rgba(168,85,247,0.2),rgba(168,85,247,0.05));border:1px solid rgba(168,85,247,0.5);color:#c4b5fd;padding:4px 10px;border-radius:7px;cursor:pointer;font-size:8.5px;font-weight:700;display:inline-flex;align-items:center;gap:4px;letter-spacing:0.4px;">
                                             📋 HISTORIAL
                                         </button>` : ''}
                                     </th>
