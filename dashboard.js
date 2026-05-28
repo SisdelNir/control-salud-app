@@ -2091,7 +2091,10 @@ function renderSection(name, data) {
                                         <span style="font-size:15px;color:rgba(34,211,238,0.65);font-weight:600;letter-spacing:0.5px;">📡 Estará enviando datos</span>
                                     </th>
                                     <th style="padding:0;"></th>
-                                    <th style="padding:5px 14px 2px;text-align:right;border-bottom:none;">
+                                    <th style="padding:5px 14px 2px;text-align:right;border-bottom:none;white-space:nowrap;">
+                                        <button onclick="window.showAllPatients()" title="Ver todos los pacientes registrados con buscador inteligente" style="background:linear-gradient(135deg,rgba(34,211,238,0.2),rgba(34,211,238,0.05));border:1px solid rgba(34,211,238,0.5);color:#67e8f9;padding:6px 14px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;letter-spacing:0.5px;margin-right:6px;">
+                                            👥 PACIENTES AGENDADOS
+                                        </button>
                                         ${(typeof window.hasPriv !== 'function' || window.hasPriv('ver_historial_citas')) ? `<button onclick="window.showAppointmentHistory()" title="Historial completo de citas atendidas y no atendidas" style="background:linear-gradient(135deg,rgba(168,85,247,0.2),rgba(168,85,247,0.05));border:1px solid rgba(168,85,247,0.5);color:#c4b5fd;padding:6px 14px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;letter-spacing:0.5px;">
                                             📋 HISTORIAL
                                         </button>` : ''}
@@ -2227,6 +2230,164 @@ function renderSection(name, data) {
                 window.showElegantAlert('❌ Error', 'No se pudo eliminar el paciente. Revisa la conexión.');
             }
         }
+    };
+
+    // === PACIENTES AGENDADOS — Vista completa con buscador inteligente ===
+    // Muestra TODOS los pacientes del registro (sin filtro de fecha).
+    // Búsqueda con autocompletado: el mejor match aparece arriba.
+    // Pulsar Enter en el input → abre automáticamente el primer resultado.
+    window.showAllPatients = function() {
+        const key = getDocPatientsKey();
+        const registry = JSON.parse(localStorage.getItem(key) || '[]');
+        const allAppts = window.getAppointments ? window.getAppointments() : [];
+
+        // Construir lista enriquecida una sola vez
+        const patients = registry.map(q => {
+            const qsl = typeof q === 'string' ? q : (q.qsl || q.codigo || q.id || String(q));
+            const data = JSON.parse(localStorage.getItem(`patient_data_${qsl}`) || '{}');
+            const name = data.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || qsl;
+            const telefono = data.telefono || '';
+            const dpi = data.id_identificacion || data.dpi || '';
+            // Cuántas citas tiene en total y cuándo fue la última
+            const myAppts = allAppts.filter(a => a.qsl === qsl || a.name === name);
+            const futuras = myAppts.filter(a => new Date(a.date + 'T' + (a.time || '00:00')) >= new Date()).length;
+            const pasadas = myAppts.length - futuras;
+            // Última atención (consulta registrada)
+            const consultations = data.consultations || [];
+            const lastConsult = consultations[consultations.length - 1];
+            const lastDate = lastConsult ? (lastConsult.date || '—') : '—';
+            return {
+                qsl, name, telefono, dpi,
+                searchText: (name + ' ' + telefono + ' ' + dpi + ' ' + qsl).toLowerCase(),
+                citasTotales: myAppts.length,
+                futuras, pasadas, lastDate
+            };
+        }).sort((a, b) => a.name.localeCompare(b.name, 'es', { sensitivity: 'base' }));
+
+        const overlay = document.createElement('div');
+        overlay.id = 'all-patients-overlay';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.94);z-index:9999999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(10px);padding:12px;box-sizing:border-box;';
+
+        function _rankAndFilter(query) {
+            const q = (query || '').toLowerCase().trim();
+            if (!q) return patients;
+            // Rank: 100 = nombre empieza con query
+            //        50 = nombre contiene query
+            //        20 = teléfono/DPI/qsl contiene
+            //         0 = no match
+            return patients.map(p => {
+                const n = p.name.toLowerCase();
+                let score = 0;
+                if (n.startsWith(q)) score = 100;
+                else if (n.includes(q)) score = 50;
+                else if (p.searchText.includes(q)) score = 20;
+                return { ...p, _score: score };
+            }).filter(p => p._score > 0)
+              .sort((a, b) => b._score - a._score || a.name.localeCompare(b.name, 'es'));
+        }
+
+        function renderList(q) {
+            const filtered = _rankAndFilter(q);
+            const rows = filtered.length === 0
+                ? `<tr><td colspan="6" style="padding:40px;text-align:center;color:rgba(255,255,255,0.35);font-size:14px;">No se encontraron pacientes${q ? ' que coincidan con <b>"' + q + '"</b>' : ''}.</td></tr>`
+                : filtered.map((p, i) => {
+                    const safeName = (p.name || p.qsl).replace(/'/g, "\\'");
+                    const isFirst = i === 0;
+                    const highlight = (q && isFirst)
+                        ? 'background:rgba(34,211,238,0.10);border-left:3px solid #22d3ee;'
+                        : '';
+                    return `
+                    <tr id="ap-row-${i}" data-qsl="${p.qsl}" data-name="${safeName}"
+                        style="border-bottom:1px solid rgba(255,255,255,0.05);cursor:pointer;transition:background 0.15s;${highlight}"
+                        onmouseover="this.style.background='rgba(34,211,238,0.08)'"
+                        onmouseout="this.style.background='${highlight ? 'rgba(34,211,238,0.10)' : 'transparent'}'"
+                        onclick="window._apSelect('${p.qsl}')">
+                        <td style="padding:11px 14px;color:white;font-weight:600;font-size:13px;">${p.name}${isFirst && q ? ' <span style=\"background:rgba(34,211,238,0.2);border:1px solid rgba(34,211,238,0.4);color:#67e8f9;font-size:9px;padding:2px 6px;border-radius:5px;font-weight:700;letter-spacing:0.5px;margin-left:8px;\">↵ ENTER</span>' : ''}</td>
+                        <td style="padding:11px 14px;color:rgba(255,255,255,0.65);font-size:12px;">${p.telefono || '—'}</td>
+                        <td style="padding:11px 14px;color:rgba(255,255,255,0.55);font-size:12px;">${p.dpi || '—'}</td>
+                        <td style="padding:11px 14px;"><span style="background:rgba(34,211,238,0.1);color:#22d3ee;border:1px solid rgba(34,211,238,0.25);border-radius:6px;padding:2px 8px;font-size:10px;font-weight:700;">${p.qsl}</span></td>
+                        <td style="padding:11px 14px;color:rgba(255,255,255,0.55);font-size:12px;text-align:center;">
+                            ${p.citasTotales > 0 ? `<b style="color:#34d399;">${p.futuras}</b> próx · <b style="color:rgba(255,255,255,0.4);">${p.pasadas}</b> pas` : '<span style="color:rgba(255,255,255,0.25);">sin citas</span>'}
+                        </td>
+                        <td style="padding:11px 14px;text-align:right;">
+                            <span style="background:rgba(34,211,238,0.12);color:#67e8f9;border:1px solid rgba(34,211,238,0.3);padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;">ABRIR ›</span>
+                        </td>
+                    </tr>`;
+                }).join('');
+
+            overlay.innerHTML = `
+                <div style="background:linear-gradient(145deg,#0f172a,#1a2540);border:1px solid rgba(34,211,238,0.35);border-radius:20px;padding:24px;width:98vw;height:94vh;display:flex;flex-direction:column;box-shadow:0 30px 80px rgba(0,0,0,0.7);box-sizing:border-box;">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;gap:14px;flex-wrap:wrap;">
+                        <div>
+                            <h3 style="color:#67e8f9;margin:0;font-size:20px;display:flex;align-items:center;gap:10px;">👥 Pacientes Agendados</h3>
+                            <p style="color:rgba(255,255,255,0.5);margin:4px 0 0;font-size:12px;">
+                                Total: <b style="color:white;">${patients.length}</b> pacientes registrados · Atendidos, por atender y sin cita
+                            </p>
+                        </div>
+                        <button onclick="document.getElementById('all-patients-overlay').remove()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:white;padding:8px 16px;border-radius:10px;cursor:pointer;font-size:14px;">✕ Cerrar</button>
+                    </div>
+
+                    <div style="margin-bottom:14px;">
+                        <input type="text" id="ap-search" placeholder="🔍  Escribe nombre, teléfono, DPI o código…"
+                            value="${q || ''}"
+                            oninput="window._apFilter(this.value)"
+                            onkeydown="if(event.key==='Enter'){event.preventDefault();window._apEnter()}"
+                            autocomplete="off" autocorrect="off" spellcheck="false"
+                            style="width:100%;background:rgba(0,0,0,0.4);border:1px solid rgba(34,211,238,0.3);color:white;padding:14px 18px;border-radius:12px;font-size:15px;box-sizing:border-box;">
+                        <p style="margin:8px 2px 0;font-size:11px;color:rgba(255,255,255,0.4);">
+                            💡 El primer resultado aparece marcado en azul. Pulsa <b style="color:#67e8f9;">Enter</b> para abrirlo directamente.
+                        </p>
+                    </div>
+
+                    <div style="overflow:auto;flex:1;border-radius:12px;border:1px solid rgba(255,255,255,0.06);">
+                        <table style="width:100%;border-collapse:collapse;">
+                            <thead style="position:sticky;top:0;background:#0f172a;z-index:1;">
+                                <tr>
+                                    <th style="padding:11px 14px;text-align:left;font-size:11px;color:rgba(103,232,249,0.85);text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid rgba(34,211,238,0.2);">Nombre</th>
+                                    <th style="padding:11px 14px;text-align:left;font-size:11px;color:rgba(103,232,249,0.85);text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid rgba(34,211,238,0.2);">Teléfono</th>
+                                    <th style="padding:11px 14px;text-align:left;font-size:11px;color:rgba(103,232,249,0.85);text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid rgba(34,211,238,0.2);">DPI</th>
+                                    <th style="padding:11px 14px;text-align:left;font-size:11px;color:rgba(103,232,249,0.85);text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid rgba(34,211,238,0.2);">Código</th>
+                                    <th style="padding:11px 14px;text-align:center;font-size:11px;color:rgba(103,232,249,0.85);text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid rgba(34,211,238,0.2);">Citas</th>
+                                    <th style="padding:11px 14px;text-align:right;font-size:11px;color:rgba(103,232,249,0.85);text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid rgba(34,211,238,0.2);"></th>
+                                </tr>
+                            </thead>
+                            <tbody>${rows}</tbody>
+                        </table>
+                    </div>
+
+                    <div style="margin-top:10px;font-size:12px;color:rgba(255,255,255,0.4);text-align:center;">
+                        <span id="ap-count">${filtered.length} de ${patients.length} pacientes</span>
+                    </div>
+                </div>`;
+
+            // Re-focus search input al volver a renderizar
+            requestAnimationFrame(() => {
+                const inp = document.getElementById('ap-search');
+                if (inp) {
+                    inp.focus();
+                    inp.setSelectionRange(inp.value.length, inp.value.length);
+                }
+            });
+        }
+
+        window._apFilter = renderList;
+        window._apEnter = function() {
+            const q = (document.getElementById('ap-search')?.value || '').toLowerCase().trim();
+            const filtered = _rankAndFilter(q);
+            if (filtered.length > 0) window._apSelect(filtered[0].qsl);
+        };
+        window._apSelect = function(qsl) {
+            overlay.remove();
+            // Cerrar también lista de pacientes si estaba abierta
+            document.getElementById('patient-list-overlay')?.remove();
+            if (typeof window.selectPatientAndShowData === 'function') {
+                window.selectPatientAndShowData(qsl);
+            }
+        };
+
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        renderList('');
+        document.body.appendChild(overlay);
     };
 
     // === HISTORIAL DE CITAS (tabla tipo Excel) ===
