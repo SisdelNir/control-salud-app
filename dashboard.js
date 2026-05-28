@@ -8177,8 +8177,11 @@ function renderSection(name, data) {
                             <button onclick="window._arShareWhatsApp()" style="background:rgba(37,211,102,0.15);border:1px solid rgba(37,211,102,0.4);color:#4ade80;padding:9px 18px;border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;">💬 WhatsApp</button>
                         </div>
                     </div>
-                    <div style="display:flex;justify-content:center;align-items:center;background:white;padding:12px;border-radius:14px;">
-                        <canvas id="ar-qr-canvas" width="180" height="180"></canvas>
+                    <div style="display:flex;justify-content:center;align-items:center;background:white;padding:12px;border-radius:14px;min-width:204px;min-height:204px;">
+                        <img id="ar-qr-img" alt="Código QR" width="180" height="180"
+                            src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&margin=0&data=${encodeURIComponent(url)}"
+                            style="display:block;width:180px;height:180px;"
+                            onerror="this.onerror=null;this.src='https://chart.googleapis.com/chart?chs=180x180&cht=qr&chl='+encodeURIComponent(document.getElementById('ar-public-url').textContent);">
                     </div>
                 </div>
             </div>
@@ -8206,15 +8209,11 @@ function renderSection(name, data) {
         });
         window._arWeeklyState = ws;
 
-        // Render QR del link público
-        const canvas = document.getElementById('ar-qr-canvas');
+        // Refrescar el QR (img basada en servicio externo, no depende de lib JS)
+        const qrImg = document.getElementById('ar-qr-img');
         const url = document.getElementById('ar-public-url')?.textContent || '';
-        if (canvas && typeof QRCode !== 'undefined' && url) {
-            try {
-                QRCode.toCanvas(canvas, url, { width: 180, margin: 1 }, function(err) {
-                    if (err) console.warn('QR error:', err);
-                });
-            } catch (e) { console.warn('QR generation:', e); }
+        if (qrImg && url) {
+            qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&margin=0&data=${encodeURIComponent(url)}`;
         }
     }
 
@@ -8277,16 +8276,26 @@ function renderSection(name, data) {
         });
     };
 
-    window._arDownloadQR = function() {
-        const canvas = document.getElementById('ar-qr-canvas');
-        if (!canvas) return;
-        const dataURL = canvas.toDataURL('image/png');
-        const a = document.createElement('a');
-        a.href = dataURL;
-        a.download = 'dr-sisdel-agenda-qr.png';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+    window._arDownloadQR = async function() {
+        const url = document.getElementById('ar-public-url')?.textContent || '';
+        if (!url) return;
+        // Descargamos una versión más grande (300px) para impresión clara
+        const qrSrc = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&margin=2&data=${encodeURIComponent(url)}`;
+        try {
+            const r = await fetch(qrSrc);
+            const blob = await r.blob();
+            const objectUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = objectUrl;
+            a.download = 'dr-sisdel-agenda-qr.png';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+        } catch (e) {
+            // Fallback: abrir en nueva pestaña para que el usuario guarde manualmente
+            window.open(qrSrc, '_blank');
+        }
     };
 
     window._arShareWhatsApp = function() {
