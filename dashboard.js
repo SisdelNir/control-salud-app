@@ -4782,7 +4782,10 @@ function renderSection(name, data) {
         } catch (e) { return false; }
     }
 
-    async function renderSettings() {
+    // Acepta un targetEl opcional para poder embeber este formulario dentro
+    // del módulo Configuración (como tab "Datos del Médico") en vez de pintarlo
+    // a pantalla completa en contentArea.
+    async function renderSettings(targetEl) {
         const isDoc = userRole === 'medico';
         const isProgrammer = qslCode === 'MED-MASTER';
         const docId = localStorage.getItem('current_doctor_id');
@@ -4801,7 +4804,8 @@ function renderSection(name, data) {
             }
         }
 
-        contentArea.innerHTML = `
+        const target = targetEl || contentArea;
+        target.innerHTML = `
             <div class="widget-card animate-in" style="max-width: 500px; margin: 0 auto; border: 3px solid #fbbf24; box-shadow: 0 0 20px rgba(251, 191, 36, 0.1); border-radius: 24px; padding: 40px;">
                 <h3 class="widget-title" style="color: #fbbf24;">${isProgrammer ? 'Perfil de Programador' : 'Datos del Médico'}</h3>
                 <div class="input-group" style="margin-bottom: 20px;">
@@ -7749,6 +7753,7 @@ function renderSection(name, data) {
                 <button class="config-tab-btn" onclick="window.switchConfigurationTab('privilegios', this)">🔐 Privilegios</button>
                 <button class="config-tab-btn" onclick="window.switchConfigurationTab('recordatorios', this)">🔔 Recordatorios</button>
                 <button class="config-tab-btn" onclick="window.switchConfigurationTab('apariencia', this)">🎨 Apariencia</button>
+                <button class="config-tab-btn" onclick="window.switchConfigurationTab('datos_medico', this)">👨‍⚕️ Datos del Médico</button>
             </div>
             <div id="config-tab-content">
                 <div class="loading-state"><div class="spinner"></div><p>Cargando usuarios...</p></div>
@@ -7782,6 +7787,10 @@ function renderSection(name, data) {
         } else if (tab === 'recordatorios') {
             tabContent.innerHTML = buildRecordatoriosTab();
             setupRecordatoriosListeners();
+        } else if (tab === 'datos_medico') {
+            // Renderiza el formulario de "Datos del Médico" DENTRO del tab.
+            // renderSettings ahora acepta un target opcional — pasamos el div del tab.
+            await renderSettings(tabContent);
         }
     };
 

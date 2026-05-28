@@ -518,6 +518,178 @@
         await batch.commit();
     }
 
+    // ----- AGENDA REMOTA (booking público de pacientes) -----
+    // La config se guarda en el mismo doc settings/{doctor_id} como campo
+    // 'remote_booking'. Hereda merge — no toca appearance/reminders.
+
+    function _normalizeBookingConfig(cfg) {
+        const def = {
+            enabled: false,
+            session_duration: 30,
+            months_ahead: 1,
+            weekly_schedule: { mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [] }
+        };
+        const out = Object.assign({}, def, cfg || {});
+        if (!out.weekly_schedule) out.weekly_schedule = def.weekly_schedule;
+        ['mon','tue','wed','thu','fri','sat','sun'].forEach(k => {
+            if (!Array.isArray(out.weekly_schedule[k])) out.weekly_schedule[k] = [];
+        });
+        return out;
+    }
+
+    async function getBookingConfig(doctor_id) {
+        const did = doctor_id || 'MED-MASTER';
+        const doc = await db().collection(COLLECTIONS.settings).doc(did).get();
+        if (!doc.exists) return { success: true, config: _normalizeBookingConfig() };
+        const data = doc.data() || {};
+        return { success: true, config: _normalizeBookingConfig(data.remote_booking) };
+    }
+
+    async function saveBookingConfig(doctor_id, config) {
+        const did = doctor_id || 'MED-MASTER';
+        const cleaned = _normalizeBookingConfig(config);
+        await db().collection(COLLECTIONS.settings).doc(did).set(
+            { remote_booking: cleaned, updated_at: serverTimestamp() },
+            { merge: true }
+        );
+        return { success: true };
+    }
+
+    // Devuelve nombre del médico para mostrar en la página pública.
+    async function getDoctorPublicInfo(doctor_id) {
+        try {
+            const doc = await db().collection(COLLECTIONS.medicos).doc(doctor_id).get();
+            if (!doc.exists) return { success: false };
+            const d = doc.data();
+            if (d.deleted) return { success: false };
+            const data = d.data || {};
+            return {
+                success: true,
+                doctor: {
+                    id: doctor_id,
+                    nombre: data.nombre_completo || 'Médico',
+                    especialidad: data.especialidad || '',
+                    telefono: data.telefono || ''
+                }
+            };
+        } catch (e) { return { success: false }; }
+    }
+
+    // Devuelve los slots disponibles para una fecha dada (YYYY-MM-DD).
+    // Calcula slots desde weekly_schedule + session_duration y resta los ocupados.
+    async function listAvailableSlots({ doctor_id, date }) {
+        if (!doctor_id || !date) return { success: false, slots: [] };
+        const cfg = (await getBookingConfig(doctor_id)).config;
+        if (!cfg.enabled) return { success: true, slots: [], disabled: true };
+
+        // Día de la semana
+        const dt = new Date(date + 'T12:00:00');
+        const weekdayIdx = dt.getDay(); // 0=Sun
+        const keys = ['sun','mon','tue','wed','thu','fri','sat'];
+        const ranges = cfg.weekly_schedule[keys[weekdayIdx]] || [];
+
+        // Generar todos los slots del día según rangos
+        const dur = parseInt(cfg.session_duration) || 30;
+        const slots = [];
+        ranges.forEach(r => {
+            const [sh, sm] = (r.start || '00:00').split(':').map(n => parseInt(n));
+            const [eh, em] = (r.end || '00:00').split(':').map(n => parseInt(n));
+            let mins = sh * 60 + sm;
+            const endMins = eh * 60 + em;
+            while (mins + dur <= endMins) {
+                const hh = String(Math.floor(mins / 60)).padStart(2, '0');
+                const mm = String(mins % 60).padStart(2, '0');
+                slots.push(`${hh}:${mm}`);
+                mins += dur;
+            }
+        });
+
+        // Restar slots ocupados (citas existentes ese día) — un cobertor amplio
+        const apptSnap = await db().collection(COLLECTIONS.citas)
+            .where('doctor_id', '==', doctor_id)
+            .where('fecha', '==', date)
+            .get();
+        const occupied = new Set(
+            apptSnap.docs.filter(d => !d.data().deleted).map(d => d.data().hora)
+        );
+        // Restar slots pasados (si la fecha es hoy)
+        const now = new Date();
+        const isToday = (date === now.getFullYear() + '-' +
+            String(now.getMonth()+1).padStart(2,'0') + '-' +
+            String(now.getDate()).padStart(2,'0'));
+        const nowMinutes = now.getHours() * 60 + now.getMinutes();
+
+        const available = slots.filter(s => {
+            if (occupied.has(s)) return false;
+            if (isToday) {
+                const [h, m] = s.split(':').map(n => parseInt(n));
+                if (h * 60 + m <= nowMinutes) return false;
+            }
+            return true;
+        });
+        return { success: true, slots: available, session_duration: dur };
+    }
+
+    // Crea paciente nuevo + cita en un solo flujo desde la página pública.
+    // Verifica disponibilidad del slot antes de crear para evitar doble-booking.
+    async function createPublicAppointment(payload) {
+        const { doctor_id, fecha, hora, paciente_nombre, paciente_telefono, motivo } = payload;
+        if (!doctor_id || !fecha || !hora || !paciente_nombre || !paciente_telefono) {
+            return { success: false, error: 'Faltan campos obligatorios.' };
+        }
+        // 1) Verificar que el slot sigue libre (chequeo previo)
+        const slots = await listAvailableSlots({ doctor_id, date: fecha });
+        if (!slots.success || slots.disabled) {
+            return { success: false, error: 'La agenda remota no está disponible.' };
+        }
+        if (!slots.slots.includes(hora)) {
+            return { success: false, error: 'Ese horario ya fue tomado. Por favor elige otro.' };
+        }
+
+        // 2) Generar QSL único (patrón compatible con dashboard.js)
+        const first = (paciente_nombre.split(' ')[0] || 'A').charAt(0).toUpperCase();
+        const second = (paciente_nombre.split(' ')[1] || 'X').charAt(0).toUpperCase();
+        const last4 = String(paciente_telefono).replace(/\D/g, '').slice(-4) || '0000';
+        let qsl = `${first}${second}${last4}`;
+        // Si ya existe, añadir sufijo random
+        const exist = await db().collection(COLLECTIONS.pacientes).doc(qsl).get();
+        if (exist.exists) qsl = qsl + Math.floor(Math.random() * 90);
+
+        // 3) Guardar paciente
+        const patientData = {
+            nombre_completo: paciente_nombre,
+            telefono: paciente_telefono,
+            illness: motivo || 'Cita agendada remotamente',
+            meds: [],
+            source: 'public_booking'
+        };
+        await db().collection(COLLECTIONS.pacientes).doc(qsl).set({
+            data: patientData,
+            doctor_id,
+            nombre: paciente_nombre,
+            created_at: serverTimestamp(),
+            updated_at: serverTimestamp(),
+            source: 'public_booking'
+        }, { merge: true });
+
+        // 4) Crear cita con ID determinístico (evita duplicados)
+        const sanitize = s => String(s || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const apptId = `${sanitize(doctor_id)}__${sanitize(qsl)}__${sanitize(fecha)}__${sanitize(hora)}`;
+        await db().collection(COLLECTIONS.citas).doc(apptId).set({
+            doctor_id,
+            qsl_code: qsl,
+            paciente_nombre,
+            paciente_telefono,
+            fecha,
+            hora,
+            motivo: motivo || '',
+            source: 'public_booking',
+            created_at: serverTimestamp()
+        }, { merge: true });
+
+        return { success: true, qsl, fecha, hora };
+    }
+
     window.firestoreClient = {
         verifyPatient, getPatient, savePatient, listPatients, togglePatientAlerts,
         login,
@@ -528,7 +700,9 @@
         listPatientAlerts, savePatientAlert,
         listMessageHistory, saveMessageHistory,
         getAppearance, saveAppearance,
-        listFinanzas, saveFinanza, deleteFinanza, liquidarCargosFIFO
+        listFinanzas, saveFinanza, deleteFinanza, liquidarCargosFIFO,
+        getBookingConfig, saveBookingConfig, listAvailableSlots,
+        createPublicAppointment, getDoctorPublicInfo
     };
 
     // ============================================================
@@ -642,6 +816,22 @@
         if ((mf = path.match(/^\/api\/finanzas\/([^/]+)$/))) {
             if (method === 'PUT' || method === 'POST') return await saveFinanza(mf[1], body || {});
             if (method === 'DELETE')                  return await deleteFinanza(mf[1]);
+        }
+
+        // ===== AGENDA REMOTA (booking público) =====
+        let mb;
+        if ((mb = path.match(/^\/api\/booking\/([^/]+)\/config$/))) {
+            if (method === 'GET')  return await getBookingConfig(mb[1]);
+            if (method === 'POST') return await saveBookingConfig(mb[1], body || {});
+        }
+        if ((mb = path.match(/^\/api\/booking\/([^/]+)\/info$/))) {
+            if (method === 'GET') return await getDoctorPublicInfo(mb[1]);
+        }
+        if ((mb = path.match(/^\/api\/booking\/([^/]+)\/slots$/))) {
+            if (method === 'GET') return await listAvailableSlots({ doctor_id: mb[1], date: params.date });
+        }
+        if ((mb = path.match(/^\/api\/booking\/([^/]+)\/appointment$/))) {
+            if (method === 'POST') return await createPublicAppointment(Object.assign({}, body || {}, { doctor_id: mb[1] }));
         }
 
         throw new Error(`Ruta no implementada: ${method} ${path}`);
