@@ -1,3 +1,0 @@
-TAREAS PENDIENTES
-
-Como hacer para que nuevos usuarios tengan base de datos en limpio 

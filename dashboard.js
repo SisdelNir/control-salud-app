@@ -1388,11 +1388,54 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         const appointments = window.getAppointments();
         const dayAppts = appointments.filter(a => a.date === dateStr);
-        
+
+        // Lee config de horarios del médico (si existe). Si no, genera slots
+        // de 00:00 a 23:30 cada 30 min (comportamiento clásico).
+        let bookingCfg = null;
+        try {
+            const docId = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+            const raw = localStorage.getItem(`booking_config_${docId}`);
+            if (raw) bookingCfg = JSON.parse(raw);
+        } catch (e) {}
+
+        // Construye lista de timeStrs según config o fallback completo
+        const cellDate = new Date(dateStr + 'T12:00:00');
+        const weekKeys = ['sun','mon','tue','wed','thu','fri','sat'];
+        const weekday = weekKeys[cellDate.getDay()];
+
+        let allTimeStrs = [];           // todos los slots a renderizar
+        let inScheduleSet = null;        // null = sin config (todos válidos); Set = solo estos son laborales
+        if (bookingCfg && bookingCfg.weekly_schedule && Array.isArray(bookingCfg.weekly_schedule[weekday])) {
+            const ranges = bookingCfg.weekly_schedule[weekday];
+            const dur = parseInt(bookingCfg.session_duration) || 30;
+            inScheduleSet = new Set();
+            ranges.forEach(r => {
+                const [sh, sm] = (r.start || '00:00').split(':').map(n => parseInt(n));
+                const [eh, em] = (r.end || '00:00').split(':').map(n => parseInt(n));
+                let mins = sh * 60 + sm;
+                const endMins = eh * 60 + em;
+                while (mins + dur <= endMins) {
+                    const t = String(Math.floor(mins / 60)).padStart(2,'0') + ':' + String(mins % 60).padStart(2,'0');
+                    inScheduleSet.add(t);
+                    mins += dur;
+                }
+            });
+            // Por defecto solo mostramos los slots laborales + los slots con citas
+            // (para no perder citas que existan fuera del horario configurado).
+            const setTimes = new Set(inScheduleSet);
+            dayAppts.forEach(a => { if (a.time) setTimes.add(a.time); });
+            allTimeStrs = Array.from(setTimes).sort();
+        } else {
+            for (let i = 0; i <= 23; i++) {
+                for (let j of ['00', '30']) {
+                    allTimeStrs.push(`${String(i).padStart(2,'0')}:${j}`);
+                }
+            }
+        }
+
         let timeslotsHtml = '';
-        for(let i = 0; i <= 23; i++) {
-            for(let j of ['00', '30']) {
-                const timeStr = `${String(i).padStart(2, '0')}:${j}`;
+        for (const timeStr of allTimeStrs) {
+            {
                 const apptBlock = dayAppts.find(a => a.time === timeStr);
                 
                 if(apptBlock) {
@@ -7751,6 +7794,7 @@ function renderSection(name, data) {
             <div class="config-tabs" id="config-tabs-bar" style="margin-bottom:24px;">
                 <button class="config-tab-btn active" onclick="window.switchConfigurationTab('usuarios', this)">🧑‍💼 Usuarios de Oficina</button>
                 <button class="config-tab-btn" onclick="window.switchConfigurationTab('privilegios', this)">🔐 Privilegios</button>
+                <button class="config-tab-btn" onclick="window.switchConfigurationTab('agenda_remota', this)">🌐 Agenda Remota</button>
                 <button class="config-tab-btn" onclick="window.switchConfigurationTab('recordatorios', this)">🔔 Recordatorios</button>
                 <button class="config-tab-btn" onclick="window.switchConfigurationTab('apariencia', this)">🎨 Apariencia</button>
                 <button class="config-tab-btn" onclick="window.switchConfigurationTab('datos_medico', this)">👨‍⚕️ Datos del Médico</button>
@@ -7787,6 +7831,10 @@ function renderSection(name, data) {
         } else if (tab === 'recordatorios') {
             tabContent.innerHTML = buildRecordatoriosTab();
             setupRecordatoriosListeners();
+        } else if (tab === 'agenda_remota') {
+            tabContent.innerHTML = '<div class="loading-state"><div class="spinner"></div></div>';
+            tabContent.innerHTML = await buildAgendaRemotaTab();
+            if (typeof setupAgendaRemotaListeners === 'function') setupAgendaRemotaListeners();
         } else if (tab === 'datos_medico') {
             // Renderiza el formulario de "Datos del Médico" DENTRO del tab.
             // renderSettings ahora acepta un target opcional — pasamos el div del tab.
@@ -7904,6 +7952,295 @@ function renderSection(name, data) {
     function setupRecordatoriosListeners() {
         // Listeners no son estrictamente necesarios — el guardar lee todo al pulsar GUARDAR
     }
+
+    // ============================================================
+    // ===  TAB: AGENDA REMOTA (booking público de pacientes) ===
+    // ============================================================
+    const _WEEKDAY_LABELS = {
+        mon: 'Lunes', tue: 'Martes', wed: 'Miércoles', thu: 'Jueves',
+        fri: 'Viernes', sat: 'Sábado', sun: 'Domingo'
+    };
+    const _WEEKDAY_ORDER = ['mon','tue','wed','thu','fri','sat','sun'];
+
+    function _bookingPublicUrl(doctor_id) {
+        return `${window.location.origin}/agendar.html?d=${encodeURIComponent(doctor_id)}`;
+    }
+
+    async function buildAgendaRemotaTab() {
+        const doctorId = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+        let cfg = { enabled: false, session_duration: 30, months_ahead: 1, weekly_schedule: { mon:[],tue:[],wed:[],thu:[],fri:[],sat:[],sun:[] } };
+        try {
+            const r = await fetch(`/api/booking/${encodeURIComponent(doctorId)}/config`);
+            const j = await r.json();
+            if (j.success) cfg = j.config;
+        } catch (e) { console.warn('buildAgendaRemotaTab:', e); }
+
+        const url = _bookingPublicUrl(doctorId);
+        const isEnabled = !!cfg.enabled;
+
+        // Helper para generar HTML de cada día
+        const dayRowsHtml = _WEEKDAY_ORDER.map(day => {
+            const ranges = cfg.weekly_schedule[day] || [];
+            const active = ranges.length > 0;
+            const rangesHtml = (active ? ranges : [{ start: '', end: '' }]).map((r, i) => `
+                <div class="ar-range-row" data-day="${day}" data-idx="${i}" style="display:flex;gap:8px;align-items:center;margin-bottom:6px;">
+                    <input type="time" class="ar-range-start" data-day="${day}" data-idx="${i}" value="${r.start || '08:00'}" style="background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.15);color:white;padding:6px 10px;border-radius:8px;font-size:13px;">
+                    <span style="color:rgba(255,255,255,0.45);font-size:12px;">a</span>
+                    <input type="time" class="ar-range-end" data-day="${day}" data-idx="${i}" value="${r.end || '17:00'}" style="background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.15);color:white;padding:6px 10px;border-radius:8px;font-size:13px;">
+                    <button onclick="window._arRemoveRange('${day}', ${i})" style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);color:#f87171;padding:4px 8px;border-radius:6px;cursor:pointer;font-size:11px;">🗑</button>
+                </div>
+            `).join('');
+
+            return `
+            <div class="ar-day-row" data-day="${day}" style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:14px 18px;margin-bottom:10px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:${active?'10px':'0'};">
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;color:white;font-weight:600;font-size:14px;">
+                        <input type="checkbox" class="ar-day-toggle" data-day="${day}" ${active?'checked':''} onchange="window._arToggleDay('${day}', this.checked)" style="width:18px;height:18px;accent-color:#34d399;">
+                        ${_WEEKDAY_LABELS[day]}
+                    </label>
+                    ${active ? `<button onclick="window._arAddRange('${day}')" style="background:rgba(52,211,153,0.12);border:1px solid rgba(52,211,153,0.35);color:#34d399;padding:5px 12px;border-radius:8px;cursor:pointer;font-size:11px;font-weight:600;">+ Añadir franja</button>` : ''}
+                </div>
+                <div class="ar-day-ranges" data-day="${day}" style="display:${active?'block':'none'};">${rangesHtml}</div>
+            </div>`;
+        }).join('');
+
+        return `
+        <div style="display:grid;grid-template-columns:1fr;gap:18px;">
+            <!-- TARJETA 1: Toggle on/off -->
+            <div style="background:linear-gradient(135deg,rgba(52,211,153,0.08),rgba(52,211,153,0.02));border:1px solid rgba(52,211,153,0.25);border-radius:16px;padding:22px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;">
+                    <div style="flex:1;min-width:240px;">
+                        <h3 style="color:white;font-size:17px;font-weight:700;margin:0 0 4px;">🌐 Agenda Remota</h3>
+                        <p style="color:rgba(255,255,255,0.55);font-size:13px;margin:0;">Permite que tus pacientes agenden citas por sí mismos desde un link compartible.</p>
+                    </div>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="ar-enabled" ${isEnabled?'checked':''}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+
+            <!-- TARJETA 2: Configuración general -->
+            <div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:22px;">
+                <h3 style="color:white;font-size:15px;font-weight:700;margin:0 0 14px;">⚙️ Parámetros</h3>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;">
+                    <div class="input-group">
+                        <label>Duración de cada cita</label>
+                        <select id="ar-session-duration" style="background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.15);color:white;padding:10px 12px;border-radius:8px;font-size:14px;width:100%;">
+                            <option value="30"  ${cfg.session_duration==30?'selected':''}>30 minutos (media hora)</option>
+                            <option value="60"  ${cfg.session_duration==60?'selected':''}>60 minutos (1 hora)</option>
+                            <option value="90"  ${cfg.session_duration==90?'selected':''}>90 minutos (hora y media)</option>
+                            <option value="120" ${cfg.session_duration==120?'selected':''}>120 minutos (2 horas)</option>
+                        </select>
+                    </div>
+                    <div class="input-group">
+                        <label>Meses adelante (rango de reserva)</label>
+                        <select id="ar-months-ahead" style="background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.15);color:white;padding:10px 12px;border-radius:8px;font-size:14px;width:100%;">
+                            <option value="1" ${cfg.months_ahead==1?'selected':''}>1 mes</option>
+                            <option value="2" ${cfg.months_ahead==2?'selected':''}>2 meses</option>
+                            <option value="3" ${cfg.months_ahead==3?'selected':''}>3 meses</option>
+                            <option value="6" ${cfg.months_ahead==6?'selected':''}>6 meses</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TARJETA 3: Horario semanal -->
+            <div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:22px;">
+                <h3 style="color:white;font-size:15px;font-weight:700;margin:0 0 6px;">📅 Horario semanal disponible</h3>
+                <p style="color:rgba(255,255,255,0.5);font-size:12px;margin:0 0 16px;">Marca los días que atiendes y los rangos horarios. Puedes añadir varias franjas por día (ej. mañana y tarde con almuerzo).</p>
+                ${dayRowsHtml}
+            </div>
+
+            <!-- TARJETA 4: Link público + QR -->
+            <div style="background:linear-gradient(135deg,rgba(96,165,250,0.06),rgba(96,165,250,0.02));border:1px solid rgba(96,165,250,0.25);border-radius:16px;padding:22px;">
+                <h3 style="color:white;font-size:15px;font-weight:700;margin:0 0 6px;">🔗 Link público para tus pacientes</h3>
+                <p style="color:rgba(255,255,255,0.5);font-size:12px;margin:0 0 16px;">Comparte este link o el QR. Los pacientes podrán agendar directamente sin necesidad de cuenta.</p>
+                <div style="display:grid;grid-template-columns:1fr 200px;gap:18px;align-items:center;">
+                    <div>
+                        <div style="background:rgba(0,0,0,0.4);border:1px solid rgba(96,165,250,0.35);border-radius:10px;padding:14px;color:#60a5fa;font-family:'Courier New',monospace;font-size:13px;word-break:break-all;margin-bottom:12px;" id="ar-public-url">${url}</div>
+                        <div style="display:flex;flex-wrap:wrap;gap:8px;">
+                            <button onclick="window._arCopyLink()" style="background:rgba(96,165,250,0.15);border:1px solid rgba(96,165,250,0.4);color:#60a5fa;padding:9px 18px;border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;">📋 Copiar Link</button>
+                            <button onclick="window._arDownloadQR()" style="background:rgba(167,139,250,0.15);border:1px solid rgba(167,139,250,0.4);color:#c4b5fd;padding:9px 18px;border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;">📥 Descargar QR</button>
+                            <button onclick="window._arShareWhatsApp()" style="background:rgba(37,211,102,0.15);border:1px solid rgba(37,211,102,0.4);color:#4ade80;padding:9px 18px;border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;">💬 WhatsApp</button>
+                        </div>
+                    </div>
+                    <div style="display:flex;justify-content:center;align-items:center;background:white;padding:12px;border-radius:14px;">
+                        <canvas id="ar-qr-canvas" width="180" height="180"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Pie con GUARDAR -->
+            <div style="display:flex;justify-content:flex-end;gap:12px;">
+                <button onclick="window._arSaveConfig()" style="background:linear-gradient(135deg,#10b981,#059669);color:white;border:none;padding:12px 32px;border-radius:12px;cursor:pointer;font-size:14px;font-weight:800;letter-spacing:0.3px;box-shadow:0 8px 20px rgba(16,185,129,0.4);">
+                    💾 GUARDAR CONFIGURACIÓN
+                </button>
+            </div>
+        </div>`;
+    }
+
+    function setupAgendaRemotaListeners() {
+        // Estado en memoria del schedule mientras el usuario edita.
+        const ws = {};
+        _WEEKDAY_ORDER.forEach(d => {
+            const rows = document.querySelectorAll(`.ar-day-ranges[data-day="${d}"] .ar-range-row`);
+            const toggle = document.querySelector(`.ar-day-toggle[data-day="${d}"]`);
+            if (!toggle || !toggle.checked) { ws[d] = []; return; }
+            ws[d] = Array.from(rows).map(row => ({
+                start: row.querySelector('.ar-range-start').value,
+                end: row.querySelector('.ar-range-end').value
+            }));
+        });
+        window._arWeeklyState = ws;
+
+        // Render QR del link público
+        const canvas = document.getElementById('ar-qr-canvas');
+        const url = document.getElementById('ar-public-url')?.textContent || '';
+        if (canvas && typeof QRCode !== 'undefined' && url) {
+            try {
+                QRCode.toCanvas(canvas, url, { width: 180, margin: 1 }, function(err) {
+                    if (err) console.warn('QR error:', err);
+                });
+            } catch (e) { console.warn('QR generation:', e); }
+        }
+    }
+
+    window._arToggleDay = function(day, on) {
+        const container = document.querySelector(`.ar-day-ranges[data-day="${day}"]`);
+        const row = document.querySelector(`.ar-day-row[data-day="${day}"]`);
+        if (!container || !row) return;
+        if (on) {
+            container.style.display = 'block';
+            if (container.children.length === 0) {
+                window._arAddRange(day);
+            }
+            // Asegurar botón "+ añadir franja"
+            const header = row.querySelector('div');
+            if (header && !row.querySelector('button[onclick*="_arAddRange"]')) {
+                header.style.marginBottom = '10px';
+                header.insertAdjacentHTML('beforeend', `<button onclick="window._arAddRange('${day}')" style="background:rgba(52,211,153,0.12);border:1px solid rgba(52,211,153,0.35);color:#34d399;padding:5px 12px;border-radius:8px;cursor:pointer;font-size:11px;font-weight:600;">+ Añadir franja</button>`);
+            }
+        } else {
+            container.style.display = 'none';
+            container.innerHTML = '';
+            const addBtn = row.querySelector('button[onclick*="_arAddRange"]');
+            if (addBtn) addBtn.remove();
+        }
+    };
+
+    window._arAddRange = function(day) {
+        const container = document.querySelector(`.ar-day-ranges[data-day="${day}"]`);
+        if (!container) return;
+        const idx = container.children.length;
+        const html = `
+            <div class="ar-range-row" data-day="${day}" data-idx="${idx}" style="display:flex;gap:8px;align-items:center;margin-bottom:6px;">
+                <input type="time" class="ar-range-start" data-day="${day}" data-idx="${idx}" value="08:00" style="background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.15);color:white;padding:6px 10px;border-radius:8px;font-size:13px;">
+                <span style="color:rgba(255,255,255,0.45);font-size:12px;">a</span>
+                <input type="time" class="ar-range-end" data-day="${day}" data-idx="${idx}" value="17:00" style="background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.15);color:white;padding:6px 10px;border-radius:8px;font-size:13px;">
+                <button onclick="window._arRemoveRange('${day}', ${idx})" style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);color:#f87171;padding:4px 8px;border-radius:6px;cursor:pointer;font-size:11px;">🗑</button>
+            </div>`;
+        container.insertAdjacentHTML('beforeend', html);
+    };
+
+    window._arRemoveRange = function(day, idx) {
+        const container = document.querySelector(`.ar-day-ranges[data-day="${day}"]`);
+        if (!container) return;
+        const rows = container.querySelectorAll('.ar-range-row');
+        if (rows[idx]) rows[idx].remove();
+        if (container.children.length === 0) {
+            // Apagar el toggle del día
+            const toggle = document.querySelector(`.ar-day-toggle[data-day="${day}"]`);
+            if (toggle) { toggle.checked = false; window._arToggleDay(day, false); }
+        }
+    };
+
+    window._arCopyLink = function() {
+        const url = document.getElementById('ar-public-url')?.textContent || '';
+        if (!url) return;
+        navigator.clipboard.writeText(url).then(() => {
+            if (typeof window.showElegantAlert === 'function') {
+                window.showElegantAlert('✅ Link copiado', 'Pégalo donde quieras compartirlo con tus pacientes.');
+            } else { alert('Link copiado al portapapeles.'); }
+        });
+    };
+
+    window._arDownloadQR = function() {
+        const canvas = document.getElementById('ar-qr-canvas');
+        if (!canvas) return;
+        const dataURL = canvas.toDataURL('image/png');
+        const a = document.createElement('a');
+        a.href = dataURL;
+        a.download = 'dr-sisdel-agenda-qr.png';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    };
+
+    window._arShareWhatsApp = function() {
+        const url = document.getElementById('ar-public-url')?.textContent || '';
+        if (!url) return;
+        const text = `Hola, te comparto el link para agendar tu cita médica: ${url}`;
+        window.open('https://wa.me/?text=' + encodeURIComponent(text), '_blank');
+    };
+
+    window._arSaveConfig = async function() {
+        const doctorId = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+        // Reconstruir weekly_schedule desde DOM
+        const ws = { mon:[], tue:[], wed:[], thu:[], fri:[], sat:[], sun:[] };
+        _WEEKDAY_ORDER.forEach(d => {
+            const toggle = document.querySelector(`.ar-day-toggle[data-day="${d}"]`);
+            if (!toggle || !toggle.checked) { ws[d] = []; return; }
+            const rows = document.querySelectorAll(`.ar-day-ranges[data-day="${d}"] .ar-range-row`);
+            ws[d] = Array.from(rows).map(row => ({
+                start: row.querySelector('.ar-range-start')?.value || '08:00',
+                end: row.querySelector('.ar-range-end')?.value || '17:00'
+            })).filter(r => r.start && r.end && r.start < r.end);
+        });
+
+        const cfg = {
+            enabled: !!document.getElementById('ar-enabled')?.checked,
+            session_duration: parseInt(document.getElementById('ar-session-duration')?.value) || 30,
+            months_ahead: parseInt(document.getElementById('ar-months-ahead')?.value) || 1,
+            weekly_schedule: ws
+        };
+
+        try {
+            const r = await fetch(`/api/booking/${encodeURIComponent(doctorId)}/config`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(cfg)
+            });
+            const j = await r.json();
+            if (j.success) {
+                if (typeof window.showElegantAlert === 'function') {
+                    window.showElegantAlert('✅ Guardado',
+                        cfg.enabled
+                            ? 'La agenda remota está activa. Comparte el link/QR con tus pacientes.'
+                            : 'Configuración guardada. La agenda remota está desactivada por ahora.');
+                }
+                // Cache local del horario para que la vista interna lo respete
+                localStorage.setItem(`booking_config_${doctorId}`, JSON.stringify(cfg));
+            } else {
+                throw new Error('save failed');
+            }
+        } catch (e) {
+            console.error(e);
+            if (typeof window.showElegantAlert === 'function') {
+                window.showElegantAlert('❌ Error', 'No se pudo guardar la configuración. Revisa la conexión.');
+            }
+        }
+    };
+
+    // Pull en background del booking_config para cachear localmente
+    (async function _bootstrapBookingConfig() {
+        try {
+            const doctorId = localStorage.getItem('current_doctor_id') || 'MED-MASTER';
+            const r = await fetch(`/api/booking/${encodeURIComponent(doctorId)}/config`);
+            const j = await r.json();
+            if (j.success) localStorage.setItem(`booking_config_${doctorId}`, JSON.stringify(j.config));
+        } catch (e) {}
+    })();
 
     window.saveReminderConfig = async function() {
         try {
