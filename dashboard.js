@@ -9487,14 +9487,16 @@ function renderSection(name, data) {
         const rows = txs.length === 0
             ? `<tr><td colspan="6" style="padding:40px;text-align:center;color:rgba(255,255,255,0.35);">Sin cobros registrados.</td></tr>`
             : txs.map(t => `
-                <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.05);cursor:pointer;transition:background 0.15s;" title="Ver detalle del cobro"
+                    onmouseover="this.style.background='rgba(16,185,129,0.07)'" onmouseout="this.style.background='transparent'"
+                    onclick="window._showFinanzaDetail('${t.id}')">
                     <td style="padding:10px 14px;color:rgba(255,255,255,0.85);font-size:13px;">${t.fecha || '—'} ${t.hora || ''}</td>
                     <td style="padding:10px 14px;color:white;font-weight:600;font-size:13px;">${t.paciente_nombre || '(general)'}</td>
                     <td style="padding:10px 14px;color:rgba(255,255,255,0.7);font-size:13px;">${t.concepto || '—'}</td>
                     <td style="padding:10px 14px;color:#10b981;font-weight:700;font-size:13px;text-align:right;">${_formatMoney(t.monto)}</td>
                     <td style="padding:10px 14px;color:rgba(255,255,255,0.55);font-size:12px;">${t.metodo_pago || '—'}</td>
                     <td style="padding:10px 14px;text-align:right;">
-                        ${canDelete ? `<button onclick="window._deleteFinanza('${t.id}')" style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.3);color:#f87171;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;">🗑</button>` : ''}
+                        ${canDelete ? `<button onclick="event.stopPropagation(); window._deleteFinanza('${t.id}')" style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.3);color:#f87171;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;">🗑</button>` : ''}
                     </td>
                 </tr>`).join('');
 
@@ -9596,6 +9598,65 @@ function renderSection(name, data) {
             const activeTab = document.querySelector('#finanzas-tabs-bar .config-tab-btn.active');
             if (activeTab) activeTab.click();
         } catch (e) { window.showElegantAlert('❌ Error', 'No se pudo eliminar.'); }
+    };
+
+    // Modal con el detalle completo de una transacción (ingreso, egreso o cargo)
+    window._showFinanzaDetail = function(id) {
+        const tx = _getFinanzasCache().find(t => t.id === id);
+        if (!tx) return;
+        const tipoInfo = {
+            income:  { label: 'INGRESO (Cobro)',          color: '#10b981', icon: '💵' },
+            expense: { label: 'EGRESO',                    color: '#f87171', icon: '💸' },
+            charge:  { label: 'CUENTA POR COBRAR (Deuda)', color: '#fbbf24', icon: '📋' }
+        }[tx.tipo] || { label: tx.tipo || 'Transacción', color: '#60a5fa', icon: '💠' };
+
+        const fechaLarga = (typeof window._fmtFechaLarga === 'function' && tx.fecha)
+            ? window._fmtFechaLarga(tx.fecha) : (tx.fecha || '—');
+
+        // Filas del detalle (solo se muestran las que tienen valor)
+        const fila = (label, value) => value
+            ? `<div style="display:flex;justify-content:space-between;gap:14px;padding:11px 0;border-bottom:1px solid rgba(255,255,255,0.06);">
+                   <span style="color:rgba(255,255,255,0.5);font-size:13px;">${label}</span>
+                   <span style="color:white;font-size:13px;font-weight:600;text-align:right;max-width:60%;">${value}</span>
+               </div>` : '';
+
+        const estadoBadge = tx.tipo === 'charge'
+            ? (tx.estado === 'paid'
+                ? '<span style="background:rgba(16,185,129,0.15);color:#34d399;border:1px solid rgba(16,185,129,0.35);padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;">PAGADA</span>'
+                : '<span style="background:rgba(251,191,36,0.15);color:#fbbf24;border:1px solid rgba(251,191,36,0.35);padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;">PENDIENTE</span>')
+            : '';
+
+        const overlay = document.createElement('div');
+        overlay.id = 'finanza-detail-overlay';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(8px);padding:20px;';
+        const canDelete = hasPriv('eliminar_transacciones');
+        overlay.innerHTML = `
+            <div style="background:linear-gradient(145deg,#0f172a,#1a2540);border:1px solid ${tipoInfo.color}55;border-radius:18px;padding:28px;max-width:460px;width:100%;box-shadow:0 30px 80px rgba(0,0,0,0.6);">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;">
+                    <div>
+                        <div style="font-size:12px;color:${tipoInfo.color};font-weight:800;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px;">${tipoInfo.icon} ${tipoInfo.label}</div>
+                        <div style="font-size:34px;font-weight:800;color:${tipoInfo.color};">${_formatMoney(tx.monto)}</div>
+                        ${estadoBadge ? `<div style="margin-top:8px;">${estadoBadge}</div>` : ''}
+                    </div>
+                    <button onclick="document.getElementById('finanza-detail-overlay').remove()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:white;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;">✕</button>
+                </div>
+                <div>
+                    ${fila('Fecha', fechaLarga + (tx.hora ? ' · ' + tx.hora : ''))}
+                    ${fila(tx.tipo === 'expense' ? 'Proveedor / Beneficiario' : 'Paciente', tx.paciente_nombre || tx.proveedor || '(general)')}
+                    ${fila('Concepto', tx.concepto)}
+                    ${fila('Método de pago', tx.metodo_pago)}
+                    ${fila('Código paciente', tx.qsl_code)}
+                    ${fila('Recibo No.', tx.recibo_num)}
+                    ${fila('Notas', tx.notas)}
+                    ${fila('Moneda', tx.moneda)}
+                </div>
+                <div style="display:flex;gap:10px;margin-top:22px;">
+                    <button onclick="document.getElementById('finanza-detail-overlay').remove()" style="flex:1;padding:11px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:white;border-radius:10px;cursor:pointer;font-size:14px;font-weight:600;">Cerrar</button>
+                    ${canDelete ? `<button onclick="document.getElementById('finanza-detail-overlay').remove(); window._deleteFinanza('${tx.id}')" style="flex:1;padding:11px;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.35);color:#f87171;border-radius:10px;cursor:pointer;font-size:14px;font-weight:700;">🗑 Eliminar</button>` : ''}
+                </div>
+            </div>`;
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        document.body.appendChild(overlay);
     };
 
     // ---- TAB: CUENTAS POR COBRAR (charge) ----
@@ -9742,14 +9803,16 @@ function renderSection(name, data) {
         const rows = txs.length === 0
             ? `<tr><td colspan="6" style="padding:40px;text-align:center;color:rgba(255,255,255,0.35);">Sin egresos registrados.</td></tr>`
             : txs.map(t => `
-                <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.05);cursor:pointer;transition:background 0.15s;" title="Ver detalle del egreso"
+                    onmouseover="this.style.background='rgba(239,68,68,0.07)'" onmouseout="this.style.background='transparent'"
+                    onclick="window._showFinanzaDetail('${t.id}')">
                     <td style="padding:10px 14px;color:rgba(255,255,255,0.85);font-size:13px;">${t.fecha || '—'}</td>
                     <td style="padding:10px 14px;color:white;font-weight:600;font-size:13px;">${t.proveedor || '—'}</td>
                     <td style="padding:10px 14px;color:rgba(255,255,255,0.7);font-size:13px;">${t.concepto || '—'}</td>
                     <td style="padding:10px 14px;color:#f87171;font-weight:700;font-size:13px;text-align:right;">${_formatMoney(t.monto)}</td>
                     <td style="padding:10px 14px;color:rgba(255,255,255,0.55);font-size:12px;">${t.metodo_pago || '—'}</td>
                     <td style="padding:10px 14px;text-align:right;">
-                        ${canDelete ? `<button onclick="window._deleteFinanza('${t.id}')" style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.3);color:#f87171;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;">🗑</button>` : ''}
+                        ${canDelete ? `<button onclick="event.stopPropagation(); window._deleteFinanza('${t.id}')" style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.3);color:#f87171;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;">🗑</button>` : ''}
                     </td>
                 </tr>`).join('');
 
