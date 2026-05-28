@@ -7333,12 +7333,12 @@ function renderSection(name, data) {
         </div>
 
         <!-- Grid de categorías (responsivo: 3 columnas en desktop, 1 en móvil) -->
-        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px; margin-bottom:24px;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:16px; margin-bottom:6px;">
             ${categoriesHtml}
         </div>
 
-        <!-- Pie con botón GUARDAR -->
-        <div style="display:flex; justify-content:space-between; align-items:center; padding:18px 22px; background:linear-gradient(135deg, rgba(16,185,129,0.06), rgba(16,185,129,0.02)); border:1px solid rgba(16,185,129,0.2); border-radius:14px; gap:16px; flex-wrap:wrap;">
+        <!-- Pie con botón GUARDAR (subido ~1cm respecto a versión anterior) -->
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 22px; background:linear-gradient(135deg, rgba(16,185,129,0.06), rgba(16,185,129,0.02)); border:1px solid rgba(16,185,129,0.2); border-radius:14px; gap:16px; flex-wrap:wrap;">
             <div>
                 <p style="color:white; font-size:13px; font-weight:600; margin:0 0 2px;" id="pm-status-text">Selecciona los privilegios y pulsa GUARDAR</p>
                 <p style="color:rgba(255,255,255,0.45); font-size:11px; margin:0;">Los cambios no se aplican hasta que confirmes con el botón verde.</p>
