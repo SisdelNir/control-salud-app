@@ -85,14 +85,73 @@
             </div>
             <div class="card">
                 <h3>1. Selecciona un día</h3>
+                <p style="font-size:12px; color:rgba(255,255,255,0.4); margin:0 0 12px;">💡 Desliza el calendario a izquierda o derecha para cambiar de mes</p>
                 <div id="cal-container"></div>
-            </div>
-            <div class="card" id="slots-card" style="display:none;">
-                <h3 id="slots-title">2. Selecciona una hora</h3>
-                <div id="slots-container"></div>
             </div>`;
         renderCalendar();
+        _attachSwipeToCalendar();
     }
+
+    // Swipe horizontal en el calendario (móvil): izq = mes siguiente, der = mes anterior
+    function _attachSwipeToCalendar() {
+        const cont = document.getElementById('cal-container');
+        if (!cont) return;
+        let startX = null, startY = null, startT = 0;
+        cont.addEventListener('touchstart', (e) => {
+            if (!e.touches || e.touches.length === 0) return;
+            startX = e.touches[0].clientX;
+            startY = e.touches[0].clientY;
+            startT = Date.now();
+        }, { passive: true });
+        cont.addEventListener('touchend', (e) => {
+            if (startX === null) return;
+            const t = e.changedTouches && e.changedTouches[0];
+            if (!t) return;
+            const dx = t.clientX - startX;
+            const dy = t.clientY - startY;
+            const elapsed = Date.now() - startT;
+            startX = null; startY = null;
+            // Swipe válido: horizontal predominante, distancia mínima, tiempo razonable
+            if (Math.abs(dx) < 50) return;
+            if (Math.abs(dx) < Math.abs(dy) * 1.3) return; // muy vertical → no es swipe
+            if (elapsed > 700) return; // demasiado lento
+            if (dx < 0) window._navMonth(1);   // swipe izquierda → mes siguiente
+            else        window._navMonth(-1);  // swipe derecha   → mes anterior
+        }, { passive: true });
+    }
+
+    // Modal a pantalla completa con los horarios disponibles. Se abre
+    // automáticamente al seleccionar un día — el paciente no necesita scroll.
+    function openSlotsModal(iso) {
+        const dt = new Date(iso + 'T12:00:00');
+        const fechaTxt = dt.toLocaleDateString('es-ES', { weekday: 'long', day: '2-digit', month: 'long' });
+        // Capitalizar primera letra del día
+        const fechaCap = fechaTxt.charAt(0).toUpperCase() + fechaTxt.slice(1);
+
+        let modal = document.getElementById('slots-modal');
+        if (modal) modal.remove();
+        modal = document.createElement('div');
+        modal.id = 'slots-modal';
+        modal.className = 'modal-overlay';
+        modal.innerHTML = `
+            <div class="modal-box" style="max-width:560px; width:100%; max-height:92vh; display:flex; flex-direction:column;">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:14px; margin-bottom:18px;">
+                    <div>
+                        <p style="margin:0; font-size:12px; color:rgba(255,255,255,0.5); text-transform:uppercase; letter-spacing:1px;">Selecciona una hora</p>
+                        <h2 style="margin:4px 0 0; color:#22d3ee; font-size:22px;">${fechaCap}</h2>
+                    </div>
+                    <button onclick="window._closeSlotsModal()" style="background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:white; padding:8px 14px; border-radius:8px; cursor:pointer; font-size:13px; flex-shrink:0;">✕ Cerrar</button>
+                </div>
+                <div id="slots-container" style="flex:1; overflow-y:auto;"></div>
+            </div>`;
+        modal.addEventListener('click', e => { if (e.target === modal) window._closeSlotsModal(); });
+        document.body.appendChild(modal);
+    }
+
+    window._closeSlotsModal = function() {
+        const m = document.getElementById('slots-modal');
+        if (m) m.remove();
+    };
 
     function renderCalendar() {
         const monthNames = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
@@ -153,22 +212,15 @@
         renderCalendar();
     };
 
-    // Carga slots disponibles para una fecha. Se reutiliza tanto al elegir
-    // un día como tras una reserva (para refrescar y mostrar lo que queda).
+    // Carga y renderiza slots disponibles para una fecha en el #slots-container
+    // que esté presente en el DOM (el modal o el card, según contexto).
     async function loadSlotsForDay(iso, opts) {
         opts = opts || {};
-        const card = document.getElementById('slots-card');
         const cont = document.getElementById('slots-container');
-        const title = document.getElementById('slots-title');
-        if (card) card.style.display = 'block';
-        if (title) {
-            const d = new Date(iso + 'T12:00:00');
-            title.textContent = `2. Selecciona una hora — ${d.toLocaleDateString('es-ES', { weekday:'long', day:'2-digit', month:'long' })}`;
-        }
-        if (cont && !opts.silent) cont.innerHTML = '<div class="loading"><div class="spinner"></div><p>Buscando horarios disponibles...</p></div>';
+        if (!cont) return;
+        if (!opts.silent) cont.innerHTML = '<div class="loading"><div class="spinner"></div><p>Buscando horarios disponibles...</p></div>';
 
         try {
-            // cache: 'no-store' evita que el navegador devuelva slots viejos
             const r = await fetch(`/api/booking/${encodeURIComponent(doctorId)}/slots?date=${encodeURIComponent(iso)}`, { cache: 'no-store' });
             const j = await r.json();
             availableSlots = j.success ? (j.slots || []) : [];
@@ -184,12 +236,12 @@
                 } else {
                     msg = 'No hay horarios disponibles para este día. Elige otro día.';
                 }
-                cont.innerHTML = `<p style="text-align:center;padding:24px;color:rgba(255,255,255,0.55);">${msg}</p>`;
+                cont.innerHTML = `<p style="text-align:center;padding:30px 14px;color:rgba(255,255,255,0.55);font-size:15px;">${msg}</p>`;
                 return;
             }
             const statusLine = (occCount > 0)
-                ? `<p style="font-size:12px;color:rgba(255,255,255,0.45);margin:0 0 10px;">✓ Mostrando ${availableSlots.length} de ${totalGen} horarios · ${occCount} ya reservado${occCount===1?'':'s'} (no se muestran)</p>`
-                : `<p style="font-size:12px;color:rgba(255,255,255,0.45);margin:0 0 10px;">✓ ${availableSlots.length} horarios disponibles</p>`;
+                ? `<p style="font-size:13px;color:rgba(255,255,255,0.55);margin:0 0 14px; text-align:center;">✓ Mostrando <b style="color:#34d399;">${availableSlots.length}</b> de ${totalGen} horarios · ${occCount} ya reservado${occCount===1?'':'s'}</p>`
+                : `<p style="font-size:13px;color:rgba(255,255,255,0.55);margin:0 0 14px; text-align:center;">✓ <b style="color:#34d399;">${availableSlots.length}</b> horarios disponibles</p>`;
             cont.innerHTML = statusLine + `<div class="slots-grid">${availableSlots.map(s => `<button class="slot-btn" onclick="window._selectSlot('${s}')">${s}</button>`).join('')}</div>`;
         } catch (e) {
             console.error(e);
@@ -201,10 +253,13 @@
         selectedDate = iso;
         selectedTime = null;
         renderCalendar();
+        openSlotsModal(iso);
         await loadSlotsForDay(iso);
     };
     window._reloadCurrentDaySlots = async function() {
-        if (selectedDate) await loadSlotsForDay(selectedDate, { silent: true });
+        if (selectedDate && document.getElementById('slots-container')) {
+            await loadSlotsForDay(selectedDate, { silent: true });
+        }
     };
 
     window._selectSlot = function(time) {
@@ -296,6 +351,7 @@
                 return;
             }
             window._closeBookingModal();
+            window._closeSlotsModal();
             renderSuccess(nombre);
         } catch (e) {
             console.error(e);
