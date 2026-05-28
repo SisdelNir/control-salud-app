@@ -8016,61 +8016,7 @@ function renderSection(name, data) {
     // Alias retro-compatible para no romper llamadas previas
     window._applyFinanzasSidebarVisibility = _applySidebarPrivileges;
 
-    // ---- Detección de cambios en privilegios y auto-redirect ----
-    // Si el médico activa/desactiva privilegios en su navegador, el polling
-    // de médicos (cada 15s) actualiza 'tabla_medicos'. Aquí monitoreamos
-    // ese cambio y re-evaluamos: ocultamos/mostramos items del sidebar y
-    // redirigimos si el usuario estaba en una pantalla bloqueada.
-    let _lastPrivilegesSignature = '';
-    function _privilegesSignature() {
-        if (qslCode === 'MED-MASTER') return 'master';
-        const docId = localStorage.getItem('current_doctor_id');
-        try {
-            const list = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
-            const me = list.find(m => m.id_medico === docId);
-            if (!me) return '';
-            return JSON.stringify(me.privileges || {});
-        } catch (e) { return ''; }
-    }
-    function _onPrivilegesPossiblyChanged() {
-        const sig = _privilegesSignature();
-        if (sig === _lastPrivilegesSignature) return;
-        _lastPrivilegesSignature = sig;
-        // 1) Reaplicar visibilidad del sidebar
-        _applySidebarPrivileges();
-        // 2) Si estamos en "Esperando privilegios" o "Acceso denegado",
-        //    redirigir a la primera sección permitida
-        if (qslCode === 'MED-MASTER' || !_isOficinaUser()) return;
-        const html = contentArea ? contentArea.innerHTML : '';
-        const stuck = /Esperando privilegios|Acceso denegado/.test(html);
-        if (!stuck) return;
-        const orderedSections = ['overview', 'consultation', 'scheduler', 'finanzas'];
-        const allowed = orderedSections.find(s => canAccessSection(s));
-        if (allowed && typeof loadSection === 'function') loadSection(allowed);
-    }
-
-    // Forzar sync inmediato de médicos al cargar (antes de esperar 15s)
-    (async function _forceInitialMedicosSync() {
-        try {
-            const r = await fetch('/api/medicos', { cache: 'no-store' });
-            if (r.ok) {
-                const j = await r.json();
-                if (j.success && Array.isArray(j.medicos)) {
-                    localStorage.setItem('tabla_medicos', JSON.stringify(j.medicos));
-                }
-            }
-        } catch (e) {}
-        _onPrivilegesPossiblyChanged();
-    })();
-
-    // Reaplicar cada 8 segundos: detecta cambios sin esperar el ciclo de 20s
-    setInterval(() => {
-        if (document.visibilityState === 'hidden') return;
-        _onPrivilegesPossiblyChanged();
-    }, 8000);
-
     // Bloquea acceso por URL/clic a secciones no permitidas.
-    // Envolvemos renderSection para añadir el check antes de delegar al original.
     const _origRenderSection = (typeof renderSection !== 'undefined') ? renderSection : null;
     if (_origRenderSection) {
         renderSection = function(name, data) {
@@ -8090,28 +8036,112 @@ function renderSection(name, data) {
         };
     }
 
-    // Si al cargar el sistema, el usuario está en una sección no permitida,
-    // intentar redirigirlo a la primera permitida o mostrar un mensaje.
-    setTimeout(() => {
+    // ============================================================
+    // ROUTER REACTIVO DE OFICINA — SOLO MOTOR DE DECISIÓN
+    // ============================================================
+    // Un usuario de oficina puede estar en 3 estados:
+    //   (A) tabla_medicos aún no sincronizada    → "Verificando privilegios..."
+    //   (B) sincronizada, sin privilegios        → "Esperando privilegios"
+    //   (C) sincronizada, con privilegios        → cargar primera sección permitida
+    //
+    // Este motor:
+    //   1) Hace fetch inmediato de /api/medicos al cargar
+    //   2) Re-evalúa cada 5 segundos (forzando fetch fresco)
+    //   3) Cuando los privilegios CAMBIAN, ajusta UI:
+    //      - actualiza sidebar
+    //      - si hay nuevos accesos y estaba bloqueado → redirige
+    //      - si perdió accesos y estaba en sección bloqueada → muestra mensaje
+    let _lastSig = null;
+    function _privilegesSignature() {
+        if (qslCode === 'MED-MASTER') return 'master';
+        const docId = localStorage.getItem('current_doctor_id');
+        if (!docId) return null;
+        try {
+            const list = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            const me = list.find(m => m.id_medico === docId);
+            if (!me) return null; // todavía no sincronizado
+            return JSON.stringify(me.privileges || {});
+        } catch (e) { return null; }
+    }
+
+    function _showWaitingScreen() {
+        contentArea.innerHTML = `
+            <div style="text-align:center;padding:80px 20px;border:2px dashed rgba(251,191,36,0.2);border-radius:20px;background:rgba(251,191,36,0.04);">
+                <div style="font-size:64px;margin-bottom:18px;">⏳</div>
+                <h3 style="color:#fbbf24;font-size:22px;margin-bottom:10px;">Esperando privilegios</h3>
+                <p style="color:rgba(255,255,255,0.65);max-width:520px;margin:0 auto;font-size:14px;line-height:1.5;">
+                    Tu usuario aún no tiene privilegios asignados. Pide al <b>médico (dueño del sistema)</b>
+                    que te los active desde su <b>Configuración → Privilegios</b>.
+                    Cuando los active, esta pantalla cambiará automáticamente en unos segundos.
+                </p>
+            </div>`;
+    }
+    function _showVerifyingScreen() {
+        contentArea.innerHTML = `
+            <div style="text-align:center;padding:80px 20px;">
+                <div class="spinner" style="margin:0 auto 20px;"></div>
+                <p style="color:rgba(255,255,255,0.5);font-size:14px;">Verificando privilegios desde la nube...</p>
+            </div>`;
+    }
+
+    function _reevaluateOfficeUI() {
         if (qslCode === 'MED-MASTER' || !_isOficinaUser()) return;
+        _applySidebarPrivileges();
+
+        const sig = _privilegesSignature();
+        const changed = sig !== _lastSig;
+        _lastSig = sig;
+
         const orderedSections = ['overview', 'consultation', 'scheduler', 'finanzas'];
         const allowed = orderedSections.find(s => canAccessSection(s));
-        if (allowed && typeof loadSection === 'function') {
-            loadSection(allowed);
-        } else {
-            // Sin privilegios para nada → mostrar mensaje persistente
-            contentArea.innerHTML = `
-                <div style="text-align:center;padding:80px 20px;border:2px dashed rgba(251,191,36,0.2);border-radius:20px;background:rgba(251,191,36,0.04);">
-                    <div style="font-size:64px;margin-bottom:18px;">⏳</div>
-                    <h3 style="color:#fbbf24;font-size:22px;margin-bottom:10px;">Esperando privilegios</h3>
-                    <p style="color:rgba(255,255,255,0.65);max-width:520px;margin:0 auto;font-size:14px;line-height:1.5;">
-                        Tu usuario aún no tiene privilegios asignados. Pide al <b>médico (dueño del sistema)</b>
-                        que te los active desde su <b>Configuración → Privilegios</b>.
-                        Cuando los active, podrás ver las opciones correspondientes en el menú lateral.
-                    </p>
-                </div>`;
+        const html = (contentArea && contentArea.innerHTML) || '';
+        const onWaiting   = /Esperando privilegios/.test(html);
+        const onDenied    = /Acceso denegado/.test(html);
+        const onVerifying = /Verificando privilegios/.test(html);
+        const stuck = onWaiting || onDenied || onVerifying;
+
+        if (sig === null) {
+            // No sincronizado todavía: mostrar "Verificando..." (solo si la
+            // pantalla está vacía o en mensaje de bloqueo) en el primer paso.
+            if (stuck || !html.trim()) _showVerifyingScreen();
+            return;
         }
-    }, 800);
+
+        if (allowed) {
+            // Tiene al menos un acceso → ir a esa sección si está bloqueado
+            if (stuck && typeof loadSection === 'function') loadSection(allowed);
+            return;
+        }
+
+        // Sincronizado, sin privilegios → mostrar "Esperando" si no lo está ya
+        if (!onWaiting) _showWaitingScreen();
+    }
+    window._reevaluateOfficeUI = _reevaluateOfficeUI;
+
+    // 1) Sync inmediato al cargar (no esperar 15s del polling normal)
+    async function _refreshMedicosNow() {
+        try {
+            const r = await fetch('/api/medicos', { cache: 'no-store' });
+            if (!r.ok) return;
+            const j = await r.json();
+            if (j.success && Array.isArray(j.medicos)) {
+                localStorage.setItem('tabla_medicos', JSON.stringify(j.medicos));
+            }
+        } catch (e) {}
+    }
+
+    // Bootstrap: refresca y evalúa
+    (async function _officeBootstrap() {
+        await _refreshMedicosNow();
+        _reevaluateOfficeUI();
+    })();
+
+    // Cada 5 segundos: refresca tabla_medicos desde la nube y re-evalúa
+    setInterval(async () => {
+        if (document.visibilityState === 'hidden') return;
+        await _refreshMedicosNow();
+        _reevaluateOfficeUI();
+    }, 5000);
 
     function _formatMoney(n) {
         const v = parseFloat(n) || 0;
