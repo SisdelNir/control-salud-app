@@ -5478,9 +5478,11 @@ function renderSection(name, data) {
     }
 
     function getSectionTitle(name) {
-        const titles = { 
-            overview: 'Expediente', 
-            reminders: 'Seguimiento', 
+        const titles = {
+            // overview: sin paciente seleccionado → "Nuevo Paciente" (form de registro)
+            //           con paciente seleccionado → "Expediente"
+            overview: selectedPatientQSL ? 'Expediente' : 'Nuevo Paciente',
+            reminders: 'Seguimiento',
             consultation: 'Consulta Médica',
             settings: 'Datos del Médico',
             programmer: 'Módulo Programador (Super Admin)'
