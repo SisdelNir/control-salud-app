@@ -985,6 +985,7 @@ document.addEventListener('DOMContentLoaded', () => {
             <div class="scheduler-container animate-in">
                 <!-- COLUMNA IZQUIERDA: CALENDARIO -->
                 <div class="calendar-widget" id="scheduler-main-panel">
+                    ${window._buildAgendaSearchBar ? window._buildAgendaSearchBar() : ''}
                     <div class="calendar-header">
                         <div style="display:flex; align-items:center; gap: 15px;">
                             <button class="calendar-nav-btn" onclick="window.changeCalendarMonth(-1)">
@@ -1361,6 +1362,89 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    // Formatea una fecha ISO (YYYY-MM-DD) como "27 MAYO 2026"
+    window._fmtFechaLarga = function(iso) {
+        const meses = ['ENERO','FEBRERO','MARZO','ABRIL','MAYO','JUNIO','JULIO','AGOSTO','SEPTIEMBRE','OCTUBRE','NOVIEMBRE','DICIEMBRE'];
+        const d = new Date((iso || '') + 'T12:00:00');
+        if (isNaN(d.getTime())) return iso || '';
+        return `${d.getDate()} ${meses[d.getMonth()]} ${d.getFullYear()}`;
+    };
+
+    // HTML del buscador inteligente de la agenda (reutilizable)
+    window._buildAgendaSearchBar = function() {
+        return `
+            <div style="position:relative; margin-bottom:16px;">
+                <input type="text" id="agenda-search" placeholder="🔍  Buscar paciente en la agenda y saltar a su cita…"
+                    oninput="window._agendaSearchFilter(this.value)"
+                    onkeydown="if(event.key==='Enter'){event.preventDefault();window._agendaSearchEnter();}"
+                    autocomplete="off" autocorrect="off" spellcheck="false"
+                    style="width:100%;background:rgba(0,0,0,0.4);border:1px solid rgba(34,211,238,0.35);color:white;padding:13px 16px;border-radius:12px;font-size:14px;box-sizing:border-box;">
+                <div id="agenda-search-results" style="display:none;position:absolute;top:calc(100% + 6px);left:0;right:0;background:#0f172a;border:1px solid rgba(34,211,238,0.4);border-radius:12px;max-height:280px;overflow-y:auto;z-index:50;box-shadow:0 20px 50px rgba(0,0,0,0.5);"></div>
+            </div>`;
+    };
+
+    // Filtra citas por nombre/código y muestra dropdown con fecha de cada una
+    window._agendaSearchFilter = function(query) {
+        const q = (query || '').toLowerCase().trim();
+        const box = document.getElementById('agenda-search-results');
+        if (!box) return;
+        if (!q) { box.style.display = 'none'; box.innerHTML = ''; return; }
+
+        const appts = (window.getAppointments ? window.getAppointments() : [])
+            .filter(a => (a.name || '').toLowerCase().includes(q) || (a.qsl || '').toLowerCase().includes(q))
+            .sort((a, b) => new Date(a.date + 'T' + (a.time || '00:00')) - new Date(b.date + 'T' + (b.time || '00:00')));
+
+        // Dedupe por paciente+fecha+hora
+        const seen = new Set();
+        const uniq = [];
+        appts.forEach(a => {
+            const k = `${a.qsl || a.name}|${a.date}|${a.time}`;
+            if (!seen.has(k)) { seen.add(k); uniq.push(a); }
+        });
+
+        window._agendaSearchMatches = uniq;
+
+        if (uniq.length === 0) {
+            box.style.display = 'block';
+            box.innerHTML = `<div style="padding:16px;color:rgba(255,255,255,0.4);font-size:13px;text-align:center;">Sin citas para "<b>${query}</b>"</div>`;
+            return;
+        }
+
+        const now = new Date();
+        box.style.display = 'block';
+        box.innerHTML = uniq.map((a, i) => {
+            const isFuture = new Date(a.date + 'T' + (a.time || '00:00')) >= now;
+            return `
+            <div onclick="window._agendaSearchGoto(${i})"
+                 style="padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.05);cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:12px;${i===0?'background:rgba(34,211,238,0.08);':''}"
+                 onmouseover="this.style.background='rgba(34,211,238,0.12)'"
+                 onmouseout="this.style.background='${i===0?'rgba(34,211,238,0.08)':'transparent'}'">
+                <div>
+                    <div style="color:white;font-weight:600;font-size:14px;">${a.name || a.qsl}${i===0?' <span style="background:rgba(34,211,238,0.2);border:1px solid rgba(34,211,238,0.4);color:#67e8f9;font-size:9px;padding:1px 6px;border-radius:4px;font-weight:700;margin-left:6px;">↵ ENTER</span>':''}</div>
+                    <div style="color:rgba(255,255,255,0.5);font-size:12px;margin-top:2px;">📅 ${window._fmtFechaLarga(a.date)} · ⏰ ${a.time || ''} ${a.motivo ? '· ' + a.motivo : ''}</div>
+                </div>
+                <span style="background:${isFuture?'rgba(16,185,129,0.15)':'rgba(148,163,184,0.12)'};color:${isFuture?'#34d399':'#cbd5e1'};border:1px solid ${isFuture?'rgba(16,185,129,0.3)':'rgba(148,163,184,0.3)'};padding:4px 10px;border-radius:6px;font-size:10px;font-weight:700;white-space:nowrap;">${isFuture?'PRÓXIMA':'PASADA'} ›</span>
+            </div>`;
+        }).join('');
+    };
+
+    window._agendaSearchEnter = function() {
+        const matches = window._agendaSearchMatches || [];
+        if (matches.length > 0) window._agendaSearchGoto(0);
+    };
+
+    window._agendaSearchGoto = function(idx) {
+        const matches = window._agendaSearchMatches || [];
+        const m = matches[idx];
+        if (!m || !m.date) return;
+        const box = document.getElementById('agenda-search-results');
+        if (box) { box.style.display = 'none'; }
+        // Navegar al día de esa cita
+        if (typeof window.renderDayDetail === 'function') {
+            window.renderDayDetail(m.date);
+        }
+    };
+
     window.renderDayDetail = async function(dateStr) {
         // Marcar PRIMERO el estado de vista: estamos en day-detail viendo este día.
         // El sync en background usará estas banderas para decidir si re-renderizar.
@@ -1488,12 +1572,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if(!panel) return;
         
         panel.innerHTML = `
+            ${window._buildAgendaSearchBar()}
             <div class="calendar-header">
                 <div style="display:flex; align-items:center; gap: 15px;">
                     <button class="calendar-nav-btn" onclick="window.renderScheduler()" style="width: auto; padding: 0 15px;">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:5px;"><polyline points="15 18 9 12 15 6"></polyline></svg> Volver
                     </button>
-                    <h3 style="margin:0; font-size:20px; color:white;">Programación para el <span style="color:var(--accent);">${dateStr}</span></h3>
+                    <h3 style="margin:0; font-size:20px; color:white;">Programación para el <span style="color:var(--accent);">${window._fmtFechaLarga(dateStr)}</span></h3>
                 </div>
             </div>
             <div class="day-detail-view">
