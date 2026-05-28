@@ -1639,6 +1639,12 @@ document.addEventListener('DOMContentLoaded', () => {
     /* End of Scheduler logic */
 
 function renderSection(name, data) {
+        // 'reminders' es legacy — no se debe acceder ya. Si alguien aterriza
+        // ahí (por URL antigua, deep link), redirigimos a Consulta Médica.
+        if (name === 'reminders') {
+            if (typeof loadSection === 'function') return loadSection('consultation');
+            return;
+        }
         if (userRole === 'medico' && !selectedPatientQSL && name !== 'settings' && name !== 'programmer' && name !== 'scheduler' && name !== 'configuration' && name !== 'finanzas') {
             if (name === 'consultation') {
                 window.renderDoctorHome('search');
@@ -8475,10 +8481,15 @@ function renderSection(name, data) {
         // 2) Sidebar items con data-section
         document.querySelectorAll('.sidebar li[data-section]').forEach(li => {
             const section = li.getAttribute('data-section');
+            // Secciones siempre ocultas (legacy o controladas por su propio script):
+            // - reminders: módulo legacy, reemplazado por Configuración → Recordatorios
+            // - programmer / admin_general: controlados por rol específico
+            if (section === 'reminders' || section === 'programmer' || section === 'admin_general') {
+                li.style.display = 'none';
+                return;
+            }
             // Médicos: todo visible
             if (!isOf) {
-                // Excepción: programmer y admin_general siguen ocultos por defecto
-                if (section === 'programmer' || section === 'admin_general') return;
                 li.style.display = '';
                 return;
             }
