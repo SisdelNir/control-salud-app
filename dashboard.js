@@ -764,6 +764,16 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     window.deleteAppointment = function(qsl, dateStr, timeStr) {
+        // Bloqueo por privilegio
+        if (typeof window.hasPriv === 'function' && !window.hasPriv('cancelar_citas')) {
+            if (typeof window.showElegantAlert === 'function') {
+                window.showElegantAlert('🔒 Sin permiso',
+                    'No tienes el privilegio "Cancelar / anular citas". Solicítalo al médico desde Configuración → Privilegios.');
+            } else {
+                alert('Sin permiso para cancelar citas.');
+            }
+            return;
+        }
         if(confirm(`¿Estás seguro de que deseas cancelar la cita programada para el ${dateStr} a las ${timeStr}?`)) {
             let appointments = window.getAppointments();
             appointments = appointments.filter(a => !(a.qsl === qsl && a.date === dateStr && a.time === timeStr));
@@ -990,7 +1000,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         <div style="display:flex;gap:10px;align-items:center;">
                             <button class="calendar-nav-btn" title="Hoy" onclick="window.currentCalDate = new Date(); window.renderScheduler();" style="width: auto; padding: 0 15px; font-weight:bold; font-size:14px;">HOY</button>
                             <button id="btn-force-sync" title="Sube las citas locales pendientes a la nube y trae las que falten" onclick="window.handleForceSyncClick()" style="background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.4);color:#34d399;padding:0 15px;height:38px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px;">🔄 Sincronizar</button>
-                            <button onclick="window.showPatientList()" style="background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.35);color:#60a5fa;padding:0 15px;height:38px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px;">👥 Lista de Pacientes</button>
+                            ${(typeof window.hasPriv !== 'function' || window.hasPriv('ver_pacientes')) ? `<button onclick="window.showPatientList()" style="background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.35);color:#60a5fa;padding:0 15px;height:38px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px;">👥 Lista de Pacientes</button>` : ''}
                         </div>
                     <div class="calendar-grid" style="margin-bottom: 10px;">
                         ${dayHeaders}
@@ -1450,6 +1460,16 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     window.promptSchedulePatient = function(dateStr, timeStr) {
+        // Bloqueo por privilegio: solo quien pueda gestionar_citas puede agendar
+        if (typeof window.hasPriv === 'function' && !window.hasPriv('gestionar_citas')) {
+            if (typeof window.showElegantAlert === 'function') {
+                window.showElegantAlert('🔒 Sin permiso',
+                    'No tienes el privilegio "Crear / editar citas". Solicítalo al médico desde Configuración → Privilegios.');
+            } else {
+                alert('Sin permiso para crear citas.');
+            }
+            return;
+        }
         // Bloqueo defensivo: no permitir agendar en una hora que ya pasó
         if (window.isPastSlot && window.isPastSlot(dateStr, timeStr)) {
             const msg = `No es posible agendar una cita para el ${dateStr} a las ${timeStr} porque esa hora ya pasó. Seleccione una fecha y hora futura.`;
@@ -1630,6 +1650,16 @@ function renderSection(name, data) {
 
     // --- LISTA DE PACIENTES ---
     window.showPatientList = function() {
+        // Bloqueo por privilegio (defensa en profundidad)
+        if (typeof window.hasPriv === 'function' && !window.hasPriv('ver_pacientes')) {
+            if (typeof window.showElegantAlert === 'function') {
+                window.showElegantAlert('🔒 Acceso denegado',
+                    'No tienes el privilegio "Ver pacientes". Solicítalo al médico desde Configuración → Privilegios.');
+            } else {
+                alert('Acceso denegado: requiere privilegio "Ver pacientes".');
+            }
+            return;
+        }
         const key = getDocPatientsKey();
 
         // Construye SIEMPRE el array de pacientes desde el localStorage actual,
@@ -1939,9 +1969,9 @@ function renderSection(name, data) {
                                     </th>
                                     <th style="padding:0;"></th>
                                     <th style="padding:5px 14px 2px;text-align:right;border-bottom:none;">
-                                        <button onclick="window.showAppointmentHistory()" title="Historial completo de citas atendidas y no atendidas" style="background:linear-gradient(135deg,rgba(168,85,247,0.2),rgba(168,85,247,0.05));border:1px solid rgba(168,85,247,0.5);color:#c4b5fd;padding:6px 14px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;letter-spacing:0.5px;">
+                                        ${(typeof window.hasPriv !== 'function' || window.hasPriv('ver_historial_citas')) ? `<button onclick="window.showAppointmentHistory()" title="Historial completo de citas atendidas y no atendidas" style="background:linear-gradient(135deg,rgba(168,85,247,0.2),rgba(168,85,247,0.05));border:1px solid rgba(168,85,247,0.5);color:#c4b5fd;padding:6px 14px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:6px;letter-spacing:0.5px;">
                                             📋 HISTORIAL
-                                        </button>
+                                        </button>` : ''}
                                     </th>
                                 </tr>
                                 <tr>
@@ -6515,50 +6545,57 @@ function renderSection(name, data) {
         pacientes: {
             label: '👤 Pacientes', color: '#22d3ee',
             items: [
-                { id: 'ver_pacientes', label: 'Ver pacientes', desc: 'Buscar y acceder a expedientes de pacientes' },
-                { id: 'editar_pacientes', label: 'Editar pacientes', desc: 'Modificar datos clínicos del expediente', sensitive: true },
-                { id: 'eliminar_registros', label: 'Eliminar registros', desc: 'Borrar datos del historial médico', sensitive: true },
+                { id: 'ver_pacientes',     label: 'Ver expediente / Lista de pacientes', desc: 'Acceder al menú "Datos del Paciente" + botón "Lista de Pacientes" en agenda' },
+                { id: 'crear_pacientes',   label: 'Crear pacientes nuevos',              desc: 'Registrar nuevos expedientes clínicos' },
+                { id: 'editar_pacientes',  label: 'Editar datos del paciente',           desc: 'Modificar nombre, DPI, teléfono, dirección, historial', sensitive: true },
+                { id: 'eliminar_registros',label: 'Eliminar pacientes/registros',        desc: 'Borrar expedientes o registros del historial', sensitive: true },
             ]
         },
         consultas: {
             label: '🩺 Consultas Médicas', color: '#34d399',
             items: [
-                { id: 'realizar_consulta', label: 'Registrar consulta', desc: 'Crear nuevas consultas y evoluciones' },
-                { id: 'ver_historial', label: 'Ver historial', desc: 'Acceder al historial completo de consultas' },
-                { id: 'gestionar_recetas', label: 'Gestionar recetas', desc: 'Crear y administrar recetas médicas' },
-                { id: 'gestionar_laboratorios', label: 'Laboratorios', desc: 'Adjuntar y ver resultados de laboratorio' },
+                { id: 'realizar_consulta',     label: 'Registrar consulta',             desc: 'Iniciar y guardar nuevas consultas clínicas' },
+                { id: 'ver_historial',         label: 'Ver historial de consultas',     desc: 'Acceder a las consultas previas del paciente' },
+                { id: 'gestionar_recetas',     label: 'Crear / editar recetas',         desc: 'Generar y modificar recetas médicas' },
+                { id: 'gestionar_laboratorios',label: 'Gestionar laboratorios',         desc: 'Adjuntar y eliminar resultados de laboratorio' },
+                { id: 'imprimir_documentos',   label: 'Imprimir recetas / constancias', desc: 'Generar PDFs e imprimir documentos clínicos' },
             ]
         },
         agenda: {
             label: '📅 Agenda y Citas', color: '#60a5fa',
             items: [
-                { id: 'gestionar_citas', label: 'Gestionar citas', desc: 'Crear, editar y cancelar citas' },
-                { id: 'ver_agenda', label: 'Ver agenda', desc: 'Ver el calendario de citas del médico' },
+                { id: 'ver_agenda',        label: 'Ver calendario / Agendar consultas', desc: 'Acceder al menú "Agendar Consultas" y ver el calendario' },
+                { id: 'gestionar_citas',   label: 'Crear / editar citas',                desc: 'Reservar horarios y modificar citas existentes' },
+                { id: 'cancelar_citas',    label: 'Cancelar / anular citas',             desc: 'Marcar citas como canceladas (botón ANULAR)', sensitive: true },
+                { id: 'ver_historial_citas', label: 'Ver historial de citas',            desc: 'Acceder al botón HISTORIAL con citas pasadas' },
             ]
         },
         mensajeria: {
             label: '📨 Mensajería', color: '#f59e0b',
             items: [
-                { id: 'enviar_alertas', label: 'Enviar alertas', desc: 'Enviar notificaciones individuales a pacientes' },
-                { id: 'mensajeria_masiva', label: 'Mensajería masiva', desc: 'Enviar mensajes a grupos de pacientes', sensitive: true },
+                { id: 'enviar_alertas',     label: 'Enviar alertas individuales', desc: 'Notificaciones a un paciente a la vez' },
+                { id: 'mensajeria_masiva',  label: 'Mensajería masiva',           desc: 'Enviar mensajes a grupos de pacientes', sensitive: true },
+                { id: 'ver_historial_mensajes', label: 'Ver historial de mensajes', desc: 'Ver mensajes enviados anteriormente' },
             ]
         },
         sistema: {
             label: '⚙️ Sistema', color: '#c084fc',
             items: [
-                { id: 'gestionar_medicos', label: 'Gestionar médicos', desc: 'Agregar y eliminar cuentas de médicos', sensitive: true },
-                { id: 'ver_estadisticas', label: 'Ver estadísticas', desc: 'Ver reportes y estadísticas del centro' },
+                { id: 'gestionar_medicos',   label: 'Gestionar médicos',          desc: 'Agregar y eliminar cuentas de médicos', sensitive: true },
+                { id: 'ver_estadisticas',    label: 'Ver estadísticas / reportes', desc: 'Reportes y métricas del centro médico' },
+                { id: 'editar_apariencia',   label: 'Cambiar tema visual',         desc: 'Modificar el aspecto/tema del sistema' },
+                { id: 'editar_recordatorios',label: 'Editar plantillas de recordatorios', desc: 'Cambiar configuración de mensajes de aviso' },
             ]
         },
         finanzas: {
             label: '💰 Finanzas', color: '#10b981',
             items: [
-                { id: 'ver_finanzas', label: 'Ver finanzas', desc: 'Acceder al módulo financiero (solo lectura)' },
-                { id: 'registrar_cobros', label: 'Registrar cobros', desc: 'Cobrar pagos de pacientes (ingresos)' },
-                { id: 'gestionar_deudas', label: 'Gestionar cuentas por cobrar', desc: 'Crear y liquidar deudas de pacientes' },
-                { id: 'registrar_egresos', label: 'Registrar egresos', desc: 'Pagos a proveedores y gastos operativos', sensitive: true },
-                { id: 'eliminar_transacciones', label: 'Eliminar transacciones', desc: 'Borrar registros financieros', sensitive: true },
-                { id: 'exportar_estados', label: 'Exportar estados de cuenta', desc: 'Generar PDFs de estado de cuenta' },
+                { id: 'ver_finanzas',          label: 'Ver finanzas (lectura)',     desc: 'Acceder al menú "Gestión Financiera" y ver resúmenes' },
+                { id: 'registrar_cobros',      label: 'Registrar cobros',           desc: 'Cobrar pagos de pacientes (ingresos)' },
+                { id: 'gestionar_deudas',      label: 'Gestionar cuentas por cobrar', desc: 'Crear cargos y liquidar deudas de pacientes' },
+                { id: 'registrar_egresos',     label: 'Registrar egresos',          desc: 'Pagos a proveedores y gastos operativos', sensitive: true },
+                { id: 'eliminar_transacciones',label: 'Eliminar transacciones',     desc: 'Borrar registros financieros', sensitive: true },
+                { id: 'exportar_estados',      label: 'Exportar estados de cuenta', desc: 'Generar PDFs de estado de cuenta' },
             ]
         }
     };
@@ -7940,11 +7977,11 @@ function renderSection(name, data) {
     // Mapa de sección → privilegio requerido para acceder. Si la sección
     // no está en el mapa, se trata como "solo médicos" (ofocina NO ve).
     const SECTION_PRIVILEGES = {
-        overview:      'ver_pacientes',
-        consultation:  'realizar_consulta',
-        scheduler:     'ver_agenda',
-        reminders:     'ver_agenda',
-        finanzas:      'ver_finanzas'
+        overview:      'ver_pacientes',     // Datos del Paciente
+        consultation:  'realizar_consulta', // Consulta Médica
+        scheduler:     'ver_agenda',        // Agendar Consultas
+        reminders:     'ver_agenda',        // Recordatorios
+        finanzas:      'ver_finanzas'       // Gestión Financiera
         // settings, configuration, programmer, admin_general → null (solo médicos/master)
     };
     // Secciones que SOLO médicos/master pueden ver, sin importar privilegios
