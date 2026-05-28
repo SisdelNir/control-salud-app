@@ -1559,52 +1559,109 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     window.scheduleSearchPatient = function(dateStr, timeStr) {
-        document.body.removeChild(document.getElementById('scheduler-modal'));
-        
+        const prevModal = document.getElementById('scheduler-modal');
+        if (prevModal) document.body.removeChild(prevModal);
+
         const key = getDocPatientsKey();
-        const patients = JSON.parse(localStorage.getItem(key) || '[]');
-        
-        let selectHtml = '<div style="max-height:300px; overflow-y:auto;text-align:left;">';
-        if(patients.length === 0) {
-            selectHtml += '<p style="color:white;">No hay pacientes registrados.</p>';
-        } else {
-            patients.forEach(qsl => {
-                const name = localStorage.getItem(`patient_name_${qsl}`) || 'Paciente';
-                const data = getPatientData(qsl);
-                selectHtml += `
-                    <div style="padding:15px; border-bottom:1px solid rgba(255,255,255,0.1); cursor:pointer; transition:background 0.2s;" 
-                         onmouseenter="this.style.background='rgba(34, 211, 238, 0.1)'" 
-                         onmouseleave="this.style.background='transparent'"
-                         onclick="window.commitSchedule('${qsl}', '${name}', '${dateStr}', '${timeStr}')">
-                        <strong style="color:white; font-size:16px;">${name}</strong><br>
-                        <span style="color:var(--text-muted); font-size:12px;">DPI: ${data.id_identificacion || 'N/A'} | Tel: ${data.telefono || 'N/A'}</span>
-                    </div>
-                `;
-            });
-        }
-        selectHtml += '</div>';
+        const qsls = JSON.parse(localStorage.getItem(key) || '[]');
+
+        // Construir índice completo en memoria: nombre + DPI + teléfono + qsl
+        const patients = qsls.map(q => {
+            const qsl = typeof q === 'string' ? q : (q.qsl || q.codigo || q.id || String(q));
+            const data = getPatientData(qsl);
+            const name = data.nombre_completo || localStorage.getItem(`patient_name_${qsl}`) || 'Paciente';
+            return {
+                qsl,
+                name,
+                telefono: data.telefono || '',
+                dpi: data.id_identificacion || data.dpi || '',
+                searchText: (name + ' ' + (data.telefono || '') + ' ' + (data.id_identificacion || '') + ' ' + (data.dpi || '') + ' ' + qsl).toLowerCase()
+            };
+        });
+
+        // Guardar globalmente para el filtro
+        window._schSearchPatients = patients;
+        window._schSearchDateStr = dateStr;
+        window._schSearchTimeStr = timeStr;
 
         const mainOverlay = document.createElement('div');
         mainOverlay.id = 'scheduler-search-modal';
-        mainOverlay.style.position = 'fixed';
-        mainOverlay.style.top = '0';
-        mainOverlay.style.left = '0';
-        mainOverlay.style.width = '100%';
-        mainOverlay.style.height = '100%';
-        mainOverlay.style.background = 'rgba(0,0,0,0.85)';
-        mainOverlay.style.display = 'flex';
-        mainOverlay.style.alignItems = 'center';
-        mainOverlay.style.justifyContent = 'center';
-        mainOverlay.style.zIndex = '99999';
+        mainOverlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;z-index:99999;padding:20px;backdrop-filter:blur(6px);';
 
         mainOverlay.innerHTML = `
-            <div class="widget-card animate-in" style="background: #0f172a; padding: 40px; border-radius: 24px; border: 2px solid rgba(16, 185, 129, 0.4); text-align: center; max-width: 500px; width:100%;">
-                <h3 style="color: white; font-size: 24px; margin-bottom: 20px;">Seleccione al Paciente</h3>
-                ${selectHtml}
-                <button onclick="document.body.removeChild(document.getElementById('scheduler-search-modal'))" style="margin-top:20px; background: none; border: none; font-size: 14px; text-decoration: underline; color: rgba(255,255,255,0.5); cursor: pointer;">Cancelar</button>
+            <div class="widget-card animate-in" style="background: #0f172a; padding: 28px; border-radius: 20px; border: 2px solid rgba(16, 185, 129, 0.4); max-width: 600px; width: 100%; max-height: 85vh; display: flex; flex-direction: column;">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:18px;">
+                    <div>
+                        <h3 style="color: white; font-size: 22px; margin: 0 0 4px;">🔍 Seleccione al Paciente</h3>
+                        <p style="color:rgba(255,255,255,0.55); font-size:13px; margin:0;">Cita para el <b style="color:#34d399;">${dateStr}</b> a las <b style="color:#34d399;">${timeStr}</b> · <b style="color:#60a5fa;">${patients.length} pacientes</b> en tu registro</p>
+                    </div>
+                    <button onclick="document.body.removeChild(document.getElementById('scheduler-search-modal'))" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:white;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;">✕</button>
+                </div>
+
+                <input type="text" id="sch-search-input" placeholder="Buscar por nombre, teléfono, DPI o código QSL..."
+                    oninput="window._schSearchFilter(this.value)"
+                    autocomplete="off" autocorrect="off" spellcheck="false" autofocus
+                    style="width:100%; background:rgba(0,0,0,0.4); border:1px solid rgba(255,255,255,0.15); color:white; padding:14px 16px; border-radius:12px; font-size:15px; margin-bottom:14px; box-sizing:border-box;">
+
+                <div id="sch-search-results" style="flex:1; overflow-y:auto; border-radius:12px; border:1px solid rgba(255,255,255,0.06);">
+                    <!-- filled by _schSearchFilter -->
+                </div>
+
+                <div style="margin-top:14px; display:flex; justify-content:space-between; align-items:center; font-size:12px; color:rgba(255,255,255,0.4);">
+                    <span id="sch-search-count">${patients.length} resultados</span>
+                    <button onclick="document.body.removeChild(document.getElementById('scheduler-search-modal'))" style="background:none;border:none;color:rgba(255,255,255,0.55);cursor:pointer;font-size:13px;text-decoration:underline;">Cancelar</button>
+                </div>
             </div>
         `;
         document.body.appendChild(mainOverlay);
+        // Render inicial con todos los pacientes
+        window._schSearchFilter('');
+    };
+
+    window._schSearchFilter = function(query) {
+        const patients = window._schSearchPatients || [];
+        const dateStr = window._schSearchDateStr;
+        const timeStr = window._schSearchTimeStr;
+        const q = (query || '').toLowerCase().trim();
+        const filtered = q ? patients.filter(p => p.searchText.includes(q)) : patients;
+
+        const container = document.getElementById('sch-search-results');
+        const count = document.getElementById('sch-search-count');
+        if (!container) return;
+
+        if (filtered.length === 0) {
+            container.innerHTML = `
+                <div style="padding:40px; text-align:center; color:rgba(255,255,255,0.4); font-size:14px;">
+                    ${patients.length === 0
+                        ? 'No hay pacientes registrados. Usa "Registrar Paciente Nuevo" para crear el primero.'
+                        : `No se encontraron pacientes que coincidan con "<b>${query}</b>".`}
+                </div>`;
+        } else {
+            container.innerHTML = filtered.map(p => {
+                const safeName = (p.name || '').replace(/'/g, "\\'");
+                return `
+                <div style="padding:14px 16px; border-bottom:1px solid rgba(255,255,255,0.05); cursor:pointer; transition:background 0.15s; display:flex; justify-content:space-between; align-items:center; gap:12px;"
+                     onmouseenter="this.style.background='rgba(16,185,129,0.1)'"
+                     onmouseleave="this.style.background='transparent'"
+                     onclick="window.commitSchedule('${p.qsl}', '${safeName}', '${dateStr}', '${timeStr}')">
+                    <div style="display:flex; align-items:center; gap:12px; flex:1; min-width:0;">
+                        <div style="width:38px; height:38px; border-radius:50%; background:linear-gradient(135deg,#1d4ed8,#60a5fa); display:flex; align-items:center; justify-content:center; font-weight:800; color:white; font-size:15px; flex-shrink:0;">
+                            ${(p.name || '?').charAt(0).toUpperCase()}
+                        </div>
+                        <div style="flex:1; min-width:0;">
+                            <div style="color:white; font-size:15px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${p.name}</div>
+                            <div style="color:rgba(255,255,255,0.55); font-size:12px; margin-top:2px;">
+                                ${p.telefono ? `📞 ${p.telefono}` : ''}
+                                ${p.dpi ? ` &nbsp;·&nbsp; 🪪 ${p.dpi}` : ''}
+                                <span style="background:rgba(34,211,238,0.1); color:#22d3ee; border:1px solid rgba(34,211,238,0.2); padding:1px 7px; border-radius:5px; font-size:10px; font-weight:700; margin-left:6px; letter-spacing:0.5px;">${p.qsl}</span>
+                            </div>
+                        </div>
+                    </div>
+                    <span style="background:rgba(16,185,129,0.15); color:#34d399; border:1px solid rgba(16,185,129,0.3); padding:5px 12px; border-radius:8px; font-size:11px; font-weight:700; flex-shrink:0;">SELECCIONAR ›</span>
+                </div>`;
+            }).join('');
+        }
+        if (count) count.textContent = `${filtered.length} resultado${filtered.length === 1 ? '' : 's'}`;
     };
 
     window.scheduleNewPatient = function(dateStr, timeStr) {
