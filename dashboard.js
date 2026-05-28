@@ -8097,7 +8097,7 @@ function renderSection(name, data) {
             const rangesHtml = (active ? ranges : [{ start: '', end: '' }]).map((r, i) => `
                 <div class="ar-range-row" data-day="${day}" data-idx="${i}" style="display:flex;gap:8px;align-items:center;margin-bottom:6px;">
                     <input type="time" class="ar-range-start" data-day="${day}" data-idx="${i}" value="${r.start || '08:00'}" style="background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.15);color:white;padding:6px 10px;border-radius:8px;font-size:13px;">
-                    <span style="color:rgba(255,255,255,0.45);font-size:12px;">a</span>
+                    <span style="color:rgba(255,255,255,0.7);font-size:24px;font-weight:700;">A</span>
                     <input type="time" class="ar-range-end" data-day="${day}" data-idx="${i}" value="${r.end || '17:00'}" style="background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.15);color:white;padding:6px 10px;border-radius:8px;font-size:13px;">
                     <button onclick="window._arRemoveRange('${day}', ${i})" style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);color:#f87171;padding:4px 8px;border-radius:6px;cursor:pointer;font-size:11px;">🗑</button>
                 </div>
@@ -8248,7 +8248,7 @@ function renderSection(name, data) {
         const html = `
             <div class="ar-range-row" data-day="${day}" data-idx="${idx}" style="display:flex;gap:8px;align-items:center;margin-bottom:6px;">
                 <input type="time" class="ar-range-start" data-day="${day}" data-idx="${idx}" value="08:00" style="background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.15);color:white;padding:6px 10px;border-radius:8px;font-size:13px;">
-                <span style="color:rgba(255,255,255,0.45);font-size:12px;">a</span>
+                <span style="color:rgba(255,255,255,0.7);font-size:24px;font-weight:700;">A</span>
                 <input type="time" class="ar-range-end" data-day="${day}" data-idx="${idx}" value="17:00" style="background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.15);color:white;padding:6px 10px;border-radius:8px;font-size:13px;">
                 <button onclick="window._arRemoveRange('${day}', ${idx})" style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);color:#f87171;padding:4px 8px;border-radius:6px;cursor:pointer;font-size:11px;">🗑</button>
             </div>`;
