@@ -8012,13 +8012,62 @@ function renderSection(name, data) {
     setTimeout(_applySidebarPrivileges, 200);
     setTimeout(_applySidebarPrivileges, 1500);
     setTimeout(_applySidebarPrivileges, 4000);
-    // Re-aplicar cada vez que cambian los privilegios remotamente
-    setInterval(() => {
-        if (document.visibilityState !== 'hidden') _applySidebarPrivileges();
-    }, 20000);
     window._applySidebarPrivileges = _applySidebarPrivileges;
     // Alias retro-compatible para no romper llamadas previas
     window._applyFinanzasSidebarVisibility = _applySidebarPrivileges;
+
+    // ---- Detección de cambios en privilegios y auto-redirect ----
+    // Si el médico activa/desactiva privilegios en su navegador, el polling
+    // de médicos (cada 15s) actualiza 'tabla_medicos'. Aquí monitoreamos
+    // ese cambio y re-evaluamos: ocultamos/mostramos items del sidebar y
+    // redirigimos si el usuario estaba en una pantalla bloqueada.
+    let _lastPrivilegesSignature = '';
+    function _privilegesSignature() {
+        if (qslCode === 'MED-MASTER') return 'master';
+        const docId = localStorage.getItem('current_doctor_id');
+        try {
+            const list = JSON.parse(localStorage.getItem('tabla_medicos') || '[]');
+            const me = list.find(m => m.id_medico === docId);
+            if (!me) return '';
+            return JSON.stringify(me.privileges || {});
+        } catch (e) { return ''; }
+    }
+    function _onPrivilegesPossiblyChanged() {
+        const sig = _privilegesSignature();
+        if (sig === _lastPrivilegesSignature) return;
+        _lastPrivilegesSignature = sig;
+        // 1) Reaplicar visibilidad del sidebar
+        _applySidebarPrivileges();
+        // 2) Si estamos en "Esperando privilegios" o "Acceso denegado",
+        //    redirigir a la primera sección permitida
+        if (qslCode === 'MED-MASTER' || !_isOficinaUser()) return;
+        const html = contentArea ? contentArea.innerHTML : '';
+        const stuck = /Esperando privilegios|Acceso denegado/.test(html);
+        if (!stuck) return;
+        const orderedSections = ['overview', 'consultation', 'scheduler', 'finanzas'];
+        const allowed = orderedSections.find(s => canAccessSection(s));
+        if (allowed && typeof loadSection === 'function') loadSection(allowed);
+    }
+
+    // Forzar sync inmediato de médicos al cargar (antes de esperar 15s)
+    (async function _forceInitialMedicosSync() {
+        try {
+            const r = await fetch('/api/medicos', { cache: 'no-store' });
+            if (r.ok) {
+                const j = await r.json();
+                if (j.success && Array.isArray(j.medicos)) {
+                    localStorage.setItem('tabla_medicos', JSON.stringify(j.medicos));
+                }
+            }
+        } catch (e) {}
+        _onPrivilegesPossiblyChanged();
+    })();
+
+    // Reaplicar cada 8 segundos: detecta cambios sin esperar el ciclo de 20s
+    setInterval(() => {
+        if (document.visibilityState === 'hidden') return;
+        _onPrivilegesPossiblyChanged();
+    }, 8000);
 
     // Bloquea acceso por URL/clic a secciones no permitidas.
     // Envolvemos renderSection para añadir el check antes de delegar al original.
