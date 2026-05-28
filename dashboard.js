@@ -1952,19 +1952,23 @@ function renderSection(name, data) {
             const rows = filtered.length > 0
                 ? filtered.map(p => {
                     const safeName = (p.name || p.qsl).replace(/'/g, "\\'");
+                    // Clic en cualquier celda del paciente → "Datos del Paciente" (form completo).
+                    // La columna "Última Receta" mantiene su acción específica de ver receta.
+                    // La columna "Acciones" tiene botones aparte (con stopPropagation).
                     return `
-                    <tr style="border-bottom:1px solid rgba(255,255,255,0.06); transition:background 0.15s;" onmouseover="this.style.background='rgba(59,130,246,0.08)'" onmouseout="this.style.background='transparent'">
-                        <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; color:white; font-weight:600; font-size:13px; cursor:pointer;">${p.name}</td>
-                        <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; color:rgba(255,255,255,0.6); font-size:13px; cursor:pointer;">${p.telefono}</td>
-                        <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; cursor:pointer;"><span style="background:rgba(34,211,238,0.1);color:#22d3ee;border:1px solid rgba(34,211,238,0.25);border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;">${p.qsl}</span></td>
-                        <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; text-align:center; font-size:15px; cursor:pointer;">${p.glucosa ? '🟢' : '⚫'}</td>
-                        <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; text-align:center; font-size:15px; cursor:pointer;">${p.presion ? '🟢' : '⚫'}</td>
-                        <td onclick="window.selectPatientAndGoToConsultation('${p.qsl}')" style="padding:11px 14px; cursor:pointer;">
+                    <tr style="border-bottom:1px solid rgba(255,255,255,0.06); transition:background 0.15s; cursor:pointer;" title="Ver datos del paciente"
+                        onmouseover="this.style.background='rgba(59,130,246,0.08)'" onmouseout="this.style.background='transparent'">
+                        <td onclick="window.selectPatientAndShowData('${p.qsl}')" style="padding:11px 14px; color:white; font-weight:600; font-size:13px;">${p.name}</td>
+                        <td onclick="window.selectPatientAndShowData('${p.qsl}')" style="padding:11px 14px; color:rgba(255,255,255,0.6); font-size:13px;">${p.telefono}</td>
+                        <td onclick="window.selectPatientAndShowData('${p.qsl}')" style="padding:11px 14px;"><span style="background:rgba(34,211,238,0.1);color:#22d3ee;border:1px solid rgba(34,211,238,0.25);border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;">${p.qsl}</span></td>
+                        <td onclick="window.selectPatientAndShowData('${p.qsl}')" style="padding:11px 14px; text-align:center; font-size:15px;">${p.glucosa ? '🟢' : '⚫'}</td>
+                        <td onclick="window.selectPatientAndShowData('${p.qsl}')" style="padding:11px 14px; text-align:center; font-size:15px;">${p.presion ? '🟢' : '⚫'}</td>
+                        <td onclick="window.selectPatientAndShowData('${p.qsl}')" style="padding:11px 14px;">
                             ${p.nextApptDays !== null
                                 ? `<span style="display:inline-flex;align-items:center;gap:6px;background:${p.nextApptDays <= 1 ? 'rgba(239,68,68,0.15)' : p.nextApptDays <= 7 ? 'rgba(251,191,36,0.15)' : 'rgba(16,185,129,0.1)'};border:1px solid ${p.nextApptDays <= 1 ? 'rgba(239,68,68,0.4)' : p.nextApptDays <= 7 ? 'rgba(251,191,36,0.4)' : 'rgba(16,185,129,0.3)'};color:${p.nextApptDays <= 1 ? '#f87171' : p.nextApptDays <= 7 ? '#fbbf24' : '#34d399'};border-radius:8px;padding:4px 10px;font-size:11px;font-weight:700;">📅 ${p.nextAppt} <span style="opacity:0.7;font-weight:400;">(${p.nextApptDays === 0 ? 'Hoy' : p.nextApptDays === 1 ? 'Mañana' : 'en ' + p.nextApptDays + 'd'})</span></span>`
                                 : '<span style="color:rgba(255,255,255,0.25);font-size:12px;">—</span>'}
                         </td>
-                        <td onclick="window.showPatientLastRx('${p.qsl}')" title="Ver receta en detalle" style="padding:11px 14px; color:#60a5fa; font-size:12px; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; text-decoration:underline;">${p.lastRx}</td>
+                        <td onclick="event.stopPropagation(); window.showPatientLastRx('${p.qsl}')" title="Ver receta en detalle" style="padding:11px 14px; color:#60a5fa; font-size:12px; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-decoration:underline;">${p.lastRx}</td>
                         <td style="padding:8px 10px; white-space:nowrap; text-align:right;">
                             <button title="Editar paciente" onclick="event.stopPropagation(); window.plEditPatient('${p.qsl}')"
                                 style="background:rgba(96,165,250,0.12); border:1px solid rgba(96,165,250,0.35); color:#60a5fa; padding:6px 10px; border-radius:8px; cursor:pointer; font-size:13px; font-weight:600; margin-right:4px;">
@@ -2011,7 +2015,7 @@ function renderSection(name, data) {
                     <!-- Legend -->
                     <div style="display:flex;gap:20px;margin-bottom:12px;flex-shrink:0;font-size:12px;color:rgba(255,255,255,0.4);align-items:center;">
                         <span>🟢 Reportando activo &nbsp;&nbsp; ⚫ No activo</span>
-                        <span style="margin-left:auto;color:rgba(255,255,255,0.25);">Clic en fila para abrir consulta</span>
+                        <span style="margin-left:auto;color:rgba(255,255,255,0.25);">Clic en fila para abrir Datos del Paciente</span>
                     </div>
 
                     <!-- Table -->
